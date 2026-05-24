@@ -3,6 +3,7 @@ import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
   type CommissionCategory,
+  type CommissionItem,
   type CreditRow,
   type DailyLedgerInput,
   type ExpenseItem,
@@ -79,6 +80,16 @@ function normalizeCommissionCategory(category: string): CommissionCategory | nul
   return COMMISSION_CATEGORIES.find((item) => item === category) ?? null;
 }
 
+const commissionOrder = new Map(COMMISSION_CATEGORIES.map((category, index) => [category, index]));
+
+function sortCommissions(rows: CommissionItem[]) {
+  return [...rows].sort(
+    (a, b) =>
+      (commissionOrder.get(a.category) ?? Number.MAX_SAFE_INTEGER) -
+      (commissionOrder.get(b.category) ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
 export function DailyEntryForm({
   dayNo,
   openingBalance,
@@ -103,17 +114,21 @@ export function DailyEntryForm({
   const [credits, setCredits] = useState<CreditRow[]>(
     initial?.credits.length ? initial.credits : [emptyCredit(dayNo, partyOptions[0])]
   );
-  const [commissions, setCommissions] = useState<Record<CommissionCategory, number>>(() => {
-    const values = COMMISSION_CATEGORIES.reduce(
-      (acc, category) => ({ ...acc, [category]: 0 }),
-      {} as Record<CommissionCategory, number>
-    );
-    for (const item of initial?.commissions ?? []) {
-      const category = normalizeCommissionCategory(item.category);
-      if (category) values[category] = item.amount;
-    }
-    return values;
+  const [commissions, setCommissions] = useState<CommissionItem[]>(() => {
+    const rows = (initial?.commissions ?? [])
+      .map((item) => {
+        const category = normalizeCommissionCategory(item.category);
+        return category ? { ...item, category } : null;
+      })
+      .filter((item): item is CommissionItem => Boolean(item))
+      .filter((item) => item.amount !== 0);
+    return sortCommissions(rows);
   });
+  const [commissionDraft, setCommissionDraft] = useState<Pick<CommissionItem, "category" | "amount">>({
+    category: COMMISSION_CATEGORIES[0],
+    amount: 0
+  });
+  const [commissionFilter, setCommissionFilter] = useState<"all" | CommissionCategory>("all");
   const [saving, setSaving] = useState(false);
 
   const payload = useMemo<DailyLedgerInput>(
@@ -129,11 +144,7 @@ export function DailyEntryForm({
       credits: credits.filter(
         (row) => row.partyName || row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0
       ),
-      commissions: COMMISSION_CATEGORIES.map((category, index) => ({
-        id: `${dayNo}-commission-${index}`,
-        category,
-        amount: commissions[category] ?? 0
-      })).filter((item) => item.amount !== 0)
+      commissions: sortCommissions(commissions.filter((item) => item.amount !== 0))
     }),
     [commissions, credits, dateLabel, dayNo, expenses, notes, ownerBalances]
   );
@@ -180,6 +191,29 @@ export function DailyEntryForm({
     );
   }
 
+  const visibleCommissions = sortCommissions(
+    commissions.filter((item) => item.amount !== 0 && (commissionFilter === "all" || item.category === commissionFilter))
+  );
+
+  function updateCommission(index: number, patch: Partial<CommissionItem>) {
+    setCommissions((rows) => sortCommissions(rows.map((row, i) => (i === index ? { ...row, ...patch } : row))));
+  }
+
+  function addCommission() {
+    if (commissionDraft.amount === 0) return;
+    setCommissions((rows) =>
+      sortCommissions([
+        ...rows,
+        {
+          id: `${dayNo}-commission-${crypto.randomUUID()}`,
+          category: commissionDraft.category,
+          amount: commissionDraft.amount
+        }
+      ])
+    );
+    setCommissionDraft((draft) => ({ ...draft, amount: 0 }));
+  }
+
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
       <div className="space-y-5">
@@ -209,20 +243,70 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h3>Commission</h3>
-              <p>Fixed order entries</p>
+              <p>Add amount entries, then review them in fixed order</p>
             </div>
           </div>
-          <div className="grid compact">
-            {COMMISSION_CATEGORIES.map((category) => (
-              <label key={category}>
-                {category}
-                {inputNumber(
-                  commissions[category] ?? 0,
-                  (amount) => setCommissions((prev) => ({ ...prev, [category]: amount })),
-                  disabled
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
+            <label>
+              Category
+              <select disabled={disabled} value={commissionDraft.category} onChange={(event) => setCommissionDraft((draft) => ({ ...draft, category: event.target.value as CommissionCategory }))}>
+                {COMMISSION_CATEGORIES.map((category) => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Amount
+              {inputNumber(commissionDraft.amount, (amount) => setCommissionDraft((draft) => ({ ...draft, amount })), disabled)}
+            </label>
+            <button className="btn-primary self-end" disabled={disabled || commissionDraft.amount === 0} onClick={addCommission}>
+              Add Entry
+            </button>
+          </div>
+          <div className="mb-4 max-w-xs">
+            <label>
+              Filter
+              <select value={commissionFilter} onChange={(event) => setCommissionFilter(event.target.value as "all" | CommissionCategory)}>
+                <option value="all">All non-zero</option>
+                {COMMISSION_CATEGORIES.map((category) => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Order</th>
+                  <th>Category</th>
+                  <th>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleCommissions.map((item) => {
+                  const index = commissions.findIndex((row) => row.id === item.id);
+                  return (
+                    <tr key={item.id}>
+                      <td>{(commissionOrder.get(item.category) ?? 0) + 1}</td>
+                      <td>
+                        <select value={item.category} disabled={disabled} onChange={(event) => updateCommission(index, { category: event.target.value as CommissionCategory })}>
+                          {COMMISSION_CATEGORIES.map((category) => (
+                            <option key={category} value={category}>{category}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{inputNumber(item.amount, (amount) => updateCommission(index, { amount }), disabled)}</td>
+                    </tr>
+                  );
+                })}
+                {visibleCommissions.length === 0 && (
+                  <tr>
+                    <td colSpan={3}>No commission entries match this filter.</td>
+                  </tr>
                 )}
-              </label>
-            ))}
+              </tbody>
+            </table>
           </div>
         </section>
 
