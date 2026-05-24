@@ -193,9 +193,9 @@ export function HomeDashboard({ month }: Props) {
           tone="rose"
         />
         <MetricCard
-          label="Final Return"
+          label="Final Balance"
           value={money(month.homeSummary.monthlyReturnBalance)}
-          helper={`${negativeReturnDays.length} negative return periods`}
+          helper={`${negativeReturnDays.length} negative balance periods`}
           icon={WalletCards}
           tone={month.homeSummary.monthlyReturnBalance < 0 ? "rose" : "blue"}
         />
@@ -213,7 +213,7 @@ export function HomeDashboard({ month }: Props) {
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold text-white">Daily Flow</h3>
-              <p className="text-sm text-slate-400">Issue, expenses, and return balance by period</p>
+              <p className="text-sm text-slate-400">Issue, expenses, and balance by period</p>
             </div>
             <ArrowDownRight className="h-5 w-5 text-slate-500" />
           </div>
@@ -313,7 +313,7 @@ export function HomeDashboard({ month }: Props) {
             <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
               <AlertTriangle className="h-5 w-5 text-amber-300" />
               <p className="mt-3 text-2xl font-semibold text-white">{negativeReturnDays.length}</p>
-              <p className="text-sm text-slate-400">Negative return periods</p>
+              <p className="text-sm text-slate-400">Negative balance periods</p>
               <p className="mt-2 text-xs text-slate-500">
                 {negativeReturnDays.map((day) => day.label ?? day.dayNo).slice(0, 8).join(", ") || "None"}
               </p>

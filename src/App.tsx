@@ -459,7 +459,7 @@ function RecordsView({
             />
             <RecordTable
               title="Month Day Records"
-              headers={["Period", "Opening", "Issue", "Expense", "Return", "Credit"]}
+              headers={["Period", "Opening", "Issue", "Expense", "Balance", "Credit"]}
               rows={monthRows.map((row) => [
                 row.label ?? `Day ${row.dayNo}`,
                 currency(row.openingBalance),
@@ -488,7 +488,7 @@ function RecordsView({
               ["Opening", dayComputed.openingBalance],
               ["Commission", dayComputed.commissionTotal],
               ["Expense", dayComputed.expenseTotal],
-              ["Return", dayComputed.returnBalance],
+              ["Balance", dayComputed.returnBalance],
               ["Credit", dayComputed.creditTotals.balance]
             ].map(([label, value]) => (
               <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4" key={label}>

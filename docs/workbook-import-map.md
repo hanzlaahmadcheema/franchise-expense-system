@@ -56,7 +56,7 @@ Applies to sheets `1` through `31` and `FINAL`. `FINAL` is stored as day `32`.
 | Expense total | C30 | Validation against calculated expense total |
 | Commission rows | E3:F14 | `commissions[]` |
 | Commission total | F15 | Validation against calculated commission total |
-| Balance row | E18:I18 | Opening, issue, total, expense, return balances |
+| Balance row | E18:I18 | Opening, issue, total, expense, balance |
 | Owner/cash rows | H3:I14 | `ownerBalances[]` |
 | Owner/cash total | I15 | Validation reference |
 | Credit headers | E21:I21 | Party, opening, loan/today, receive, balance |

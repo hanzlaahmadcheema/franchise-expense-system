@@ -246,7 +246,7 @@ Balance behavior:
 - New month opening balance is read from day `32` of the previous month when available.
 - If previous month day `32` does not exist, opening balance defaults to `0`.
 - Day `1` starts from the resolved month opening balance.
-- Day `2` and onward use the previous day return balance as the next opening value.
+- Day `2` and onward use the previous day balance as the next opening value.
 - Credit-party balances carry by party ID.
 - Autosaving a day recalculates the month dashboard.
 - Automated formula fields are read-only in the UI for owner and admin.
@@ -276,7 +276,7 @@ The dashboard is the main operating view. It shows:
 - Commission breakdown chart
 - Operating signals
 - Missing days
-- Negative return periods
+- Negative balance periods
 - Daily ledger table
 - Credit party aging table
 

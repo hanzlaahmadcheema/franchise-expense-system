@@ -11,11 +11,11 @@ export function exportMonthToExcel(month: MonthComputed) {
     ["Opening Balance", month.openingBalance],
     ["Monthly Issue Total", month.homeSummary.monthlyIssueTotal],
     ["Monthly Expense Total", month.homeSummary.monthlyExpenseTotal],
-    ["Final Return Balance", month.homeSummary.monthlyReturnBalance],
+    ["Final Balance", month.homeSummary.monthlyReturnBalance],
     ["Owner Balance Total", month.homeSummary.ownerBalanceTotal],
     ["Credit Balance Total", month.homeSummary.creditBalanceTotal],
     [],
-    ["Day", "Date", "Opening", "Issue", "Total", "Expense", "Return", "Credit Balance"],
+    ["Day", "Date", "Opening", "Issue", "Total", "Expense", "Balance", "Credit Balance"],
     ...month.homeSummary.dayRows.map((row) => [
       row.dayNo,
       row.date ?? "",
