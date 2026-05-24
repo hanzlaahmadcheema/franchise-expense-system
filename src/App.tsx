@@ -429,8 +429,11 @@ function RecordsView({
             />
             <RecordTable
               title="Franchise Owner"
-              headers={["Total Balance"]}
-              rows={[[currency(computed.homeSummary.ownerBalanceTotal)]]}
+              headers={["Period", "Total Balance"]}
+              rows={computed.days.map((day) => [
+                day.label ?? `Day ${day.dayNo}`,
+                currency(day.ownerBalanceTotal)
+              ])}
             />
           </section>
         </>
@@ -491,12 +494,15 @@ function RecordsView({
             <RecordTable
               title="Franchise Owner"
               headers={["Opening", "Description", "Amount", "Balance"]}
-              rows={dayComputed.ownerBalances.map((row) => [
-                currency(row.opening ?? 0),
-                row.description ?? row.label ?? "-",
-                currency(row.amount),
-                currency(row.balance ?? 0)
-              ])}
+              rows={[
+                ...dayComputed.ownerBalances.map((row) => [
+                  currency(row.opening ?? 0),
+                  row.description ?? row.label ?? "-",
+                  currency(row.amount),
+                  currency(row.balance ?? 0)
+                ]),
+                ["-", "Total", "-", currency(dayComputed.ownerBalanceTotal)]
+              ]}
             />
           </section>
         </>
