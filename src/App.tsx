@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
   CalendarDays,
+  CircleCheck,
   Cloud,
   FileDown,
   FileSpreadsheet,
@@ -393,7 +394,7 @@ function App() {
       setMonthStatusState(existing.status);
       setDays(loadedDays);
       setComputed(computeMonth(loadedDays, existing.openingBalance, existing.id));
-      setStatus(`Loaded ${existing.id} from Firestore.`);
+      setStatus("");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not load Firestore month.");
     } finally {
@@ -651,7 +652,10 @@ function App() {
           <header className="mb-5 flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-sm font-semibold uppercase text-emerald-300">{formatMonth(monthId)}</p>
-              <h2 className="mt-1 text-2xl font-semibold">Operating Dashboard</h2>
+              <h2 className="mt-1 flex items-center gap-2 text-2xl font-semibold">
+                Operating Dashboard
+                <CircleCheck className="h-6 w-6 text-emerald-400" aria-hidden="true" />
+              </h2>
               <p className="mt-2 text-sm text-slate-400">{dayCaption} · {monthStatus} · {role ?? "connecting"}</p>
               <p className="mt-1 text-sm text-slate-500">{liveClock}</p>
             </div>
