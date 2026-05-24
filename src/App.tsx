@@ -139,11 +139,6 @@ function ordinal(value: number) {
   return `${value}${suffix}`;
 }
 
-function selectedDateValue(monthId: string, dayNo: number) {
-  if (dayNo === 32) return "";
-  return `${monthId}-${pad2(dayNo)}`;
-}
-
 function dateParts(monthId: string, dayNo: number) {
   if (dayNo === 32) return {};
   const [yearText, monthText] = monthId.split("-");
@@ -975,7 +970,6 @@ function App() {
   const canUseImportBackup = roleCan(role, "importBackup");
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
-  const calendarValue = selectedDateValue(monthId, selectedDay);
   const selectedDateParts = dateParts(monthId, selectedDay);
   const dayCaption = selectedDay === 32 ? `FINAL · ${formatMonth(monthId)}` : `${ordinal(selectedDay)} day · ${dateLabel}`;
   const shellTone =
@@ -1004,13 +998,6 @@ function App() {
     await updateUserProfile(uid, updates);
     setUsers(await listUsers());
     setStatus("User access updated.");
-  }
-
-  function selectCalendarDate(value: string) {
-    if (!value) return;
-    const [yearText, monthText, dayText] = value.split("-");
-    setMonthId(`${yearText}-${monthText}`);
-    setSelectedDay(Number(dayText));
   }
 
   return (
@@ -1064,16 +1051,7 @@ function App() {
             </div>
           </header>
 
-          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_1fr_auto_auto_auto] md:items-end">
-            <label>
-              Calendar date
-              <input
-                type="date"
-                value={calendarValue}
-                disabled={!canUseOwnerControls || selectedDay === 32}
-                onChange={(event) => selectCalendarDate(event.target.value)}
-              />
-            </label>
+          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_auto_auto_auto] md:items-end">
             <label>
               Month
               <input value={monthId} disabled={!canUseOwnerControls} onChange={(event) => setMonthId(event.target.value)} />
@@ -1168,27 +1146,16 @@ function App() {
               {expenseSection === "daily-entry" && (
                 <>
                   <section className="mb-4 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr] md:items-end">
-                      <label>
-                        Calendar date
-                        <input
-                          type="date"
-                          value={calendarValue}
-                          disabled={!canSelectDailyDate || selectedDay === 32}
-                          onChange={(event) => selectCalendarDate(event.target.value)}
-                        />
-                      </label>
-                      <label>
-                        Day / Period · {formatMonth(monthId)}
-                        <select value={selectedDay} disabled={!canSelectDailyDate} onChange={(event) => setSelectedDay(Number(event.target.value))}>
-                          {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                            <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
-                          ))}
-                          <option value={32}>FINAL</option>
-                        </select>
-                      </label>
-                    </div>
-                    <p className="mt-3 text-sm text-slate-400">Live date: {liveClock}</p>
+                    <label>
+                      Day / Period · {formatMonth(monthId)}
+                      <select value={selectedDay} disabled={!canSelectDailyDate} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+                        {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                          <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
+                        ))}
+                        <option value={32}>FINAL</option>
+                      </select>
+                    </label>
+                    <p className="mt-3 text-sm text-slate-400">Live: {liveClock}</p>
                   </section>
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
@@ -1198,7 +1165,6 @@ function App() {
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
                     dateLabel={dateLabel}
-                    liveClock={liveClock}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
                     creditParties={creditParties}

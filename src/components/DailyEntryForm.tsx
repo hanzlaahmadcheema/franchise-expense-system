@@ -19,7 +19,6 @@ type Props = {
   entryDay?: number;
   openingBalance: number;
   dateLabel: string;
-  liveClock: string;
   expenseCategories: CatalogItem[];
   commissionCategories: CatalogItem[];
   creditParties: CatalogItem[];
@@ -145,7 +144,6 @@ export function DailyEntryForm({
   entryDay,
   openingBalance,
   dateLabel,
-  liveClock,
   expenseCategories,
   commissionCategories,
   creditParties,
@@ -450,7 +448,7 @@ export function DailyEntryForm({
             <div>
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
               <p className="flex flex-wrap items-center gap-1.5">
-                <span>{dateLabel} · {liveClock} ·</span>
+                <span>{dateLabel} ·</span>
                 {autoSaveState === "saving" && <LoadingIcon label="Autosaving" />}
                 <span>{locked && disabled ? "closed" : autoSaveState === "saving" ? "autosaving" : autoSaveState === "error" ? "autosave failed" : "autosaved"}</span>
               </p>
