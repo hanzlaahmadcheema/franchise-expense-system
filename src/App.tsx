@@ -120,6 +120,16 @@ function selectedDateValue(monthId: string, dayNo: number) {
   return `${monthId}-${pad2(dayNo)}`;
 }
 
+function dateParts(monthId: string, dayNo: number) {
+  if (dayNo === 32) return {};
+  const [yearText, monthText] = monthId.split("-");
+  return {
+    entryYear: Number(yearText),
+    entryMonth: Number(monthText),
+    entryDay: dayNo
+  };
+}
+
 function dateLabelFor(monthId: string, dayNo: number) {
   if (dayNo === 32) return `FINAL - ${formatMonth(monthId)}`;
   const [yearText, monthText] = monthId.split("-");
@@ -605,14 +615,18 @@ function App() {
   const isClosed = monthStatus === "closed";
   const selectedDayLocked = Boolean(selectedDayInput.lockedAt);
   const canEditDaily = roleCan(role, "daily") && !isClosed;
-  const canEditSelectedDay = canEditDaily && (!selectedDayLocked || role === "owner");
-  const canCloseSelectedDay = canEditDaily && !selectedDayLocked;
+  const liveDate = currentDateState(now);
+  const isSelectedLiveDay = monthId === liveDate.monthId && selectedDay === liveDate.dayNo;
+  const canEditSelectedDay =
+    canEditDaily && (role === "owner" || (role === "admin" && isSelectedLiveDay && !selectedDayLocked));
+  const canCloseSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || isSelectedLiveDay);
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const calendarValue = selectedDateValue(monthId, selectedDay);
+  const selectedDateParts = dateParts(monthId, selectedDay);
   const dayCaption = selectedDay === 32 ? `FINAL · ${formatMonth(monthId)}` : `${ordinal(selectedDay)} day · ${dateLabel}`;
   const shellTone =
     theme === "dark"
@@ -740,6 +754,9 @@ function App() {
 
           {status && <p className="status">{status}</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
+          {role === "admin" && !isSelectedLiveDay && (
+            <p className="warning">Previous dates and months are view-only for admin users. Owner access can edit records.</p>
+          )}
           {selectedDayLocked && (
             <p className="warning">
               Day {selectedDay} is closed. Admin users can view it only; owner access can still edit.
@@ -797,6 +814,9 @@ function App() {
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
                     dayNo={selectedDay}
+                    entryYear={selectedDateParts.entryYear}
+                    entryMonth={selectedDateParts.entryMonth}
+                    entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
                     dateLabel={dateLabel}
                     liveClock={liveClock}

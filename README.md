@@ -153,7 +153,7 @@ Global sidebar:
 Roles:
 
 - `owner`: full access, including users, imports, backups, month close/reopen, and deletes allowed by rules.
-- `admin`: daily entry and catalog management only.
+- `admin`: current-day entry and catalog management only; previous dates/months are view-only.
 - `viewer`: read-only dashboard/report access.
 
 The theme toggle in the sidebar switches between light and dark mode and stores the preference in the browser.
@@ -247,7 +247,7 @@ Balance behavior:
 Closed day behavior:
 
 - Closing a day locks that day record.
-- Admin users can view closed previous days but cannot edit them.
+- Admin users can view previous dates/months and closed days but cannot edit them.
 - Owner users can still edit closed days when correction access is required.
 
 Closed month behavior:

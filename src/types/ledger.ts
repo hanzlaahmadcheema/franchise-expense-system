@@ -66,6 +66,9 @@ export type DailyLedgerInput = {
   date?: string;
   label?: string;
   notes?: string;
+  entryYear?: number;
+  entryMonth?: number;
+  entryDay?: number;
   lockedAt?: number;
   lockedBy?: string;
   lockedByRole?: UserRole;

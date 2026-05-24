@@ -36,6 +36,24 @@ service cloud.firestore {
         get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
     }
 
+    function canOwnerEditDaily(monthId) {
+      return isOwner() &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
+    }
+
+    function isLiveAdminDayData(data) {
+      return data.entryYear == request.time.year() &&
+        data.entryMonth == request.time.month() &&
+        data.entryDay == request.time.day() &&
+        data.dayNo == request.time.day();
+    }
+
+    function canAdminEditLiveDay(monthId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+        isLiveAdminDayData(request.resource.data);
+    }
+
     function isUnlockedDay() {
       return !("lockedAt" in resource.data) || resource.data.lockedAt == null;
     }
@@ -44,6 +62,14 @@ service cloud.firestore {
       return !exists(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)) ||
         !("lockedAt" in get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data) ||
         get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.lockedAt == null;
+    }
+
+    function parentDayIsLiveAdminDay(monthId, dayId) {
+      return exists(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)) &&
+        get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.entryYear == request.time.year() &&
+        get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.entryMonth == request.time.month() &&
+        get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.entryDay == request.time.day() &&
+        get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.dayNo == request.time.day();
     }
 
     match /users/{uid} {
@@ -72,14 +98,18 @@ service cloud.firestore {
 
       match /days/{dayId} {
         allow read: if isActiveUser();
-        allow create: if canEditDaily(monthId);
-        allow update: if canEditDaily(monthId) && (isOwner() || isUnlockedDay());
+        allow create: if canOwnerEditDaily(monthId) || canAdminEditLiveDay(monthId);
+        allow update: if canOwnerEditDaily(monthId) || (canAdminEditLiveDay(monthId) && isUnlockedDay());
         allow delete: if isOwner();
       }
 
       match /days/{dayId}/{subCollection=**}/{docId} {
         allow read: if isActiveUser();
-        allow create, update: if canEditDaily(monthId) && (isOwner() || parentDayIsUnlocked(monthId, dayId));
+        allow create, update: if canOwnerEditDaily(monthId) ||
+          (isAdmin() &&
+            get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+            parentDayIsLiveAdminDay(monthId, dayId) &&
+            parentDayIsUnlocked(monthId, dayId));
         allow delete: if isOwner();
       }
     }

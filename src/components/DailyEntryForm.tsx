@@ -14,6 +14,9 @@ import { computeDay } from "../lib/formulaEngine";
 
 type Props = {
   dayNo: number;
+  entryYear?: number;
+  entryMonth?: number;
+  entryDay?: number;
   openingBalance: number;
   dateLabel: string;
   liveClock: string;
@@ -133,6 +136,9 @@ function sortCommissions(rows: CommissionItem[], options: CatalogItem[]) {
 
 export function DailyEntryForm({
   dayNo,
+  entryYear,
+  entryMonth,
+  entryDay,
   openingBalance,
   dateLabel,
   liveClock,
@@ -200,6 +206,9 @@ export function DailyEntryForm({
       date: dateLabel,
       label: dayNo === 32 ? "FINAL" : `Day ${dayNo}`,
       notes,
+      entryYear,
+      entryMonth,
+      entryDay,
       lockedAt: initial?.lockedAt,
       lockedBy: initial?.lockedBy,
       lockedByRole: initial?.lockedByRole,
@@ -220,6 +229,9 @@ export function DailyEntryForm({
       dateLabel,
       dayNo,
       expenses,
+      entryDay,
+      entryMonth,
+      entryYear,
       initial?.lockedAt,
       initial?.lockedBy,
       initial?.lockedByRole,
@@ -237,7 +249,7 @@ export function DailyEntryForm({
   }, [dayNo, initial?.lockedAt, initial?.updatedAt]);
 
   useEffect(() => {
-    if (disabled || locked) return;
+    if (disabled) return;
     const timer = window.setInterval(async () => {
       const signature = JSON.stringify(payload);
       if (signature === lastSavedRef.current || saveInFlightRef.current) return;
@@ -254,7 +266,7 @@ export function DailyEntryForm({
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [disabled, locked, onSave, payload]);
+  }, [disabled, onSave, payload]);
 
   async function handleCloseDay() {
     if (!window.confirm(`Close ${payload.label ?? `Day ${dayNo}`}? Admin users will only be able to view it after closing.`)) return;
@@ -434,7 +446,7 @@ export function DailyEntryForm({
             <div>
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
               <p>
-                {dateLabel} · {liveClock} · {locked ? "closed" : autoSaveState === "saving" ? "autosaving" : autoSaveState === "error" ? "autosave failed" : "autosaved"}
+                {dateLabel} · {liveClock} · {locked && disabled ? "closed" : autoSaveState === "saving" ? "autosaving" : autoSaveState === "error" ? "autosave failed" : "autosaved"}
               </p>
             </div>
             <button className="btn-primary" disabled={!canClose || saving} onClick={handleCloseDay}>
