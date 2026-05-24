@@ -183,23 +183,68 @@
     @apply border-slate-200 bg-white text-slate-950 shadow-slate-200/70;
   }
 
+  .theme-light .bg-slate-950,
+  .theme-light .bg-slate-950\/95,
+  .theme-light .bg-slate-950\/70,
+  .theme-light .bg-slate-950\/60,
+  .theme-light .bg-slate-950\/50,
+  .theme-light .bg-slate-950\/40,
+  .theme-light .bg-slate-900,
+  .theme-light .bg-slate-900\/80,
+  .theme-light .bg-slate-900\/50 {
+    @apply bg-white;
+  }
+
+  .theme-light .bg-slate-800 {
+    @apply bg-slate-100;
+  }
+
+  .theme-light .border-slate-900,
+  .theme-light .border-slate-800,
+  .theme-light .border-slate-800\/70,
+  .theme-light .border-slate-700 {
+    @apply border-slate-200;
+  }
+
   .theme-light h1,
   .theme-light h2,
   .theme-light h3,
   .theme-light strong,
-  .theme-light td {
+  .theme-light td,
+  .theme-light .text-white,
+  .theme-light .text-slate-100,
+  .theme-light .text-slate-200 {
     @apply text-slate-950;
+  }
+
+  .theme-light .text-slate-300 {
+    @apply text-slate-700;
   }
 
   .theme-light p,
   .theme-light th,
-  .theme-light label {
+  .theme-light label,
+  .theme-light .text-slate-400,
+  .theme-light .text-slate-500 {
     @apply text-slate-600;
+  }
+
+  .theme-light th {
+    @apply border-slate-200 bg-slate-50;
+  }
+
+  .theme-light td {
+    @apply border-slate-100;
   }
 
   .theme-light input,
   .theme-light select {
     @apply border-slate-300 bg-white text-slate-950 focus:border-emerald-500;
+  }
+
+  .theme-light input:disabled,
+  .theme-light select:disabled {
+    @apply bg-slate-100 text-slate-500;
   }
 
   .theme-light .btn-secondary,
@@ -213,5 +258,20 @@
   .theme-light .btn-tab-active,
   .theme-light .btn-chip-active {
     @apply border-emerald-500 bg-emerald-50 text-emerald-800;
+  }
+
+  .theme-light .status {
+    @apply border-emerald-200 bg-emerald-50 text-emerald-800;
+  }
+
+  .theme-light .warning,
+  .theme-light .error {
+    @apply border-amber-200 bg-amber-50 text-amber-800;
+  }
+
+  .theme-light .shadow-black\/20,
+  .theme-light .shadow-black\/40 {
+    --tw-shadow-color: rgb(203 213 225 / 0.75);
+    --tw-shadow: var(--tw-shadow-colored);
   }
 }
