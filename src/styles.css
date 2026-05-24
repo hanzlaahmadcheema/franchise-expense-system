@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+
+  input {
+    @apply min-w-0 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  button {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-semibold leading-none transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  label {
+    @apply flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-400;
+  }
+
+  table {
+    @apply w-full min-w-[760px] border-separate border-spacing-0 text-sm;
+  }
+
+  th {
+    @apply border-b border-slate-800 bg-slate-900/80 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-400;
+  }
+
+  td {
+    @apply border-b border-slate-800/70 px-4 py-3 text-slate-200;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-semibold leading-none transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn svg,
+  button svg,
+  .file-button svg {
+    @apply h-4 w-4 shrink-0;
+  }
+
+  .btn-primary {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-emerald-500 px-4 text-sm font-semibold leading-none text-slate-950 shadow-sm shadow-emerald-950/20 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-secondary {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-800 bg-slate-950/50 px-4 text-sm font-semibold leading-none text-slate-300 transition hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-tab {
+    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-tab-active {
+    @apply border-emerald-400 bg-emerald-400/10 text-emerald-200 hover:border-emerald-300 hover:bg-emerald-400/15;
+  }
+
+  .btn-chip {
+    @apply inline-flex h-9 items-center justify-center rounded-full border border-slate-700 bg-slate-900 px-3 text-sm font-semibold leading-none text-slate-200 hover:border-slate-500 hover:bg-slate-800;
+  }
+
+  .btn-chip-active {
+    @apply border-emerald-400 bg-emerald-400/10 text-emerald-200;
+  }
+
+  button.secondary,
+  .tabs button,
+  .chip {
+    @apply border border-slate-700 bg-slate-900 text-slate-100 hover:border-slate-500 hover:bg-slate-800;
+  }
+
+  button.active,
+  .chip.active {
+    @apply border-emerald-400 bg-emerald-400/10 text-emerald-200;
+  }
+
+  .status {
+    @apply mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-100;
+  }
+
+  .warning,
+  .error {
+    @apply mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm font-medium text-amber-100;
+  }
+
+  .card {
+    @apply rounded-xl border border-slate-800 bg-slate-900/80 shadow-xl shadow-black/20;
+  }
+
+  .card-pad {
+    @apply p-5;
+  }
+
+  .table-wrap {
+    @apply overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40;
+  }
+
+  .panel {
+    @apply mb-5 rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20;
+  }
+
+  .panel-title {
+    @apply mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between;
+  }
+
+  .row,
+  .actions,
+  .tabs,
+  .month-list,
+  .quick-actions {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .grid {
+    @apply grid grid-cols-1 gap-3 md:grid-cols-3;
+  }
+
+  .grid.two {
+    @apply md:grid-cols-2;
+  }
+
+  .grid.compact {
+    @apply md:grid-cols-4;
+  }
+
+  .file-button {
+    @apply inline-flex h-10 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800;
+  }
+
+  .metric-row {
+    @apply mt-5 grid grid-cols-2 gap-3 md:grid-cols-4;
+  }
+
+  .metric-row strong {
+    @apply rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm font-semibold text-slate-200;
+  }
+
+  .file-button input {
+    @apply hidden;
+  }
+}

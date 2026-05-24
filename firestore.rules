@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isSelfBootstrappingUser(uid) {
+      return isAuthenticated() &&
+        request.auth.uid == uid &&
+        request.resource.data.uid == uid &&
+        request.resource.data.active == true &&
+        request.resource.data.role in ["owner", "staff"];
+    }
+
+    function isOwner() {
+      return isAuthenticated() && userDoc().data.role == "owner" && userDoc().data.active == true;
+    }
+
+    function isStaff() {
+      return isAuthenticated() && userDoc().data.active == true;
+    }
+
+    match /users/{uid} {
+      allow read: if isAuthenticated() && (request.auth.uid == uid || isOwner());
+      allow create: if isSelfBootstrappingUser(uid);
+      allow update, delete: if isOwner();
+    }
+
+    match /months/{monthId} {
+      allow read: if isStaff();
+      allow create: if isStaff();
+      allow update: if isOwner() || (isStaff() && resource.data.status == "open");
+      allow delete: if isOwner();
+
+      match /{subCollection=**}/{docId} {
+        allow read: if isStaff();
+        allow create: if isStaff();
+        allow update: if isOwner() || (
+          isStaff() &&
+          get(/databases/$(database)/documents/months/$(monthId)).data.status == "open"
+        );
+        allow delete: if isOwner();
+      }
+    }
+  }
+}

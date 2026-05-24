@@ -1,0 +1,10 @@
+node_modules/
+dist/
+functions/node_modules/
+functions/lib/
+*.tsbuildinfo
+firebase-debug.log
+firepit-log.txt
+.env
+.env.local
+.env.*.local
