@@ -483,8 +483,8 @@ function App() {
 
   async function handleWorkbook(file: File | null) {
     if (!file) return;
-    if (!roleCan(role, "ownerControls")) {
-      setStatus("Workbook import is restricted to owner access.");
+    if (!roleCan(role, "importBackup")) {
+      setStatus("Workbook import is restricted to owner or admin access.");
       return;
     }
     setLoading(true);
@@ -502,8 +502,8 @@ function App() {
 
   async function commitImport() {
     if (!importPreview) return;
-    if (!roleCan(role, "ownerControls")) {
-      setStatus("Workbook import is restricted to owner access.");
+    if (!roleCan(role, "importBackup")) {
+      setStatus("Workbook import is restricted to owner or admin access.");
       return;
     }
     setLoading(true);
@@ -565,8 +565,8 @@ function App() {
   }
 
   async function exportBackup() {
-    if (!roleCan(role, "ownerControls")) {
-      setStatus("Backup export is restricted to owner access.");
+    if (!roleCan(role, "importBackup")) {
+      setStatus("Backup export is restricted to owner or admin access.");
       return;
     }
     setLoading(true);
@@ -590,8 +590,8 @@ function App() {
 
   async function importBackup(file: File | null) {
     if (!file) return;
-    if (!roleCan(role, "ownerControls")) {
-      setStatus("Backup restore is restricted to owner access.");
+    if (!roleCan(role, "importBackup")) {
+      setStatus("Backup restore is restricted to owner or admin access.");
       return;
     }
     setLoading(true);
@@ -623,6 +623,7 @@ function App() {
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
+  const canUseImportBackup = roleCan(role, "importBackup");
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const calendarValue = selectedDateValue(monthId, selectedDay);
@@ -636,8 +637,8 @@ function App() {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
     { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
-    { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseOwnerControls },
-    { id: "backup", label: "Backup", icon: FileDown, show: canUseOwnerControls }
+    { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseImportBackup },
+    { id: "backup", label: "Backup", icon: FileDown, show: canUseImportBackup }
   ];
 
   async function saveCatalog(
@@ -855,15 +856,15 @@ function App() {
               <div className="panel-title">
                 <div>
                   <h2>Backup</h2>
-                  <p>Owner-only backup export and restore.</p>
+                  <p>Owner/admin backup export and restore.</p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={exportBackup}>
+                <button className="btn-secondary" disabled={loading || !user || !canUseImportBackup} onClick={exportBackup}>
                   <FileDown />
                   Export Backup
                 </button>
-                <label className={`file-button ${!canUseOwnerControls ? "pointer-events-none opacity-50" : ""}`}>
+                <label className={`file-button ${!canUseImportBackup ? "pointer-events-none opacity-50" : ""}`}>
                   <Upload />
                   Import Backup
                   <input type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />

@@ -147,13 +147,13 @@ Global sidebar:
 - `Dashboard`: KPI cards, charts, reports, export, backup, close/reopen month.
 - `Expense`: top-tab workspace for daily entry, dashboard review, expense categories, credit parties, and commission categories.
 - `Users`: owner-only user role management.
-- `Excel Import`: owner-only workbook upload and validation.
-- `Backup`: owner-only backup export and restore.
+- `Excel Import`: owner/admin workbook upload and validation.
+- `Backup`: owner/admin backup export and restore.
 
 Roles:
 
 - `owner`: full access, including users, imports, backups, month close/reopen, and deletes allowed by rules.
-- `admin`: current-day entry and catalog management only; previous dates/months are view-only.
+- `admin`: current-day entry, catalog management, Excel import, and backup access; previous dates/months are view-only for direct edits.
 - `viewer`: read-only dashboard/report access.
 
 The theme toggle in the sidebar switches between light and dark mode and stores the preference in the browser.
@@ -286,7 +286,7 @@ Use backup packages before big imports, major corrections, or deployment changes
 
 Export backup:
 
-1. Go to `Dashboard`.
+1. Go to `Backup`.
 2. Click `Export Backup`.
 3. A JSON file downloads with all months and day records.
 
@@ -298,7 +298,7 @@ franchise-backup-YYYY-MM-DD.json
 
 Import backup:
 
-1. Go to `Dashboard`.
+1. Go to `Backup`.
 2. Click `Import Backup`.
 3. Choose a previous backup JSON file.
 4. The app writes the months and day records back to Firestore.

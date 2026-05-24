@@ -182,11 +182,11 @@ export async function ensureDefaultCatalogs() {
   }
 }
 
-export function roleCan(role: UserRole | null, permission: "daily" | "catalogs" | "users" | "ownerControls" | "read") {
+export function roleCan(role: UserRole | null, permission: "daily" | "catalogs" | "users" | "ownerControls" | "importBackup" | "read") {
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily" || permission === "catalogs";
+  if (role === "admin") return permission === "daily" || permission === "catalogs" || permission === "importBackup";
   return false;
 }
 
