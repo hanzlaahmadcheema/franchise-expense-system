@@ -169,17 +169,21 @@ Expence-April-2026.xlsx
 Steps:
 
 1. Go to `Excel Import`.
-2. Choose the `.xlsx` or `.xls` file.
-3. Wait for parsing.
-4. Review:
+2. Select the target `Import Month`.
+3. Select the import type. Currently only `Expense` is enabled.
+4. Choose the `.xlsx` or `.xls` file.
+5. Wait for parsing.
+6. Review:
+   - target month
+   - import type
    - file name
    - imported period count
    - calculated issue total
    - calculated expense total
    - workbook Home totals
    - warnings
-5. Check the preview dashboard.
-6. Click `Save Imported Month to Firestore`.
+7. Check the preview dashboard.
+8. Click `Save Expense Import to Firestore`.
 
 Imported sheets:
 
@@ -199,9 +203,7 @@ Home!E34 -> monthly expense total
 Imported sections:
 
 - Expenses from workbook expense columns.
-- Commissions from workbook commission columns.
-- Owner/cash balances.
-- Credit party rows.
+- Commission, owner/cash, and credit rows are not imported in the current `Expense` import type.
 - Day labels and final period labels.
 
 If warnings appear, review them before saving. Warnings usually mean a sheet was missing, totals did not match, or the workbook layout did not fully match the expected structure.

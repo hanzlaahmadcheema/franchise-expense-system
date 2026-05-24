@@ -111,7 +111,15 @@ function categoryFromCell(value: unknown): CommissionCategory | null {
   return COMMISSION_CATEGORIES.find((category) => category === name) ?? null;
 }
 
-export async function parseWorkbookFile(file: File, monthId: string): Promise<WorkbookImportPreview> {
+type WorkbookImportOptions = {
+  importType: WorkbookImportPreview["importType"];
+};
+
+export async function parseWorkbookFile(
+  file: File,
+  monthId: string,
+  options: WorkbookImportOptions = { importType: "expense" }
+): Promise<WorkbookImportPreview> {
   const data = await file.arrayBuffer();
   const workbook = XLSX.read(data, { cellFormula: true, cellText: true });
   const warnings: WorkbookImportPreview["warnings"] = [];
@@ -135,16 +143,18 @@ export async function parseWorkbookFile(file: File, monthId: string): Promise<Wo
   const days = daySheets.map((sheetName) => {
     const dayNo = sheetName === "FINAL" ? 32 : Number(sheetName);
     const ws = workbook.Sheets[sheetName];
-    const commissions = parseCommissions(ws, dayNo);
+    const commissions = options.importType === "expense" ? [] : parseCommissions(ws, dayNo);
 
-    for (let row = 3; row <= 14; row += 1) {
-      const category = categoryFromCell(cell(ws, `E${row}`));
-      if (!category && stringValue(cell(ws, `E${row}`))) {
-        warnings.push({
-          level: "info",
-          sheetName,
-          message: `Unmapped commission label at E${row}: ${stringValue(cell(ws, `E${row}`))}`
-        });
+    if (options.importType !== "expense") {
+      for (let row = 3; row <= 14; row += 1) {
+        const category = categoryFromCell(cell(ws, `E${row}`));
+        if (!category && stringValue(cell(ws, `E${row}`))) {
+          warnings.push({
+            level: "info",
+            sheetName,
+            message: `Unmapped commission label at E${row}: ${stringValue(cell(ws, `E${row}`))}`
+          });
+        }
       }
     }
 
@@ -152,10 +162,11 @@ export async function parseWorkbookFile(file: File, monthId: string): Promise<Wo
       dayNo,
       date: sheetDate(sheetName),
       label: sheetName === "FINAL" ? "FINAL" : `Day ${sheetName}`,
+      importType: options.importType,
       expenses: parseExpenses(ws, dayNo),
       commissions,
-      ownerBalances: parseOwnerBalances(ws, dayNo),
-      credits: parseCredits(ws, dayNo)
+      ownerBalances: options.importType === "expense" ? [] : parseOwnerBalances(ws, dayNo),
+      credits: options.importType === "expense" ? [] : parseCredits(ws, dayNo)
     };
   });
 
@@ -173,7 +184,7 @@ export async function parseWorkbookFile(file: File, monthId: string): Promise<Wo
     const expenseDiff = Math.abs(
       computed.homeSummary.monthlyExpenseTotal - workbookTotals.monthlyExpenseTotal
     );
-    if (issueDiff > 0.01) {
+    if (options.importType !== "expense" && issueDiff > 0.01) {
       warnings.push({
         level: "warning",
         message: `Imported issue total ${computed.homeSummary.monthlyIssueTotal} differs from Home C34 ${workbookTotals.monthlyIssueTotal}.`
@@ -190,6 +201,7 @@ export async function parseWorkbookFile(file: File, monthId: string): Promise<Wo
   return {
     monthId,
     fileName: file.name,
+    importType: options.importType,
     openingBalance,
     workbookTotals,
     days,

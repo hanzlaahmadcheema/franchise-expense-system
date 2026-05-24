@@ -264,6 +264,7 @@ export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[
       date: base.date,
       label: base.label,
       notes: base.notes,
+      importType: base.importType,
       entryYear: base.entryYear,
       entryMonth: base.entryMonth,
       entryDay: base.entryDay,

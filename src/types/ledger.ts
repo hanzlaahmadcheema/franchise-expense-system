@@ -66,6 +66,7 @@ export type DailyLedgerInput = {
   date?: string;
   label?: string;
   notes?: string;
+  importType?: "expense" | "full";
   entryYear?: number;
   entryMonth?: number;
   entryDay?: number;
@@ -170,6 +171,7 @@ export type UserProfile = {
 export type WorkbookImportPreview = {
   monthId: string;
   fileName: string;
+  importType: "expense" | "full";
   openingBalance: number;
   workbookTotals?: {
     monthlyIssueTotal: number;

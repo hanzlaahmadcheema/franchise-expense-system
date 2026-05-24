@@ -317,6 +317,8 @@ function App() {
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
+  const [importMonthId, setImportMonthId] = useState(initialDate.monthId);
+  const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("expense");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
@@ -490,9 +492,9 @@ function App() {
     setLoading(true);
     setStatus("Parsing workbook...");
     try {
-      const preview = await parseWorkbookFile(file, monthId);
+      const preview = await parseWorkbookFile(file, importMonthId, { importType });
       setImportPreview(preview);
-      setStatus(`Parsed ${preview.days.length} periods from ${file.name}. Review before saving.`);
+      setStatus(`Parsed ${preview.days.length} ${importType} periods for ${formatMonth(importMonthId)} from ${file.name}. Review before saving.`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not parse workbook.");
     } finally {
@@ -509,6 +511,7 @@ function App() {
     setLoading(true);
     try {
       const nextComputed = await commitWorkbookImport(importPreview);
+      setMonthId(importPreview.monthId);
       setOpeningBalance(importPreview.openingBalance);
       setDays(importPreview.days);
       setComputed(nextComputed);
@@ -516,7 +519,7 @@ function App() {
       setImportPreview(null);
       setView("dashboard");
       await refreshMonthList();
-      setStatus("Imported workbook into Firestore.");
+      setStatus(`Imported ${importPreview.importType} workbook into Firestore.`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not save import.");
     } finally {
@@ -878,18 +881,48 @@ function App() {
           <div className="panel-title">
             <div>
               <h2>Excel Import</h2>
-              <p>Upload the workbook, validate Home totals, then store it in Firestore.</p>
+              <p>Select month and import type, then upload the workbook.</p>
             </div>
-            <input
-              type="file"
-              accept=".xlsx,.xls"
-              onChange={(event) => handleWorkbook(event.target.files?.[0] ?? null)}
-            />
+          </div>
+          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr] md:items-end">
+            <label>
+              Import Month
+              <input
+                type="month"
+                value={importMonthId}
+                onChange={(event) => {
+                  setImportMonthId(event.target.value);
+                  setImportPreview(null);
+                }}
+              />
+            </label>
+            <label>
+              Import Type
+              <select
+                value={importType}
+                onChange={(event) => {
+                  setImportType(event.target.value as WorkbookImportPreview["importType"]);
+                  setImportPreview(null);
+                }}
+              >
+                <option value="expense">Expense</option>
+              </select>
+            </label>
+            <label>
+              Workbook
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(event) => handleWorkbook(event.target.files?.[0] ?? null)}
+              />
+            </label>
           </div>
           {importPreview && (
             <>
               <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
                 {[
+                  ["Month", formatMonth(importPreview.monthId)],
+                  ["Type", importPreview.importType],
                   ["File", importPreview.fileName],
                   ["Periods", importPreview.days.length.toString()],
                   ["Issue", importPreview.computed.homeSummary.monthlyIssueTotal.toLocaleString()],
@@ -918,8 +951,8 @@ function App() {
                 </ul>
               )}
               <HomeDashboard month={importPreview.computed} />
-              <button className="btn-primary" disabled={loading || isClosed || !user} onClick={commitImport}>
-                Save Imported Month to Firestore
+              <button className="btn-primary" disabled={loading || !user} onClick={commitImport}>
+                Save {importPreview.importType === "expense" ? "Expense" : "Full"} Import to Firestore
               </button>
             </>
           )}

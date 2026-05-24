@@ -54,6 +54,17 @@ service cloud.firestore {
         isLiveAdminDayData(request.resource.data);
     }
 
+    function canAdminImportExpense(monthId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+        request.resource.data.importType == "expense";
+    }
+
+    function canAdminWriteExpenseRows(monthId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
+    }
+
     function isUnlockedDay() {
       return !("lockedAt" in resource.data) || resource.data.lockedAt == null;
     }
@@ -98,10 +109,22 @@ service cloud.firestore {
 
       match /days/{dayId} {
         allow read: if isActiveUser();
-        allow create: if canOwnerEditDaily(monthId) || canAdminEditLiveDay(monthId);
+        allow create: if canOwnerEditDaily(monthId) || canAdminEditLiveDay(monthId) || canAdminImportExpense(monthId);
         allow update: if canOwnerEditDaily(monthId) ||
           (canAdminEditLiveDay(monthId) && isUnlockedDay()) ||
-          (isAdmin() && request.resource.data.diff(resource.data).changedKeys().hasOnly(["updatedAt"]));
+          (isAdmin() && request.resource.data.diff(resource.data).changedKeys().hasOnly(["updatedAt"])) ||
+          canAdminImportExpense(monthId);
+        allow delete: if isOwner();
+      }
+
+      match /days/{dayId}/expenses/{expenseId} {
+        allow read: if isActiveUser();
+        allow create, update: if canOwnerEditDaily(monthId) ||
+          (isAdmin() &&
+            get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+            parentDayIsLiveAdminDay(monthId, dayId) &&
+            parentDayIsUnlocked(monthId, dayId)) ||
+          canAdminWriteExpenseRows(monthId);
         allow delete: if isOwner();
       }
 
