@@ -553,7 +553,7 @@ function App() {
   const [computed, setComputed] = useState<MonthComputed | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
   const [importMonthId, setImportMonthId] = useState(initialDate.monthId);
-  const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("expense");
+  const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
@@ -729,7 +729,8 @@ function App() {
     try {
       const preview = await parseWorkbookFile(file, importMonthId, { importType });
       setImportPreview(preview);
-      setStatus(`Parsed ${preview.days.length} ${importType} periods for ${formatMonth(importMonthId)} from ${file.name}. Review before saving.`);
+      const importLabel = importType === "full" ? "full workbook" : "expense-only";
+      setStatus(`Parsed ${preview.days.length} ${importLabel} periods for ${formatMonth(importMonthId)} from ${file.name}. Review before saving.`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not parse workbook.");
     } finally {
@@ -754,7 +755,7 @@ function App() {
       setImportPreview(null);
       setView("dashboard");
       await refreshMonthList();
-      setStatus(`Imported ${importPreview.importType} workbook into Firestore.`);
+      setStatus(`Imported ${importPreview.importType === "full" ? "full workbook" : "expense-only workbook"} into Firestore.`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not save import.");
     } finally {
@@ -1154,7 +1155,8 @@ function App() {
                   setImportPreview(null);
                 }}
               >
-                <option value="expense">Expense</option>
+                <option value="full">Full Workbook</option>
+                <option value="expense">Expense Only</option>
               </select>
             </label>
             <label>
@@ -1171,7 +1173,7 @@ function App() {
               <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
                 {[
                   ["Month", formatMonth(importPreview.monthId)],
-                  ["Type", importPreview.importType],
+                  ["Type", importPreview.importType === "full" ? "Full Workbook" : "Expense Only"],
                   ["File", importPreview.fileName],
                   ["Periods", importPreview.days.length.toString()],
                   ["Issue", importPreview.computed.homeSummary.monthlyIssueTotal.toLocaleString()],
@@ -1201,7 +1203,7 @@ function App() {
               )}
               <HomeDashboard month={importPreview.computed} />
               <button className="btn-primary" disabled={loading || !user} onClick={commitImport}>
-                Save {importPreview.importType === "expense" ? "Expense" : "Full"} Import to Firestore
+                Save {importPreview.importType === "expense" ? "Expense Only" : "Full Workbook"} Import to Firestore
               </button>
             </>
           )}

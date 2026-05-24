@@ -171,7 +171,7 @@ Steps:
 
 1. Go to `Excel Import`.
 2. Select the target `Import Month`.
-3. Select the import type. Currently only `Expense` is enabled.
+3. Select the import type. Use `Full Workbook` for the normal monthly import, or `Expense Only` when only expense rows should be replaced.
 4. Choose the `.xlsx` or `.xls` file.
 5. Wait for parsing.
 6. Review:
@@ -184,7 +184,7 @@ Steps:
    - workbook Home totals
    - warnings
 7. Check the preview dashboard.
-8. Click `Save Expense Import to Firestore`.
+8. Click `Save Full Workbook Import to Firestore` or `Save Expense Only Import to Firestore`.
 
 Imported sheets:
 
@@ -203,9 +203,13 @@ Home!E34 -> monthly expense total
 
 Imported sections:
 
-- Expenses from workbook expense columns.
-- Commission, owner/cash, and credit rows are not imported in the current `Expense` import type.
+- Expenses from workbook columns `A:C`.
+- Commissions from workbook columns `E:F`.
+- Owner/cash rows from workbook columns `H:I`.
+- Credit parties from workbook columns `E:I`.
 - Day labels and final period labels.
+
+The detailed workbook cell map is documented in [`docs/workbook-import-map.md`](docs/workbook-import-map.md).
 
 If warnings appear, review them before saving. Warnings usually mean a sheet was missing, totals did not match, or the workbook layout did not fully match the expected structure.
 

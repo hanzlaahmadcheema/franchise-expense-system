@@ -5,9 +5,12 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 
-const workbookPath = path.resolve("Expence-April-2026.xlsx");
-if (!fs.existsSync(workbookPath)) {
-  console.error("Workbook not found:", workbookPath);
+const workbookPath = [
+  path.resolve("sheets/Expence-April-2026.xlsx"),
+  path.resolve("Expence-April-2026.xlsx")
+].find((candidate) => fs.existsSync(candidate));
+if (!workbookPath) {
+  console.error("Workbook not found in sheets/ or project root.");
   process.exit(1);
 }
 

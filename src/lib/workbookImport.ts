@@ -60,12 +60,28 @@ function parseExpenses(ws: XLSX.WorkSheet, dayNo: number): ExpenseItem[] {
   return rows;
 }
 
+function normalizeCommissionLabel(label: string, row: number): CommissionCategory | null {
+  if (!label) return null;
+  if (label === "Jazz Cash") return "JazzCash";
+  if (label === "Jazz Load") return "JazzLoad";
+  if (label === "Other") return row === 13 ? "Other 1" : "Other 2";
+  return COMMISSION_CATEGORIES.find((category) => category === label) ?? label;
+}
+
 function parseCommissions(ws: XLSX.WorkSheet, dayNo: number): DailyLedgerInput["commissions"] {
-  return COMMISSION_CATEGORIES.map((category, index) => ({
-    id: `${dayNo}-commission-${index}`,
-    category,
-    amount: numberValue(cell(ws, `F${index + 3}`))
-  })).filter((item) => item.amount !== 0);
+  const rows: DailyLedgerInput["commissions"] = [];
+  for (let row = 3; row <= 14; row += 1) {
+    const label = stringValue(cell(ws, `E${row}`));
+    const amount = numberValue(cell(ws, `F${row}`));
+    const category = normalizeCommissionLabel(label, row);
+    if (!category && amount === 0) continue;
+    rows.push({
+      id: `${dayNo}-commission-${row}`,
+      category: category ?? `Commission ${row - 2}`,
+      amount
+    });
+  }
+  return rows.filter((item) => item.amount !== 0);
 }
 
 function parseOwnerBalances(ws: XLSX.WorkSheet, dayNo: number): OwnerBalanceRow[] {
@@ -104,11 +120,12 @@ function parseCredits(ws: XLSX.WorkSheet, dayNo: number): CreditRow[] {
   return rows;
 }
 
-function categoryFromCell(value: unknown): CommissionCategory | null {
-  const name = stringValue(value);
-  if (name === "Jazz Cash") return "JazzCash";
-  if (name === "Jazz Load") return "JazzLoad";
-  return COMMISSION_CATEGORIES.find((category) => category === name) ?? null;
+function parseMonthParts(monthId: string) {
+  const [year, month] = monthId.split("-").map(Number);
+  return {
+    entryYear: Number.isInteger(year) ? year : undefined,
+    entryMonth: Number.isInteger(month) ? month : undefined
+  };
 }
 
 type WorkbookImportOptions = {
@@ -118,7 +135,7 @@ type WorkbookImportOptions = {
 export async function parseWorkbookFile(
   file: File,
   monthId: string,
-  options: WorkbookImportOptions = { importType: "expense" }
+  options: WorkbookImportOptions = { importType: "full" }
 ): Promise<WorkbookImportPreview> {
   const data = await file.arrayBuffer();
   const workbook = XLSX.read(data, { cellFormula: true, cellText: true });
@@ -140,6 +157,8 @@ export async function parseWorkbookFile(
     warnings.push({ level: "error", message: "No day sheets named 1 through 31 were found." });
   }
 
+  const monthParts = parseMonthParts(monthId);
+
   const days = daySheets.map((sheetName) => {
     const dayNo = sheetName === "FINAL" ? 32 : Number(sheetName);
     const ws = workbook.Sheets[sheetName];
@@ -147,7 +166,7 @@ export async function parseWorkbookFile(
 
     if (options.importType !== "expense") {
       for (let row = 3; row <= 14; row += 1) {
-        const category = categoryFromCell(cell(ws, `E${row}`));
+        const category = normalizeCommissionLabel(stringValue(cell(ws, `E${row}`)), row);
         if (!category && stringValue(cell(ws, `E${row}`))) {
           warnings.push({
             level: "info",
@@ -163,6 +182,8 @@ export async function parseWorkbookFile(
       date: sheetDate(sheetName),
       label: sheetName === "FINAL" ? "FINAL" : `Day ${sheetName}`,
       importType: options.importType,
+      ...monthParts,
+      entryDay: sheetName === "FINAL" ? undefined : dayNo,
       expenses: parseExpenses(ws, dayNo),
       commissions,
       ownerBalances: options.importType === "expense" ? [] : parseOwnerBalances(ws, dayNo),
