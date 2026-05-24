@@ -332,35 +332,7 @@ export function HomeDashboard({ month }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
-          <h3 className="text-lg font-semibold text-white">Daily Ledger</h3>
-          <div className="mt-4 table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Period</th>
-                  <th>Issue</th>
-                  <th>Expense</th>
-                  <th>Return</th>
-                  <th>Credit</th>
-                </tr>
-              </thead>
-              <tbody>
-                {month.homeSummary.dayRows.map((row) => (
-                  <tr key={row.dayNo}>
-                    <td>{row.label ?? row.dayNo}</td>
-                    <td>{money(row.issueBalance)}</td>
-                    <td>{money(row.expenseTotal)}</td>
-                    <td>{money(row.returnBalance)}</td>
-                    <td>{money(row.creditBalance)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
+      <div className="grid grid-cols-1 gap-4">
         <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
           <h3 className="text-lg font-semibold text-white">Credit Party Aging</h3>
           <div className="mt-4 table-wrap">
