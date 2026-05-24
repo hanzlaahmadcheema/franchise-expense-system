@@ -1011,23 +1011,25 @@ function App() {
       {loading && <LoadingPopup message={loadingMessage} />}
       <div className={`grid min-h-screen ${shellGrid}`}>
         <aside className="border-b border-slate-800 bg-slate-950/95 p-4 text-slate-100 lg:border-b-0 lg:border-r">
-          <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-center justify-between" : "flex-col items-center"}`}>
+          <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-start justify-between" : "flex-col items-center"}`}>
             {sidebarOpen && (
-              <div>
+              <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
-                <h1 className="text-xl font-semibold">Jazz Franchise - 7301</h1>
+                <h1 className="text-xl font-semibold leading-tight">Jazz Franchise - 7301</h1>
               </div>
             )}
-            <button
-              className="btn-ghost !h-11 !w-11 !px-0"
-              onClick={() => setSidebarOpen((open) => !open)}
-              title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-            >
-              {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
-            </button>
-            <button className={`${sidebarOpen ? "btn-ghost !h-9 !px-3" : "btn-ghost !h-11 !w-11 !px-0"}`} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
-              {theme === "dark" ? <Sun /> : <Moon />}
-            </button>
+            <div className={`${sidebarOpen ? "flex shrink-0 items-center gap-2" : "flex flex-col items-center gap-2"}`}>
+              <button
+                className="btn-ghost !h-11 !w-11 !px-0"
+                onClick={() => setSidebarOpen((open) => !open)}
+                title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+              >
+                {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+              </button>
+              <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
+                {theme === "dark" ? <Sun /> : <Moon />}
+              </button>
+            </div>
           </div>
           <nav className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
             {navItems.filter((item) => item.show).map((item) => {
@@ -1050,7 +1052,7 @@ function App() {
               <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
                 <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
                 <p className="mt-2 text-sm font-semibold text-white">{liveClock}</p>
-                <div className="mt-4 grid gap-2 text-sm text-slate-300">
+                <div className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-slate-500">Access</span>
                     <span className="font-medium text-slate-100">{accessLabel}</span>
@@ -1071,24 +1073,24 @@ function App() {
                   Opening Balance
                   <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
                 </label>
-                <div className="mt-4 grid gap-2">
-                  <button className="btn-primary !h-11" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
+                <div className="mt-4 flex flex-col gap-2">
+                  <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
                     {loading && <LoadingIcon label="Loading month" />}
                     Load / Create
                   </button>
-                  <button className="btn-secondary !h-11" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
+                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
                     {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
                     Recalculate
                   </button>
-                  <button className="btn-secondary !h-11" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
+                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
                     {loading && <LoadingIcon label="Updating month status" />}
                     {isClosed ? "Reopen Month" : "Close Month"}
                   </button>
                 </div>
                 {months.length > 0 && (
-                  <div className="mt-4 grid gap-2">
+                  <div className="mt-4 flex flex-col gap-2">
                     {months.slice(0, 8).map((month) => (
-                      <button className={month.id === monthId ? "btn-chip btn-chip-active !justify-start" : "btn-chip !justify-start"} key={month.id} onClick={() => loadMonth(month.id)}>
+                      <button className={month.id === monthId ? "btn-chip btn-chip-active !h-10 !w-full !justify-start" : "btn-chip !h-10 !w-full !justify-start"} key={month.id} onClick={() => loadMonth(month.id)}>
                         {formatMonth(month.id)} · {month.status}
                       </button>
                     ))}
