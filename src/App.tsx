@@ -12,8 +12,7 @@ import {
   Sun,
   Tags,
   Upload,
-  Users,
-  WalletCards
+  Users
 } from "lucide-react";
 import { DailyEntryForm } from "./components/DailyEntryForm";
 import { HomeDashboard } from "./components/HomeDashboard";
@@ -52,8 +51,8 @@ import {
   upsertCatalogItem
 } from "./lib/firestoreService";
 
-type View = "dashboard" | "entry" | "expense" | "users" | "import" | "backup";
-type ExpenseSection = "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
+type View = "dashboard" | "expense" | "users" | "import" | "backup";
+type ExpenseSection = "daily-entry" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
 
 type BackupPackage = {
   exportedAt: number;
@@ -291,7 +290,7 @@ function FirebaseMissing() {
 function App() {
   const initialDate = currentDateState();
   const [view, setView] = useState<View>("dashboard");
-  const [expenseSection, setExpenseSection] = useState<ExpenseSection>("expense-dashboard");
+  const [expenseSection, setExpenseSection] = useState<ExpenseSection>("daily-entry");
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
@@ -590,7 +589,6 @@ function App() {
       : "theme-light bg-[linear-gradient(180deg,#f8fafc,#e2e8f0)] text-slate-950";
   const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; show: boolean }> = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
-    { id: "entry", label: "Daily Entry", icon: WalletCards, show: true },
     { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
     { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseOwnerControls },
@@ -724,40 +722,11 @@ function App() {
             </>
           )}
 
-          {view === "entry" && (
-            <>
-              <section className="mb-4 max-w-sm rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
-                <label>
-                  Day / Period · {formatMonth(monthId)}
-                  <select value={selectedDay} disabled={!canUseOwnerControls} onChange={(event) => setSelectedDay(Number(event.target.value))}>
-                    {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                      <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
-                    ))}
-                    <option value={32}>FINAL</option>
-                  </select>
-                </label>
-              </section>
-              <DailyEntryForm
-                key={`${monthId}-${selectedDay}`}
-                dayNo={selectedDay}
-                openingBalance={selectedOpening}
-                dateLabel={dateLabel}
-                liveClock={liveClock}
-                expenseCategories={expenseCategories}
-                commissionCategories={commissionCategories}
-                creditParties={creditParties}
-                initial={selectedDayInput}
-                previousDay={previousDayInput}
-                disabled={!canEditDaily || loading || !user}
-                onSave={saveDay}
-              />
-            </>
-          )}
-
           {view === "expense" && (
             <section>
               <nav className="mb-5 flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2 text-slate-100 shadow-xl shadow-black/20">
                 {[
+                  ["daily-entry", "Daily Entry"],
                   ["expense-dashboard", "Dashboard"],
                   ["expense-categories", "Expense Categories"],
                   ["credit-parties", "Credit Parties"],
@@ -773,6 +742,35 @@ function App() {
                 ))}
               </nav>
 
+              {expenseSection === "daily-entry" && (
+                <>
+                  <section className="mb-4 max-w-sm rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
+                    <label>
+                      Day / Period · {formatMonth(monthId)}
+                      <select value={selectedDay} disabled={!canUseOwnerControls} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+                        {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                          <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
+                        ))}
+                        <option value={32}>FINAL</option>
+                      </select>
+                    </label>
+                  </section>
+                  <DailyEntryForm
+                    key={`${monthId}-${selectedDay}`}
+                    dayNo={selectedDay}
+                    openingBalance={selectedOpening}
+                    dateLabel={dateLabel}
+                    liveClock={liveClock}
+                    expenseCategories={expenseCategories}
+                    commissionCategories={commissionCategories}
+                    creditParties={creditParties}
+                    initial={selectedDayInput}
+                    previousDay={previousDayInput}
+                    disabled={!canEditDaily || loading || !user}
+                    onSave={saveDay}
+                  />
+                </>
+              )}
               {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} />}
               {expenseSection === "expense-categories" && (
                 <CatalogManager title="Expense Categories" items={expenseCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("expenseCategories", item)} />

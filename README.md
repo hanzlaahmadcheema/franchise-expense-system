@@ -139,14 +139,13 @@ Connected to Firestore
 4. Enter the month ID, for example `2026-04`.
 5. Click `Load / Create`.
 6. Use `Excel Import` if you are starting from a workbook.
-7. Use `Daily Entry` for day-to-day input.
+7. Use `Expense` -> `Daily Entry` for day-to-day input.
 8. Use `Dashboard` for review, export, print, and month status.
 
 Global sidebar:
 
 - `Dashboard`: KPI cards, charts, reports, export, backup, close/reopen month.
-- `Daily Entry`: sectioned daily operational entry.
-- `Expense`: top-tab workspace for dashboard review, expense categories, credit parties, and commission categories.
+- `Expense`: top-tab workspace for daily entry, dashboard review, expense categories, credit parties, and commission categories.
 - `Users`: owner-only user role management.
 - `Excel Import`: owner-only workbook upload and validation.
 - `Backup`: owner-only backup export and restore.
@@ -209,16 +208,17 @@ If warnings appear, review them before saving. Warnings usually mean a sheet was
 
 ## Daily Entry Workflow
 
-Use `Daily Entry` for new days, corrections, or periods not imported from Excel.
+Use `Expense` -> `Daily Entry` for new days, corrections, or periods not imported from Excel.
 
 Steps:
 
-1. Go to `Daily Entry`.
-2. Select `Day / Period`.
-3. Use `1` through `31` for normal days.
-4. Use `32` for the `FINAL` adjustment period.
-5. Fill the daily rows.
-6. Click `Save Day`.
+1. Go to `Expense`.
+2. Open the `Daily Entry` tab.
+3. Select `Day / Period`.
+4. Use `1` through `31` for normal days.
+5. Use `32` for the `FINAL` adjustment period.
+6. Fill the daily rows.
+7. Click `Save Day`.
 
 Daily entry supports:
 
@@ -226,7 +226,7 @@ Daily entry supports:
 - Notes
 - Day dropdown from `Day 1` to `Day 31` plus `FINAL`
 - Expenses with managed category IDs
-- Fixed-order commission rows starting with `JazzCash` and `JazzLoad`
+- User-managed commission category dropdowns, ordered from the commission category catalog
 - Separate franchise owner rows: opening, description, amount, calculated balance
 - Separate credit party rows: party ID, opening, loan, receive, calculated balance
 - Previous credit balance carry-forward
