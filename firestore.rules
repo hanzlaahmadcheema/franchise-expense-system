@@ -36,6 +36,16 @@ service cloud.firestore {
         get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
     }
 
+    function isUnlockedDay() {
+      return !("lockedAt" in resource.data) || resource.data.lockedAt == null;
+    }
+
+    function parentDayIsUnlocked(monthId, dayId) {
+      return !exists(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)) ||
+        !("lockedAt" in get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data) ||
+        get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data.lockedAt == null;
+    }
+
     match /users/{uid} {
       allow read: if isAuthenticated() && (request.auth.uid == uid || isOwner());
       allow create: if isSelfBootstrappingUser(uid);
@@ -62,13 +72,14 @@ service cloud.firestore {
 
       match /days/{dayId} {
         allow read: if isActiveUser();
-        allow create, update: if canEditDaily(monthId);
+        allow create: if canEditDaily(monthId);
+        allow update: if canEditDaily(monthId) && (isOwner() || isUnlockedDay());
         allow delete: if isOwner();
       }
 
       match /days/{dayId}/{subCollection=**}/{docId} {
         allow read: if isActiveUser();
-        allow create, update: if canEditDaily(monthId);
+        allow create, update: if canEditDaily(monthId) && (isOwner() || parentDayIsUnlocked(monthId, dayId));
         allow delete: if isOwner();
       }
     }

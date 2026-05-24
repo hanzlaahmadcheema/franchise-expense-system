@@ -40,6 +40,7 @@ import {
   ensureDefaultCatalogs,
   fetchMonthDays,
   getUserRole,
+  lockDayAndRecalculate,
   listCatalogItems,
   listMonths,
   listUsers,
@@ -70,6 +71,10 @@ function emptyDay(dayNo: number): DailyLedgerInput {
     ownerBalances: []
   };
 }
+
+type SaveDayOptions = {
+  silent?: boolean;
+};
 
 function createMonth(id: string, openingBalance: number): MonthRecord {
   const timestamp = Date.now();
@@ -424,21 +429,43 @@ function App() {
     return selectedDay === 1 ? openingBalance : previous?.returnBalance ?? openingBalance;
   }, [computed?.days, openingBalance, selectedDay]);
 
-  async function saveDay(day: DailyLedgerInput) {
+  async function saveDay(day: DailyLedgerInput, options: SaveDayOptions = {}) {
     if (!roleCan(role, "daily")) {
       setStatus("Your role can view this month but cannot edit daily entries.");
       return;
     }
-    setLoading(true);
+    if (!options.silent) setLoading(true);
     try {
       const nextComputed = await saveDayAndRecalculate(monthId, openingBalance, day);
       const nextDays = await fetchMonthDays(monthId);
       setDays(nextDays);
       setComputed(nextComputed);
-      await refreshMonthList();
-      setStatus(`Saved day ${day.label ?? day.dayNo} to Firestore.`);
+      if (!options.silent) {
+        await refreshMonthList();
+        setStatus(`Saved day ${day.label ?? day.dayNo} to Firestore.`);
+      }
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not save day.");
+    } finally {
+      if (!options.silent) setLoading(false);
+    }
+  }
+
+  async function closeDay(day: DailyLedgerInput) {
+    if (!roleCan(role, "daily")) {
+      setStatus("Your role can view this month but cannot close days.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const nextComputed = await lockDayAndRecalculate(monthId, openingBalance, day, role);
+      const nextDays = await fetchMonthDays(monthId);
+      setDays(nextDays);
+      setComputed(nextComputed);
+      await refreshMonthList();
+      setStatus(`Closed day ${day.label ?? day.dayNo}. Admin users can view it but cannot edit it.`);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Could not close day.");
     } finally {
       setLoading(false);
     }
@@ -576,7 +603,10 @@ function App() {
   if (!isFirebaseConfigured) return <FirebaseMissing />;
 
   const isClosed = monthStatus === "closed";
+  const selectedDayLocked = Boolean(selectedDayInput.lockedAt);
   const canEditDaily = roleCan(role, "daily") && !isClosed;
+  const canEditSelectedDay = canEditDaily && (!selectedDayLocked || role === "owner");
+  const canCloseSelectedDay = canEditDaily && !selectedDayLocked;
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
@@ -710,6 +740,11 @@ function App() {
 
           {status && <p className="status">{status}</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
+          {selectedDayLocked && (
+            <p className="warning">
+              Day {selectedDay} is closed. Admin users can view it only; owner access can still edit.
+            </p>
+          )}
 
           {view === "dashboard" && (
             <>
@@ -770,8 +805,11 @@ function App() {
                     creditParties={creditParties}
                     initial={selectedDayInput}
                     previousDay={previousDayInput}
-                    disabled={!canEditDaily || loading || !user}
+                    disabled={!canEditSelectedDay || !user}
+                    locked={selectedDayLocked}
+                    canClose={canCloseSelectedDay && !loading && Boolean(user)}
                     onSave={saveDay}
+                    onCloseDay={closeDay}
                   />
                 </>
               )}

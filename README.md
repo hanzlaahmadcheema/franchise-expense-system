@@ -217,8 +217,8 @@ Steps:
 3. Select `Day / Period`.
 4. Use `1` through `31` for normal days.
 5. Use `32` for the `FINAL` adjustment period.
-6. Fill the daily rows.
-7. Click `Save Day`.
+6. Fill the daily rows. Changes autosave every second while the day is editable.
+7. Click `Close Day` at the end of the day.
 
 Daily entry supports:
 
@@ -230,6 +230,8 @@ Daily entry supports:
 - Separate franchise owner rows: opening, description, amount, calculated balance
 - Separate credit party rows: party ID, opening, loan, receive, calculated balance
 - Previous credit balance carry-forward
+- One-second autosave for editable daily entries
+- `Close Day` lock for end-of-day completion
 - Right-side summary for opening balance, commission, expense, balance, and credit
 
 Balance behavior:
@@ -239,8 +241,14 @@ Balance behavior:
 - Day `1` starts from the resolved month opening balance.
 - Day `2` and onward use the previous day return balance as the next opening value.
 - Credit-party balances carry by party ID.
-- Saving a day recalculates the month dashboard.
+- Autosaving a day recalculates the month dashboard.
 - Automated formula fields are read-only in the UI for owner and admin.
+
+Closed day behavior:
+
+- Closing a day locks that day record.
+- Admin users can view closed previous days but cannot edit them.
+- Owner users can still edit closed days when correction access is required.
 
 Closed month behavior:
 

@@ -66,6 +66,10 @@ export type DailyLedgerInput = {
   date?: string;
   label?: string;
   notes?: string;
+  lockedAt?: number;
+  lockedBy?: string;
+  lockedByRole?: UserRole;
+  updatedAt?: number;
   expenses: ExpenseItem[];
   commissions: CommissionItem[];
   credits: CreditRow[];
@@ -175,7 +179,7 @@ export type WorkbookImportPreview = {
 
 export type AuditEvent = {
   id: string;
-  action: "import" | "edit-day" | "recalculate" | "export" | "close-month" | "reopen-month";
+  action: "import" | "edit-day" | "lock-day" | "recalculate" | "export" | "close-month" | "reopen-month";
   actorUid?: string;
   actorEmail?: string | null;
   createdAt: number;

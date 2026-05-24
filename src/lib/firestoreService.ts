@@ -264,6 +264,10 @@ export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[
       date: base.date,
       label: base.label,
       notes: base.notes,
+      lockedAt: base.lockedAt,
+      lockedBy: base.lockedBy,
+      lockedByRole: base.lockedByRole,
+      updatedAt: base.updatedAt,
       expenses: expenseSnap.docs.map((d) => d.data() as DailyLedgerInput["expenses"][number]),
       commissions: commissionSnap.docs.map(
         (d) => d.data() as DailyLedgerInput["commissions"][number]
@@ -330,6 +334,47 @@ export async function saveDayAndRecalculate(
   const days = await fetchMonthDays(monthId);
   const computed = computeMonth(days, openingBalance, monthId);
   await updateHomeSummary(monthId, computed.homeSummary);
+  return computed;
+}
+
+export async function lockDayAndRecalculate(
+  monthId: string,
+  openingBalance: number,
+  day: DailyLedgerInput,
+  role: UserRole | null
+) {
+  const unlockedDay = {
+    ...day,
+    lockedAt: undefined,
+    lockedBy: undefined,
+    lockedByRole: undefined
+  };
+  const lockedDay = {
+    ...day,
+    lockedAt: day.lockedAt ?? now(),
+    lockedBy: day.lockedBy ?? auth?.currentUser?.uid,
+    lockedByRole: day.lockedByRole ?? role ?? undefined
+  };
+  await ensureMonth(monthId, openingBalance);
+  await upsertDay(monthId, unlockedDay);
+  await setDoc(
+    doc(requireDb(), "months", monthId, "days", String(day.dayNo)),
+    cleanForFirestore({
+      lockedAt: lockedDay.lockedAt,
+      lockedBy: lockedDay.lockedBy,
+      lockedByRole: lockedDay.lockedByRole,
+      updatedAt: now()
+    }),
+    { merge: true }
+  );
+  const days = await fetchMonthDays(monthId);
+  const computed = computeMonth(days, openingBalance, monthId);
+  await updateHomeSummary(monthId, computed.homeSummary);
+  await addAudit(monthId, {
+    action: "lock-day",
+    detail: `Closed day ${day.dayNo}`,
+    ...actor()
+  });
   return computed;
 }
 
