@@ -468,28 +468,43 @@ function RecordsView({
             <RecordTable
               title="Expenses"
               headers={["Category", "Name", "Description", "Amount"]}
-              rows={dayInput.expenses.map((item) => [
-                item.category ?? "-",
-                item.name || "-",
-                item.description || "-",
-                currency(item.amount)
-              ])}
+              rows={[
+                ...dayInput.expenses.map((item) => [
+                  item.category ?? "-",
+                  item.name || "-",
+                  item.description || "-",
+                  currency(item.amount)
+                ]),
+                ["-", "-", "Total", currency(dayComputed.expenseTotal)]
+              ]}
             />
             <RecordTable
               title="Commissions"
               headers={["Category", "Amount"]}
-              rows={dayInput.commissions.map((item) => [item.category, currency(item.amount)])}
+              rows={[
+                ...dayInput.commissions.map((item) => [item.category, currency(item.amount)]),
+                ["Total", currency(dayComputed.commissionTotal)]
+              ]}
             />
             <RecordTable
               title="Credit Parties"
               headers={["Party", "Opening", "Loan", "Receive", "Balance"]}
-              rows={dayComputed.creditRows.map((row) => [
-                row.partyName,
-                currency(row.opening),
-                currency(row.loan ?? row.today ?? 0),
-                currency(row.receive),
-                currency(row.balance ?? 0)
-              ])}
+              rows={[
+                ...dayComputed.creditRows.map((row) => [
+                  row.partyName,
+                  currency(row.opening),
+                  currency(row.loan ?? row.today ?? 0),
+                  currency(row.receive),
+                  currency(row.balance ?? 0)
+                ]),
+                [
+                  "Total",
+                  currency(dayComputed.creditTotals.opening),
+                  currency(dayComputed.creditTotals.today),
+                  currency(dayComputed.creditTotals.receive),
+                  currency(dayComputed.creditTotals.balance)
+                ]
+              ]}
             />
             <RecordTable
               title="Franchise Owner"
