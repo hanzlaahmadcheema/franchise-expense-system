@@ -9,7 +9,8 @@
     @apply bg-slate-950 text-slate-100 antialiased;
   }
 
-  input {
+  input,
+  select {
     @apply min-w-0 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
@@ -147,5 +148,45 @@
 
   .file-button input {
     @apply hidden;
+  }
+
+  .theme-light .panel,
+  .theme-light .card,
+  .theme-light .table-wrap,
+  .theme-light header,
+  .theme-light aside {
+    @apply border-slate-200 bg-white text-slate-950 shadow-slate-200/70;
+  }
+
+  .theme-light h1,
+  .theme-light h2,
+  .theme-light h3,
+  .theme-light strong,
+  .theme-light td {
+    @apply text-slate-950;
+  }
+
+  .theme-light p,
+  .theme-light th,
+  .theme-light label {
+    @apply text-slate-600;
+  }
+
+  .theme-light input,
+  .theme-light select {
+    @apply border-slate-300 bg-white text-slate-950 focus:border-emerald-500;
+  }
+
+  .theme-light .btn-secondary,
+  .theme-light .btn-tab,
+  .theme-light .btn-ghost,
+  .theme-light .file-button,
+  .theme-light .btn-chip {
+    @apply border-slate-300 bg-white text-slate-800 hover:border-slate-400 hover:bg-slate-100;
+  }
+
+  .theme-light .btn-tab-active,
+  .theme-light .btn-chip-active {
+    @apply border-emerald-500 bg-emerald-50 text-emerald-800;
   }
 }

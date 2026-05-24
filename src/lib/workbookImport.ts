@@ -77,6 +77,7 @@ function parseOwnerBalances(ws: XLSX.WorkSheet, dayNo: number): OwnerBalanceRow[
     rows.push({
       id: `${dayNo}-owner-${row}`,
       label: label || "Owner Balance",
+      description: label || "Owner Balance",
       amount
     });
   }
@@ -95,6 +96,7 @@ function parseCredits(ws: XLSX.WorkSheet, dayNo: number): CreditRow[] {
       id: `${dayNo}-credit-${row}`,
       partyName: partyName || "Credit Party",
       opening,
+      loan: today,
       today,
       receive
     });
@@ -104,6 +106,8 @@ function parseCredits(ws: XLSX.WorkSheet, dayNo: number): CreditRow[] {
 
 function categoryFromCell(value: unknown): CommissionCategory | null {
   const name = stringValue(value);
+  if (name === "Jazz Cash") return "JazzCash";
+  if (name === "Jazz Load") return "JazzLoad";
   return COMMISSION_CATEGORIES.find((category) => category === name) ?? null;
 }
 

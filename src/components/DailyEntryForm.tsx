@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   COMMISSION_CATEGORIES,
+  type CatalogItem,
   type CommissionCategory,
   type CreditRow,
   type DailyLedgerInput,
@@ -13,30 +14,40 @@ import { computeDay } from "../lib/formulaEngine";
 type Props = {
   dayNo: number;
   openingBalance: number;
+  dateLabel: string;
+  utcClock: string;
+  expenseCategories: CatalogItem[];
+  creditParties: CatalogItem[];
   initial?: DailyLedgerInput;
   disabled?: boolean;
   previousDay?: DailyLedgerInput;
   onSave: (input: DailyLedgerInput) => Promise<void>;
 };
 
-const emptyExpense = (dayNo: number): ExpenseItem => ({
+const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+
+const emptyExpense = (dayNo: number, category?: CatalogItem): ExpenseItem => ({
   id: `${dayNo}-expense-${crypto.randomUUID()}`,
   name: "",
   description: "",
-  amount: 0
+  amount: 0,
+  categoryId: category?.id,
+  category: category?.name
 });
 
-const emptyCredit = (dayNo: number): CreditRow => ({
+const emptyCredit = (dayNo: number, party?: CatalogItem): CreditRow => ({
   id: `${dayNo}-credit-${crypto.randomUUID()}`,
-  partyName: "",
+  partyId: party?.id,
+  partyName: party?.name ?? "",
   opening: 0,
-  today: 0,
+  loan: 0,
   receive: 0
 });
 
 const emptyOwner = (dayNo: number): OwnerBalanceRow => ({
   id: `${dayNo}-owner-${crypto.randomUUID()}`,
-  label: "",
+  opening: 0,
+  description: "",
   amount: 0
 });
 
@@ -51,24 +62,56 @@ function inputNumber(value: number, onChange: (value: number) => void, disabled?
   );
 }
 
-export function DailyEntryForm({ dayNo, openingBalance, initial, disabled, previousDay, onSave }: Props) {
-  const [date, setDate] = useState(initial?.date ?? "");
+function activeOrFallback(items: CatalogItem[], fallback: string[]) {
+  const active = items.filter((item) => item.active);
+  if (active.length) return active;
+  return fallback.map((name, index) => ({
+    id: slug(name),
+    name,
+    active: true,
+    sortOrder: index
+  }));
+}
+
+function normalizeCommissionCategory(category: string): CommissionCategory | null {
+  if (category === "Jazz Cash") return "JazzCash";
+  if (category === "Jazz Load") return "JazzLoad";
+  return COMMISSION_CATEGORIES.find((item) => item === category) ?? null;
+}
+
+export function DailyEntryForm({
+  dayNo,
+  openingBalance,
+  dateLabel,
+  utcClock,
+  expenseCategories,
+  creditParties,
+  initial,
+  disabled,
+  previousDay,
+  onSave
+}: Props) {
+  const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
+  const partyOptions = creditParties.filter((item) => item.active);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [expenses, setExpenses] = useState<ExpenseItem[]>(
-    initial?.expenses.length ? initial.expenses : [emptyExpense(dayNo)]
+    initial?.expenses.length ? initial.expenses : [emptyExpense(dayNo, categoryOptions[0])]
   );
   const [ownerBalances, setOwnerBalances] = useState<OwnerBalanceRow[]>(
     initial?.ownerBalances.length ? initial.ownerBalances : [emptyOwner(dayNo)]
   );
   const [credits, setCredits] = useState<CreditRow[]>(
-    initial?.credits.length ? initial.credits : [emptyCredit(dayNo)]
+    initial?.credits.length ? initial.credits : [emptyCredit(dayNo, partyOptions[0])]
   );
   const [commissions, setCommissions] = useState<Record<CommissionCategory, number>>(() => {
     const values = COMMISSION_CATEGORIES.reduce(
       (acc, category) => ({ ...acc, [category]: 0 }),
       {} as Record<CommissionCategory, number>
     );
-    for (const item of initial?.commissions ?? []) values[item.category] = item.amount;
+    for (const item of initial?.commissions ?? []) {
+      const category = normalizeCommissionCategory(item.category);
+      if (category) values[category] = item.amount;
+    }
     return values;
   });
   const [saving, setSaving] = useState(false);
@@ -76,12 +119,15 @@ export function DailyEntryForm({ dayNo, openingBalance, initial, disabled, previ
   const payload = useMemo<DailyLedgerInput>(
     () => ({
       dayNo,
-      date,
+      date: dateLabel,
+      label: dayNo === 32 ? "FINAL" : `Day ${dayNo}`,
       notes,
       expenses: expenses.filter((item) => item.name || item.description || item.amount !== 0),
-      ownerBalances: ownerBalances.filter((row) => row.label || row.amount !== 0),
+      ownerBalances: ownerBalances.filter(
+        (row) => row.description || row.label || row.amount !== 0 || (row.opening ?? 0) !== 0
+      ),
       credits: credits.filter(
-        (row) => row.partyName || row.opening !== 0 || row.today !== 0 || row.receive !== 0
+        (row) => row.partyName || row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0
       ),
       commissions: COMMISSION_CATEGORIES.map((category, index) => ({
         id: `${dayNo}-commission-${index}`,
@@ -89,7 +135,7 @@ export function DailyEntryForm({ dayNo, openingBalance, initial, disabled, previ
         amount: commissions[category] ?? 0
       })).filter((item) => item.amount !== 0)
     }),
-    [commissions, credits, date, dayNo, expenses, notes, ownerBalances]
+    [commissions, credits, dateLabel, dayNo, expenses, notes, ownerBalances]
   );
 
   const preview: MonthComputed["days"][number] = computeDay(payload, openingBalance);
@@ -106,267 +152,224 @@ export function DailyEntryForm({ dayNo, openingBalance, initial, disabled, previ
   function copyCreditsFromPrevious() {
     if (!previousDay) return;
     setCredits(
-      previousDay.credits.map((row) => ({
-        ...row,
-        id: `${dayNo}-credit-${crypto.randomUUID()}`,
-        opening: row.balance ?? row.opening + row.today - row.receive,
-        today: 0,
-        receive: 0
-      }))
+      previousDay.credits.map((row) => {
+        const loan = row.loan ?? row.today ?? 0;
+        return {
+          ...row,
+          id: `${dayNo}-credit-${crypto.randomUUID()}`,
+          opening: row.balance ?? row.opening + loan - row.receive,
+          loan: 0,
+          today: 0,
+          receive: 0
+        };
+      })
     );
   }
 
-  function addQuickExpense(description: string, category: string) {
-    setExpenses((rows) => [
-      ...rows,
-      {
-        ...emptyExpense(dayNo),
-        description,
-        category
-      }
-    ]);
+  function chooseExpenseCategory(index: number, categoryId: string) {
+    const category = categoryOptions.find((item) => item.id === categoryId);
+    setExpenses((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, categoryId, category: category?.name ?? "" } : row))
+    );
+  }
+
+  function chooseCreditParty(index: number, partyId: string) {
+    const party = partyOptions.find((item) => item.id === partyId);
+    setCredits((rows) =>
+      rows.map((row, i) => (i === index ? { ...row, partyId, partyName: party?.name ?? "" } : row))
+    );
   }
 
   return (
-    <section className="panel">
-      <div className="panel-title">
-        <div>
-          <h2>Day {dayNo} Entry</h2>
-          <p>Opening {preview.openingBalance.toLocaleString()}</p>
-        </div>
-        <button className="btn-primary" disabled={disabled || saving} onClick={handleSave}>
-          {saving ? "Saving..." : "Save Day"}
-        </button>
-      </div>
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="space-y-5">
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
+              <p>{dateLabel} · UTC {utcClock}</p>
+            </div>
+            <button className="btn-primary" disabled={disabled || saving} onClick={handleSave}>
+              {saving ? "Saving..." : "Save Day"}
+            </button>
+          </div>
+          <div className="grid two">
+            <label>
+              Opening Balance
+              <input value={preview.openingBalance.toLocaleString()} disabled readOnly />
+            </label>
+            <label>
+              Notes
+              <input value={notes} disabled={disabled} onChange={(event) => setNotes(event.target.value)} />
+            </label>
+          </div>
+        </section>
 
-      <div className="grid two">
-        <label>
-          Date label
-          <input value={date} disabled={disabled} onChange={(event) => setDate(event.target.value)} />
-        </label>
-        <label>
-          Notes
-          <input value={notes} disabled={disabled} onChange={(event) => setNotes(event.target.value)} />
-        </label>
-      </div>
-
-      <h3>Expenses</h3>
-      <div className="quick-actions">
-        <button className="btn-ghost" type="button" disabled={disabled} onClick={() => addQuickExpense("Salary", "Salary")}>
-          Salary
-        </button>
-        <button className="btn-ghost" type="button" disabled={disabled} onClick={() => addQuickExpense("Refreshment", "Refreshment")}>
-          Refreshment
-        </button>
-        <button className="btn-ghost" type="button" disabled={disabled} onClick={() => addQuickExpense("IMSI", "IMSI")}>
-          IMSI
-        </button>
-        <button className="btn-ghost" type="button" disabled={disabled} onClick={() => addQuickExpense("Utilities", "Utilities")}>
-          Utilities
-        </button>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Description</th>
-              <th>Category</th>
-              <th>Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {expenses.map((item, index) => (
-              <tr key={item.id}>
-                <td>
-                  <input
-                    value={item.name}
-                    disabled={disabled}
-                    onChange={(event) =>
-                      setExpenses((rows) =>
-                        rows.map((row, i) => (i === index ? { ...row, name: event.target.value } : row))
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    value={item.description}
-                    disabled={disabled}
-                    onChange={(event) =>
-                      setExpenses((rows) =>
-                        rows.map((row, i) =>
-                          i === index ? { ...row, description: event.target.value } : row
-                        )
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  <input
-                    value={item.category ?? ""}
-                    disabled={disabled}
-                    onChange={(event) =>
-                      setExpenses((rows) =>
-                        rows.map((row, i) =>
-                          i === index ? { ...row, category: event.target.value } : row
-                        )
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  {inputNumber(
-                    item.amount,
-                    (amount) =>
-                      setExpenses((rows) =>
-                        rows.map((row, i) => (i === index ? { ...row, amount } : row))
-                      ),
-                    disabled
-                  )}
-                </td>
-              </tr>
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <h3>Commission</h3>
+              <p>Fixed order entries</p>
+            </div>
+          </div>
+          <div className="grid compact">
+            {COMMISSION_CATEGORIES.map((category) => (
+              <label key={category}>
+                {category}
+                {inputNumber(
+                  commissions[category] ?? 0,
+                  (amount) => setCommissions((prev) => ({ ...prev, [category]: amount })),
+                  disabled
+                )}
+              </label>
             ))}
-          </tbody>
-        </table>
-      </div>
-      <button className="btn-secondary" disabled={disabled} onClick={() => setExpenses((rows) => [...rows, emptyExpense(dayNo)])}>
-        Add Expense
-      </button>
+          </div>
+        </section>
 
-      <h3>Commissions</h3>
-      <div className="grid compact">
-        {COMMISSION_CATEGORIES.map((category) => (
-          <label key={category}>
-            {category}
-            {inputNumber(
-              commissions[category] ?? 0,
-              (amount) => setCommissions((prev) => ({ ...prev, [category]: amount })),
-              disabled
-            )}
-          </label>
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <h3>Expense</h3>
+              <p>Categories are managed separately and selected here</p>
+            </div>
+            <button className="btn-secondary" disabled={disabled} onClick={() => setExpenses((rows) => [...rows, emptyExpense(dayNo, categoryOptions[0])])}>
+              Add Expense
+            </button>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th>Name</th>
+                  <th>Description</th>
+                  <th>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {expenses.map((item, index) => (
+                  <tr key={item.id}>
+                    <td>
+                      <select value={item.categoryId ?? slug(item.category ?? categoryOptions[0]?.name ?? "")} disabled={disabled} onChange={(event) => chooseExpenseCategory(index, event.target.value)}>
+                        {categoryOptions.map((category) => (
+                          <option key={category.id} value={category.id}>{category.name}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <input value={item.name} disabled={disabled} onChange={(event) => setExpenses((rows) => rows.map((row, i) => (i === index ? { ...row, name: event.target.value } : row)))} />
+                    </td>
+                    <td>
+                      <input value={item.description} disabled={disabled} onChange={(event) => setExpenses((rows) => rows.map((row, i) => (i === index ? { ...row, description: event.target.value } : row)))} />
+                    </td>
+                    <td>{inputNumber(item.amount, (amount) => setExpenses((rows) => rows.map((row, i) => (i === index ? { ...row, amount } : row))), disabled)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <h3>Franchise Owner</h3>
+              <p>Opening, description, amount, and calculated balance</p>
+            </div>
+            <button className="btn-secondary" disabled={disabled} onClick={() => setOwnerBalances((rows) => [...rows, emptyOwner(dayNo)])}>
+              Add Owner Row
+            </button>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Opening</th>
+                  <th>Description</th>
+                  <th>Amount</th>
+                  <th>Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ownerBalances.map((row, index) => (
+                  <tr key={row.id}>
+                    <td>{inputNumber(row.opening ?? 0, (opening) => setOwnerBalances((rows) => rows.map((item, i) => (i === index ? { ...item, opening } : item))), disabled)}</td>
+                    <td><input value={row.description ?? row.label ?? ""} disabled={disabled} onChange={(event) => setOwnerBalances((rows) => rows.map((item, i) => (i === index ? { ...item, description: event.target.value, label: event.target.value } : item)))} /></td>
+                    <td>{inputNumber(row.amount, (amount) => setOwnerBalances((rows) => rows.map((item, i) => (i === index ? { ...item, amount } : item))), disabled)}</td>
+                    <td><input value={((row.opening ?? 0) + row.amount).toLocaleString()} disabled readOnly /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-title">
+            <div>
+              <h3>Credit Parties</h3>
+              <p>Balances carry by party ID</p>
+            </div>
+            <div className="quick-actions">
+              <button className="btn-ghost" type="button" disabled={disabled || !previousDay} onClick={copyCreditsFromPrevious}>
+                Carry Previous
+              </button>
+              <button className="btn-secondary" disabled={disabled} onClick={() => setCredits((rows) => [...rows, emptyCredit(dayNo, partyOptions[0])])}>
+                Add Party
+              </button>
+            </div>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Party</th>
+                  <th>Opening</th>
+                  <th>Loan</th>
+                  <th>Receive</th>
+                  <th>Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {credits.map((row, index) => {
+                  const balance = row.opening + (row.loan ?? row.today ?? 0) - row.receive;
+                  return (
+                    <tr key={row.id}>
+                      <td>
+                        <select value={row.partyId ?? ""} disabled={disabled || partyOptions.length === 0} onChange={(event) => chooseCreditParty(index, event.target.value)}>
+                          <option value="">{partyOptions.length ? "Select party" : "Create party first"}</option>
+                          {partyOptions.map((party) => (
+                            <option key={party.id} value={party.id}>{party.name}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{inputNumber(row.opening, (opening) => setCredits((rows) => rows.map((item, i) => (i === index ? { ...item, opening } : item))), disabled)}</td>
+                      <td>{inputNumber(row.loan ?? row.today ?? 0, (loan) => setCredits((rows) => rows.map((item, i) => (i === index ? { ...item, loan, today: loan } : item))), disabled)}</td>
+                      <td>{inputNumber(row.receive, (receive) => setCredits((rows) => rows.map((item, i) => (i === index ? { ...item, receive } : item))), disabled)}</td>
+                      <td><input value={balance.toLocaleString()} disabled readOnly /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <aside className="space-y-3 xl:sticky xl:top-5 xl:self-start">
+        {[
+          ["Opening Balance", preview.openingBalance],
+          ["Commission", preview.commissionTotal],
+          ["Expense", preview.expenseTotal],
+          ["Balance", preview.returnBalance],
+          ["Credit", preview.creditTotals.balance]
+        ].map(([label, value]) => (
+          <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/20" key={label}>
+            <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{Number(value).toLocaleString()}</p>
+          </div>
         ))}
-      </div>
-
-      <h3>Franchise Owner / Cash</h3>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ownerBalances.map((row, index) => (
-              <tr key={row.id}>
-                <td>
-                  <input
-                    value={row.label}
-                    disabled={disabled}
-                    onChange={(event) =>
-                      setOwnerBalances((rows) =>
-                        rows.map((item, i) => (i === index ? { ...item, label: event.target.value } : item))
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  {inputNumber(
-                    row.amount,
-                    (amount) =>
-                      setOwnerBalances((rows) =>
-                        rows.map((item, i) => (i === index ? { ...item, amount } : item))
-                      ),
-                    disabled
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <button className="btn-secondary" disabled={disabled} onClick={() => setOwnerBalances((rows) => [...rows, emptyOwner(dayNo)])}>
-        Add Owner/Cash Row
-      </button>
-
-      <h3>Credit Parties</h3>
-      <div className="quick-actions">
-        <button className="btn-ghost" type="button" disabled={disabled || !previousDay} onClick={copyCreditsFromPrevious}>
-          Carry Previous Credit Balances
-        </button>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Party</th>
-              <th>Opening</th>
-              <th>Today</th>
-              <th>Receive</th>
-            </tr>
-          </thead>
-          <tbody>
-            {credits.map((row, index) => (
-              <tr key={row.id}>
-                <td>
-                  <input
-                    value={row.partyName}
-                    disabled={disabled}
-                    onChange={(event) =>
-                      setCredits((rows) =>
-                        rows.map((item, i) =>
-                          i === index ? { ...item, partyName: event.target.value } : item
-                        )
-                      )
-                    }
-                  />
-                </td>
-                <td>
-                  {inputNumber(
-                    row.opening,
-                    (opening) =>
-                      setCredits((rows) =>
-                        rows.map((item, i) => (i === index ? { ...item, opening } : item))
-                      ),
-                    disabled
-                  )}
-                </td>
-                <td>
-                  {inputNumber(
-                    row.today,
-                    (today) =>
-                      setCredits((rows) =>
-                        rows.map((item, i) => (i === index ? { ...item, today } : item))
-                      ),
-                    disabled
-                  )}
-                </td>
-                <td>
-                  {inputNumber(
-                    row.receive,
-                    (receive) =>
-                      setCredits((rows) =>
-                        rows.map((item, i) => (i === index ? { ...item, receive } : item))
-                      ),
-                    disabled
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <button className="btn-secondary" disabled={disabled} onClick={() => setCredits((rows) => [...rows, emptyCredit(dayNo)])}>
-        Add Credit Party
-      </button>
-
-      <div className="metric-row">
-        <strong>Issue {preview.issueBalance.toLocaleString()}</strong>
-        <strong>Expense {preview.expenseTotal.toLocaleString()}</strong>
-        <strong>Return {preview.returnBalance.toLocaleString()}</strong>
-        <strong>Credit {preview.creditTotals.balance.toLocaleString()}</strong>
-      </div>
+      </aside>
     </section>
   );
 }

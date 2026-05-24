@@ -14,15 +14,26 @@ service cloud.firestore {
         request.auth.uid == uid &&
         request.resource.data.uid == uid &&
         request.resource.data.active == true &&
-        request.resource.data.role in ["owner", "staff"];
+        request.resource.data.role == "viewer";
     }
 
     function isOwner() {
       return isAuthenticated() && userDoc().data.role == "owner" && userDoc().data.active == true;
     }
 
-    function isStaff() {
+    function isAdmin() {
+      return isAuthenticated() &&
+        userDoc().data.role in ["admin", "staff"] &&
+        userDoc().data.active == true;
+    }
+
+    function isActiveUser() {
       return isAuthenticated() && userDoc().data.active == true;
+    }
+
+    function canEditDaily(monthId) {
+      return (isOwner() || isAdmin()) &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
     }
 
     match /users/{uid} {
@@ -32,20 +43,40 @@ service cloud.firestore {
     }
 
     match /months/{monthId} {
-      allow read: if isStaff();
-      allow create: if isStaff();
-      allow update: if isOwner() || (isStaff() && resource.data.status == "open");
+      allow read: if isActiveUser();
+      allow create: if isOwner() || isAdmin();
+      allow update: if isOwner() || (isAdmin() && resource.data.status == "open");
       allow delete: if isOwner();
 
-      match /{subCollection=**}/{docId} {
-        allow read: if isStaff();
-        allow create: if isStaff();
-        allow update: if isOwner() || (
-          isStaff() &&
-          get(/databases/$(database)/documents/months/$(monthId)).data.status == "open"
-        );
+      match /summary/{summaryId} {
+        allow read: if isActiveUser();
+        allow create, update: if isOwner() || canEditDaily(monthId);
         allow delete: if isOwner();
       }
+
+      match /audit/{eventId} {
+        allow read: if isActiveUser();
+        allow create: if isOwner() || isAdmin();
+        allow update, delete: if isOwner();
+      }
+
+      match /days/{dayId} {
+        allow read: if isActiveUser();
+        allow create, update: if canEditDaily(monthId);
+        allow delete: if isOwner();
+      }
+
+      match /days/{dayId}/{subCollection=**}/{docId} {
+        allow read: if isActiveUser();
+        allow create, update: if canEditDaily(monthId);
+        allow delete: if isOwner();
+      }
+    }
+
+    match /settings/{catalog}/items/{itemId} {
+      allow read: if isActiveUser();
+      allow create, update: if isOwner() || isAdmin();
+      allow delete: if isOwner();
     }
   }
 }

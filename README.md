@@ -124,7 +124,7 @@ Open:
 http://127.0.0.1:5173/
 ```
 
-On load, the app signs in anonymously and creates/loads the current user profile in Firestore.
+On load, the app signs in anonymously and creates/loads the current user profile in Firestore. New self-created profiles start as `viewer`; an existing owner must assign `owner`, `admin`, or `viewer` from the `Users` screen.
 
 ## Daily Usage Flow
 
@@ -136,19 +136,30 @@ On load, the app signs in anonymously and creates/loads the current user profile
 Connected to Firestore
 ```
 
-4. Enter the month ID.
-5. Enter the opening balance.
-6. Click `Load / Create`.
-7. Use `Excel Import` if you are starting from a workbook.
-8. Use `Daily Entry` for day-to-day input.
-9. Use `Dashboard` for review, export, print, backup, and month closing.
+4. Enter the month ID, for example `2026-04`.
+5. Click `Load / Create`.
+6. Use `Excel Import` if you are starting from a workbook.
+7. Use `Daily Entry` for day-to-day input.
+8. Use `Dashboard` for review, export, print, and month status.
 
-Main tabs:
+Global sidebar:
 
 - `Dashboard`: KPI cards, charts, reports, export, backup, close/reopen month.
-- `Daily Entry`: one screen for the daily ledger.
-- `Excel Import`: workbook upload and validation.
+- `Daily Entry`: sectioned daily operational entry.
+- `Expense Categories`: managed expense category IDs for dropdown use.
+- `Credit Parties`: managed party IDs for credit rows.
+- `Users`: owner-only user role management.
+- `Excel Import`: owner-only workbook upload and validation.
+- `Backup`: owner-only backup export and restore.
 - `System Blueprint`: the product direction and formula understanding.
+
+Roles:
+
+- `owner`: full access, including users, imports, backups, month close/reopen, and deletes allowed by rules.
+- `admin`: daily entry and catalog management only.
+- `viewer`: read-only dashboard/report access.
+
+The theme toggle in the sidebar switches between light and dark mode and stores the preference in the browser.
 
 ## Excel Import Workflow
 
@@ -213,22 +224,25 @@ Steps:
 
 Daily entry supports:
 
-- Date label
+- UTC-locked date label and live UTC clock
 - Notes
-- Expenses
-- Expense categories
-- Commission rows
-- Owner/cash balance rows
-- Credit party rows
+- Day dropdown from `Day 1` to `Day 31` plus `FINAL`
+- Expenses with managed category IDs
+- Fixed-order commission rows starting with `JazzCash` and `JazzLoad`
+- Separate franchise owner rows: opening, description, amount, calculated balance
+- Separate credit party rows: party ID, opening, loan, receive, calculated balance
 - Previous credit balance carry-forward
-- Quick expense presets
+- Right-side summary for opening balance, commission, expense, balance, and credit
 
 Balance behavior:
 
-- Day `1` starts from the month opening balance.
+- New month opening balance is read from day `32` of the previous month when available.
+- If previous month day `32` does not exist, opening balance defaults to `0`.
+- Day `1` starts from the resolved month opening balance.
 - Day `2` and onward use the previous day return balance as the next opening value.
-- Credit-party balances can carry from the previous day.
+- Credit-party balances carry by party ID.
 - Saving a day recalculates the month dashboard.
+- Automated formula fields are read-only in the UI for owner and admin.
 
 Closed month behavior:
 
@@ -291,6 +305,9 @@ Main structure:
 
 ```text
 users/{uid}
+settings/expenseCategories/items/{categoryId}
+settings/creditParties/items/{partyId}
+settings/commissionCategories/items/{categoryId}
 months/{monthId}
 months/{monthId}/days/{dayNo}
 months/{monthId}/days/{dayNo}/expenses/{expenseId}
@@ -311,7 +328,7 @@ Stores:
 
 - `uid`
 - `email`
-- `role`
+- `role`: `owner`, `admin`, or `viewer`
 - `active`
 - timestamps
 
@@ -465,4 +482,3 @@ Fix for now:
 - Month-to-month comparison exists as a product goal, but deeper comparison workflows can still be expanded.
 - Bundle size can be improved by lazy-loading workbook import and chart libraries.
 - Import validation is tuned for the current workbook structure and should be expanded if the sheet layout changes.
-

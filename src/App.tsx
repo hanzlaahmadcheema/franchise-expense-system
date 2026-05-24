@@ -1,9 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
-import { Cloud, Database, FileDown, FileSpreadsheet, RefreshCw, Upload } from "lucide-react";
+import {
+  BookOpen,
+  Cloud,
+  Database,
+  FileDown,
+  FileSpreadsheet,
+  LayoutDashboard,
+  ListTree,
+  Moon,
+  RefreshCw,
+  Shield,
+  Sun,
+  Tags,
+  Upload,
+  Users,
+  WalletCards
+} from "lucide-react";
 import { DailyEntryForm } from "./components/DailyEntryForm";
 import { HomeDashboard } from "./components/HomeDashboard";
-import type { DailyLedgerInput, MonthComputed, MonthRecord, WorkbookImportPreview } from "./types/ledger";
+import type {
+  CatalogItem,
+  DailyLedgerInput,
+  MonthComputed,
+  MonthRecord,
+  UserProfile,
+  UserRole,
+  WorkbookImportPreview
+} from "./types/ledger";
 import { computeMonth } from "./lib/formulaEngine";
 import {
   exportBackupPackage,
@@ -15,15 +39,22 @@ import { parseWorkbookFile } from "./lib/workbookImport";
 import { auth, isFirebaseConfigured } from "./lib/firebase";
 import {
   commitWorkbookImport,
+  ensureDefaultCatalogs,
   fetchMonthDays,
   getUserRole,
+  listCatalogItems,
   listMonths,
+  listUsers,
+  resolveOpeningBalance,
+  roleCan,
   saveDayAndRecalculate,
   saveMonthRecord,
-  setMonthStatus
+  setMonthStatus,
+  updateUserProfile,
+  upsertCatalogItem
 } from "./lib/firestoreService";
 
-type View = "dashboard" | "entry" | "import" | "blueprint";
+type View = "dashboard" | "entry" | "expense-categories" | "credit-parties" | "users" | "import" | "backup" | "blueprint";
 
 type BackupPackage = {
   exportedAt: number;
@@ -51,6 +82,177 @@ function createMonth(id: string, openingBalance: number): MonthRecord {
     createdAt: timestamp,
     updatedAt: timestamp
   };
+}
+
+function slug(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function formatMonth(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, 1));
+  if (Number.isNaN(date.getTime())) return monthId;
+  return new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function dateLabelFor(monthId: string, dayNo: number) {
+  if (dayNo === 32) return `FINAL - ${formatMonth(monthId)}`;
+  const [yearText, monthText] = monthId.split("-");
+  const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, dayNo));
+  if (Number.isNaN(date.getTime())) return `Day ${dayNo}`;
+  return new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+}
+
+function utcClockText(now: Date) {
+  return new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: "UTC"
+  }).format(now);
+}
+
+function CatalogManager({
+  title,
+  items,
+  canEdit,
+  onSave
+}: {
+  title: string;
+  items: CatalogItem[];
+  canEdit: boolean;
+  onSave: (item: CatalogItem) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <div>
+          <h2>{title}</h2>
+          <p>Create IDs once, then use dropdowns during daily entry.</p>
+        </div>
+      </div>
+      {canEdit && (
+        <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
+          <label>
+            Name
+            <input value={name} onChange={(event) => setName(event.target.value)} />
+          </label>
+          <button
+            className="btn-primary self-end"
+            disabled={!name.trim()}
+            onClick={async () => {
+              const clean = name.trim();
+              await onSave({ id: slug(clean), name: clean, active: true, sortOrder: items.length });
+              setName("");
+            }}
+          >
+            Add
+          </button>
+        </div>
+      )}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Order</th>
+              {canEdit && <th>Action</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id}>
+                <td>{item.id}</td>
+                <td>{item.name}</td>
+                <td>{item.active ? "Active" : "Inactive"}</td>
+                <td>{item.sortOrder}</td>
+                {canEdit && (
+                  <td>
+                    <button className="btn-secondary" onClick={() => onSave({ ...item, active: !item.active })}>
+                      {item.active ? "Disable" : "Enable"}
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function UserManager({
+  users,
+  currentUid,
+  canEdit,
+  onUpdate
+}: {
+  users: UserProfile[];
+  currentUid?: string;
+  canEdit: boolean;
+  onUpdate: (uid: string, updates: Pick<UserProfile, "role" | "active">) => Promise<void>;
+}) {
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <div>
+          <h2>Users</h2>
+          <p>Owner assigns owner/admin/viewer access after sign-in.</p>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Active</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((profile) => (
+              <tr key={profile.uid}>
+                <td>{profile.uid === currentUid ? `${profile.uid.slice(0, 8)} (you)` : profile.uid.slice(0, 12)}</td>
+                <td>{profile.email || "Anonymous"}</td>
+                <td>
+                  <select
+                    value={profile.role}
+                    disabled={!canEdit || profile.uid === currentUid}
+                    onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
+                  >
+                    <option value="owner">owner</option>
+                    <option value="admin">admin</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                </td>
+                <td>
+                  <button
+                    className="btn-secondary"
+                    disabled={!canEdit || profile.uid === currentUid}
+                    onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
+                  >
+                    {profile.active ? "Active" : "Inactive"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 function SystemBlueprint() {
@@ -116,6 +318,7 @@ function FirebaseMissing() {
 function App() {
   const [view, setView] = useState<View>("dashboard");
   const [user, setUser] = useState<User | null>(null);
+  const [role, setRole] = useState<UserRole | null>(null);
   const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
   const [monthId, setMonthId] = useState("2026-04");
   const [openingBalance, setOpeningBalance] = useState(0);
@@ -127,6 +330,11 @@ function App() {
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
+  const [expenseCategories, setExpenseCategories] = useState<CatalogItem[]>([]);
+  const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
+  const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
     const firebaseAuth = auth;
@@ -145,15 +353,38 @@ function App() {
         return;
       }
       setUser(nextUser);
-      await getUserRole(nextUser.uid, nextUser.email);
-      setAuthStatus("Connected to Firestore");
+      const nextRole = await getUserRole(nextUser.uid, nextUser.email);
+      setRole(nextRole);
+      setAuthStatus(`Connected to Firestore · ${nextRole}`);
     });
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   async function refreshMonthList() {
     const records = await listMonths();
     setMonths(records);
     return records;
+  }
+
+  async function refreshCatalogs() {
+    if (roleCan(role, "catalogs")) await ensureDefaultCatalogs();
+    const [expenses, parties, profiles] = await Promise.all([
+      listCatalogItems("expenseCategories"),
+      listCatalogItems("creditParties"),
+      roleCan(role, "users") ? listUsers().catch(() => []) : Promise.resolve([])
+    ]);
+    setExpenseCategories(expenses);
+    setCreditParties(parties);
+    setUsers(profiles);
   }
 
   async function loadMonth(nextMonthId = monthId) {
@@ -163,7 +394,12 @@ function App() {
       const records = await refreshMonthList();
       const existing = records.find((month) => month.id === nextMonthId);
       if (!existing) {
-        const created = createMonth(nextMonthId, openingBalance);
+        if (!roleCan(role, "daily")) {
+          setStatus("This month does not exist yet. Owner or admin access is required to create it.");
+          return;
+        }
+        const resolvedOpening = await resolveOpeningBalance(nextMonthId);
+        const created = createMonth(nextMonthId, resolvedOpening);
         const nextComputed = await saveMonthRecord(created, []);
         setMonthId(created.id);
         setOpeningBalance(created.openingBalance);
@@ -189,8 +425,11 @@ function App() {
   }
 
   useEffect(() => {
-    if (user) void loadMonth(monthId);
-  }, [user]);
+    if (user && role) {
+      void refreshCatalogs();
+      void loadMonth(monthId);
+    }
+  }, [user, role]);
 
   const selectedDayInput = useMemo(
     () => days.find((day) => day.dayNo === selectedDay) ?? emptyDay(selectedDay),
@@ -208,6 +447,10 @@ function App() {
   }, [computed?.days, openingBalance, selectedDay]);
 
   async function saveDay(day: DailyLedgerInput) {
+    if (!roleCan(role, "daily")) {
+      setStatus("Your role can view this month but cannot edit daily entries.");
+      return;
+    }
     setLoading(true);
     try {
       const nextComputed = await saveDayAndRecalculate(monthId, openingBalance, day);
@@ -225,6 +468,10 @@ function App() {
 
   async function handleWorkbook(file: File | null) {
     if (!file) return;
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Workbook import is restricted to owner access.");
+      return;
+    }
     setLoading(true);
     setStatus("Parsing workbook...");
     try {
@@ -240,6 +487,10 @@ function App() {
 
   async function commitImport() {
     if (!importPreview) return;
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Workbook import is restricted to owner access.");
+      return;
+    }
     setLoading(true);
     try {
       const nextComputed = await commitWorkbookImport(importPreview);
@@ -259,6 +510,10 @@ function App() {
   }
 
   async function recalc() {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Manual recalculation is restricted to owner access.");
+      return;
+    }
     setLoading(true);
     try {
       const nextComputed = await saveMonthRecord(
@@ -276,6 +531,10 @@ function App() {
   }
 
   async function toggleClosed() {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Closing and reopening months is restricted to owner access.");
+      return;
+    }
     const nextStatus = monthStatus === "open" ? "closed" : "open";
     setLoading(true);
     try {
@@ -291,6 +550,10 @@ function App() {
   }
 
   async function exportBackup() {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Backup export is restricted to owner access.");
+      return;
+    }
     setLoading(true);
     try {
       const records = await refreshMonthList();
@@ -312,6 +575,10 @@ function App() {
 
   async function importBackup(file: File | null) {
     if (!file) return;
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Backup restore is restricted to owner access.");
+      return;
+    }
     setLoading(true);
     try {
       const backup = (await readBackupPackage(file)) as BackupPackage;
@@ -331,138 +598,202 @@ function App() {
   if (!isFirebaseConfigured) return <FirebaseMissing />;
 
   const isClosed = monthStatus === "closed";
+  const canEditDaily = roleCan(role, "daily") && !isClosed;
+  const canManageCatalogs = roleCan(role, "catalogs");
+  const canManageUsers = roleCan(role, "users");
+  const canUseOwnerControls = roleCan(role, "ownerControls");
+  const dateLabel = dateLabelFor(monthId, selectedDay);
+  const utcClock = utcClockText(now);
+  const shellTone =
+    theme === "dark"
+      ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
+      : "theme-light bg-[linear-gradient(180deg,#f8fafc,#e2e8f0)] text-slate-950";
+  const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; show: boolean }> = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
+    { id: "entry", label: "Daily Entry", icon: WalletCards, show: true },
+    { id: "expense-categories", label: "Expense Categories", icon: Tags, show: true },
+    { id: "credit-parties", label: "Credit Parties", icon: ListTree, show: true },
+    { id: "users", label: "Users", icon: Users, show: canManageUsers },
+    { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseOwnerControls },
+    { id: "backup", label: "Backup", icon: FileDown, show: canUseOwnerControls },
+    { id: "blueprint", label: "System Blueprint", icon: BookOpen, show: true }
+  ];
+
+  async function saveCatalog(
+    catalog: "expenseCategories" | "creditParties" | "commissionCategories",
+    item: CatalogItem
+  ) {
+    await upsertCatalogItem(catalog, item);
+    await refreshCatalogs();
+    setStatus(`${item.name} saved.`);
+  }
+
+  async function saveUserRole(uid: string, updates: Pick<UserProfile, "role" | "active">) {
+    await updateUserProfile(uid, updates);
+    setUsers(await listUsers());
+    setStatus("User access updated.");
+  }
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl">
-      <header className="mb-6 flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-5 shadow-xl shadow-black/20 backdrop-blur md:flex-row md:items-center md:justify-between">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-emerald-300">Franchise Finance</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">Operating Ledger</h1>
-          <p className="mt-2 flex items-center gap-2 text-sm text-slate-400">
-            <Cloud className="h-4 w-4 text-emerald-300" />
-            {authStatus}{user ? ` · ${user.uid.slice(0, 8)}` : ""}
-          </p>
-        </div>
-        <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3">
-          <Database className="h-5 w-5 text-blue-300" />
-          <div>
-            <p className="text-xs text-slate-500">Active month</p>
-            <p className="font-semibold text-white">{monthId} · {monthStatus}</p>
+    <main className={`min-h-screen ${shellTone}`}>
+      <div className="grid min-h-screen lg:grid-cols-[17rem_minmax(0,1fr)]">
+        <aside className="border-b border-slate-800 bg-slate-950/95 p-4 text-slate-100 lg:border-b-0 lg:border-r">
+          <div className="mb-6 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase text-emerald-300">Franchise Finance</p>
+              <h1 className="text-xl font-semibold">Operating Ledger</h1>
+            </div>
+            <button className="btn-ghost !h-9 !px-3" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
+              {theme === "dark" ? <Sun /> : <Moon />}
+            </button>
           </div>
-        </div>
-      </header>
-
-      <section className="mb-4 grid grid-cols-1 gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_auto_auto_auto] md:items-end">
-        <label>
-          Month
-          <input value={monthId} onChange={(event) => setMonthId(event.target.value)} />
-        </label>
-        <label>
-          Opening Balance
-          <input
-            type="number"
-            value={openingBalance}
-            disabled={isClosed}
-            onChange={(event) => setOpeningBalance(Number(event.target.value))}
-          />
-        </label>
-        <button className="btn-primary" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
-          Load / Create
-        </button>
-        <button className="btn-secondary" disabled={loading || !user} onClick={recalc}>
-          <RefreshCw className="h-4 w-4" />
-          Recalculate
-        </button>
-        <button className="btn-secondary" disabled={loading || !user} onClick={toggleClosed}>
-          {isClosed ? "Reopen Month" : "Close Month"}
-        </button>
-      </section>
-
-      {months.length > 0 && (
-        <div className="mb-4 flex flex-wrap gap-2">
-          {months.slice(0, 8).map((month) => (
-            <button
-              className={month.id === monthId ? "btn-chip btn-chip-active" : "btn-chip"}
-              key={month.id}
-              onClick={() => loadMonth(month.id)}
-            >
-              {month.id} · {month.status}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <nav className="mb-5 flex flex-wrap gap-2">
-        <button className={view === "dashboard" ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => setView("dashboard")}>
-          Dashboard
-        </button>
-        <button className={view === "entry" ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => setView("entry")}>
-          Daily Entry
-        </button>
-        <button className={view === "import" ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => setView("import")}>
-          Excel Import
-        </button>
-        <button className={view === "blueprint" ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => setView("blueprint")}>
-          System Blueprint
-        </button>
-      </nav>
-
-      {status && <p className="status">{status}</p>}
-      {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
-
-      {view === "dashboard" && (
-        <>
-          <div className="mb-5 flex flex-wrap gap-2">
-            <button className="btn-primary" disabled={!computed} onClick={() => computed && exportMonthToExcel(computed)}>
-              <FileSpreadsheet className="h-4 w-4" />
-              Export Excel
-            </button>
-            <button className="btn-secondary" disabled={!computed} onClick={printMonthReport}>
-              Print / PDF
-            </button>
-            <button className="btn-secondary" disabled={loading || !user} onClick={exportBackup}>
-              <FileDown className="h-4 w-4" />
-              Export Backup
-            </button>
-            <label className="file-button">
-              <Upload className="h-4 w-4" />
-              Import Backup
-              <input type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
-            </label>
+          <nav className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
+            {navItems.filter((item) => item.show).map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.id} className={view === item.id ? "btn-tab btn-tab-active justify-start" : "btn-tab justify-start"} onClick={() => setView(item.id)}>
+                  <Icon />
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
+          <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
+            <p className="flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
+            <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> {user ? user.uid.slice(0, 8) : "No user"}</p>
           </div>
-          <HomeDashboard month={computed} />
-        </>
-      )}
+        </aside>
 
-      {view === "entry" && (
-        <>
-          <section className="mb-4 max-w-xs rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20">
+        <div className="min-w-0 px-4 py-5 sm:px-6 lg:px-8">
+          <header className="mb-5 flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-sm font-semibold uppercase text-emerald-300">{formatMonth(monthId)}</p>
+              <h2 className="mt-1 text-2xl font-semibold">Operating Dashboard</h2>
+              <p className="mt-2 text-sm text-slate-400">UTC {utcClock} · {monthStatus} · {role ?? "connecting"}</p>
+            </div>
+            <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3">
+              <Database className="h-5 w-5 text-blue-300" />
+              <div>
+                <p className="text-xs text-slate-500">Active month</p>
+                <p className="font-semibold text-white">{monthId}</p>
+              </div>
+            </div>
+          </header>
+
+          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_auto_auto_auto] md:items-end">
             <label>
-              Day / Period
-              <input
-                type="number"
-                min={1}
-                max={32}
-                value={selectedDay}
-                onChange={(event) => setSelectedDay(Number(event.target.value))}
-              />
+              Month
+              <input value={monthId} onChange={(event) => setMonthId(event.target.value)} />
             </label>
+            <label>
+              Opening Balance
+              <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+            </label>
+            <button className="btn-primary" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
+              Load / Create
+            </button>
+            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
+              <RefreshCw />
+              Recalculate
+            </button>
+            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
+              {isClosed ? "Reopen Month" : "Close Month"}
+            </button>
           </section>
-          <DailyEntryForm
-            key={`${monthId}-${selectedDay}`}
-            dayNo={selectedDay}
-            openingBalance={selectedOpening}
-            initial={selectedDayInput}
-            previousDay={previousDayInput}
-            disabled={isClosed || loading || !user}
-            onSave={saveDay}
-          />
-        </>
-      )}
 
-      {view === "import" && (
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
+          {months.length > 0 && (
+            <div className="mb-4 flex flex-wrap gap-2">
+              {months.slice(0, 8).map((month) => (
+                <button className={month.id === monthId ? "btn-chip btn-chip-active" : "btn-chip"} key={month.id} onClick={() => loadMonth(month.id)}>
+                  {formatMonth(month.id)} · {month.status}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {status && <p className="status">{status}</p>}
+          {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
+
+          {view === "dashboard" && (
+            <>
+              <div className="mb-5 flex flex-wrap gap-2">
+                <button className="btn-primary" disabled={!computed} onClick={() => computed && exportMonthToExcel(computed)}>
+                  <FileSpreadsheet />
+                  Export Excel
+                </button>
+                <button className="btn-secondary" disabled={!computed} onClick={printMonthReport}>
+                  Print / PDF
+                </button>
+              </div>
+              <HomeDashboard month={computed} />
+            </>
+          )}
+
+          {view === "entry" && (
+            <>
+              <section className="mb-4 max-w-sm rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
+                <label>
+                  Day / Period
+                  <select value={selectedDay} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+                    {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                      <option key={day} value={day}>Day {day}</option>
+                    ))}
+                    <option value={32}>FINAL</option>
+                  </select>
+                </label>
+              </section>
+              <DailyEntryForm
+                key={`${monthId}-${selectedDay}`}
+                dayNo={selectedDay}
+                openingBalance={selectedOpening}
+                dateLabel={dateLabel}
+                utcClock={utcClock}
+                expenseCategories={expenseCategories}
+                creditParties={creditParties}
+                initial={selectedDayInput}
+                previousDay={previousDayInput}
+                disabled={!canEditDaily || loading || !user}
+                onSave={saveDay}
+              />
+            </>
+          )}
+
+          {view === "expense-categories" && (
+            <CatalogManager title="Expense Categories" items={expenseCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("expenseCategories", item)} />
+          )}
+
+          {view === "credit-parties" && (
+            <CatalogManager title="Credit Parties" items={creditParties} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("creditParties", item)} />
+          )}
+
+          {view === "users" && (
+            <UserManager users={users} currentUid={user?.uid} canEdit={canManageUsers} onUpdate={saveUserRole} />
+          )}
+
+          {view === "backup" && (
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h2>Backup</h2>
+                  <p>Owner-only backup export and restore.</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={exportBackup}>
+                  <FileDown />
+                  Export Backup
+                </button>
+                <label className={`file-button ${!canUseOwnerControls ? "pointer-events-none opacity-50" : ""}`}>
+                  <Upload />
+                  Import Backup
+                  <input type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
+                </label>
+              </div>
+            </section>
+          )}
+
+          {view === "import" && (
+            <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20">
           <div className="panel-title">
             <div>
               <h2>Excel Import</h2>
@@ -511,10 +842,11 @@ function App() {
               </button>
             </>
           )}
-        </section>
-      )}
+            </section>
+          )}
 
-      {view === "blueprint" && <SystemBlueprint />}
+          {view === "blueprint" && <SystemBlueprint />}
+        </div>
       </div>
     </main>
   );

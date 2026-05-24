@@ -27,21 +27,39 @@ const emptyCommissionMap = (): Record<CommissionCategory, number> =>
     {} as Record<CommissionCategory, number>
   );
 
+function normalizeCommissionCategory(category: string): CommissionCategory | null {
+  if (category === "Jazz Cash") return "JazzCash";
+  if (category === "Jazz Load") return "JazzLoad";
+  return COMMISSION_CATEGORIES.find((item) => item === category) ?? null;
+}
+
 export function computeDay(day: DailyLedgerInput, openingBalance: number): DailyLedgerComputed {
   const issueBalance = sum(day.commissions.map((item) => item.amount));
   const totalBalance = openingBalance + issueBalance;
   const expenseTotal = sum(day.expenses.map((item) => item.amount));
   const returnBalance = totalBalance - expenseTotal;
-  const ownerBalanceTotal = sum(day.ownerBalances.map((row) => row.amount));
+  const ownerBalances = day.ownerBalances.map((row) => {
+    const rowOpening = row.opening ?? 0;
+    const balance = rowOpening + row.amount;
+    return {
+      ...row,
+      label: row.label ?? row.description,
+      description: row.description ?? row.label ?? "",
+      balance
+    };
+  });
+  const ownerBalanceTotal = sum(ownerBalances.map((row) => row.balance ?? row.amount));
 
   const creditRows = day.credits.map((row) => ({
     ...row,
-    balance: row.opening + row.today - row.receive
+    loan: row.loan ?? row.today ?? 0,
+    today: row.loan ?? row.today ?? 0,
+    balance: row.opening + (row.loan ?? row.today ?? 0) - row.receive
   }));
 
   const creditTotals = {
     opening: sum(creditRows.map((row) => row.opening)),
-    today: sum(creditRows.map((row) => row.today)),
+    today: sum(creditRows.map((row) => row.loan ?? row.today ?? 0)),
     receive: sum(creditRows.map((row) => row.receive)),
     balance: sum(creditRows.map((row) => row.balance ?? 0))
   };
@@ -58,7 +76,7 @@ export function computeDay(day: DailyLedgerInput, openingBalance: number): Daily
     returnBalance,
     commissionTotal: issueBalance,
     ownerBalanceTotal,
-    ownerBalances: day.ownerBalances,
+    ownerBalances,
     creditRows,
     creditTotals
   };
@@ -81,7 +99,8 @@ export function computeMonth(
   const commissionMatrix = days.map((day) => {
     const byCategory = emptyCommissionMap();
     for (const item of sorted.find((d) => d.dayNo === day.dayNo)?.commissions ?? []) {
-      byCategory[item.category] += item.amount;
+      const category = normalizeCommissionCategory(item.category);
+      if (category) byCategory[category] += item.amount;
     }
     return {
       dayNo: day.dayNo,
@@ -103,7 +122,7 @@ export function computeMonth(
     for (const row of day.creditRows) {
       const current = creditMap.get(row.partyName) ?? { balance: 0, activeDays: new Set<number>() };
       current.balance = row.balance ?? 0;
-      if ((row.balance ?? 0) !== 0 || row.opening !== 0 || row.today !== 0 || row.receive !== 0) {
+      if ((row.balance ?? 0) !== 0 || row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0) {
         current.activeDays.add(day.dayNo);
       }
       creditMap.set(row.partyName, current);

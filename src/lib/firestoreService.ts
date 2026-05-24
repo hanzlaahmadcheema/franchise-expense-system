@@ -19,6 +19,8 @@ import type {
   MonthComputed,
   MonthRecord,
   MonthStatus,
+  CatalogItem,
+  UserProfile,
   UserRole,
   WorkbookImportPreview
 } from "../types/ledger";
@@ -72,9 +74,12 @@ export async function getUserRole(uid: string, email?: string | null): Promise<U
   const firestore = requireDb();
   const ref = doc(firestore, "users", uid);
   const snap = await getDoc(ref);
-  if (snap.exists()) return (snap.data().role as UserRole) ?? "staff";
+  if (snap.exists()) {
+    const role = snap.data().role;
+    return role === "staff" ? "admin" : ((role as UserRole) ?? "viewer");
+  }
 
-  const firstUserRole: UserRole = "owner";
+  const firstUserRole: UserRole = "viewer";
   await setDoc(ref, {
     uid,
     email: email ?? "",
@@ -84,6 +89,123 @@ export async function getUserRole(uid: string, email?: string | null): Promise<U
     updatedAt: now()
   });
   return firstUserRole;
+}
+
+export async function listUsers(): Promise<UserProfile[]> {
+  const firestore = requireDb();
+  const snap = await getDocs(query(collection(firestore, "users"), orderBy("createdAt", "asc")));
+  return snap.docs.map((userDoc) => {
+    const data = userDoc.data() as Omit<UserProfile, "role"> & { role?: UserRole | "staff" };
+    return {
+      ...data,
+      uid: data.uid ?? userDoc.id,
+      role: data.role === "staff" ? "admin" : (data.role ?? "viewer")
+    };
+  });
+}
+
+export async function updateUserProfile(uid: string, updates: Pick<UserProfile, "role" | "active">) {
+  const firestore = requireDb();
+  await updateDoc(doc(firestore, "users", uid), {
+    ...updates,
+    updatedAt: now()
+  });
+}
+
+const defaultExpenseCategories = ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"];
+
+export const defaultCommissionCatalog: CatalogItem[] = [
+  "JazzCash",
+  "JazzLoad",
+  "Efics MFS",
+  "Efics BILL",
+  "SIM Commission",
+  "Retail IMSI",
+  "Franchise IMSI",
+  "GST Comm",
+  "Tax Claim Rebate",
+  "MNP Comm",
+  "Other 1",
+  "Other 2"
+].map((name, index) => ({
+  id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
+  name,
+  active: true,
+  sortOrder: index
+}));
+
+function catalogCollection(name: "expenseCategories" | "creditParties" | "commissionCategories") {
+  return collection(requireDb(), "settings", name, "items");
+}
+
+export async function listCatalogItems(
+  name: "expenseCategories" | "creditParties" | "commissionCategories"
+): Promise<CatalogItem[]> {
+  const snap = await getDocs(query(catalogCollection(name), orderBy("sortOrder", "asc")));
+  return snap.docs.map((itemDoc) => itemDoc.data() as CatalogItem);
+}
+
+export async function upsertCatalogItem(
+  name: "expenseCategories" | "creditParties" | "commissionCategories",
+  item: CatalogItem
+) {
+  await setDoc(
+    doc(requireDb(), "settings", name, "items", item.id),
+    cleanForFirestore({
+      ...item,
+      updatedAt: now(),
+      createdAt: item.createdAt ?? now()
+    }),
+    { merge: true }
+  );
+}
+
+export async function ensureDefaultCatalogs() {
+  const [expenses, commissions] = await Promise.all([
+    listCatalogItems("expenseCategories"),
+    listCatalogItems("commissionCategories")
+  ]);
+  if (expenses.length === 0) {
+    await Promise.all(
+      defaultExpenseCategories.map((name, index) =>
+        upsertCatalogItem("expenseCategories", {
+          id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+          name,
+          active: true,
+          sortOrder: index
+        })
+      )
+    );
+  }
+  if (commissions.length === 0) {
+    await Promise.all(defaultCommissionCatalog.map((item) => upsertCatalogItem("commissionCategories", item)));
+  }
+}
+
+export function roleCan(role: UserRole | null, permission: "daily" | "catalogs" | "users" | "ownerControls" | "read") {
+  if (!role) return false;
+  if (permission === "read") return true;
+  if (role === "owner") return true;
+  if (role === "admin") return permission === "daily" || permission === "catalogs";
+  return false;
+}
+
+function previousMonthId(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const year = Number(yearText);
+  const monthIndex = Number(monthText) - 1;
+  if (!Number.isInteger(year) || !Number.isInteger(monthIndex)) return null;
+  const date = new Date(Date.UTC(year, monthIndex - 1, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+export async function resolveOpeningBalance(monthId: string): Promise<number> {
+  const previousId = previousMonthId(monthId);
+  if (!previousId) return 0;
+  const previousDays = await fetchMonthDays(previousId).catch(() => []);
+  const previousMonth = (await getDoc(doc(requireDb(), "months", previousId))).data() as MonthRecord | undefined;
+  const computed = computeMonth(previousDays, previousMonth?.openingBalance ?? 0, previousId);
+  return computed.days.find((day) => day.dayNo === 32)?.returnBalance ?? 0;
 }
 
 export async function listMonths(): Promise<MonthRecord[]> {
@@ -140,6 +262,7 @@ export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[
     days.push({
       dayNo,
       date: base.date,
+      label: base.label,
       notes: base.notes,
       expenses: expenseSnap.docs.map((d) => d.data() as DailyLedgerInput["expenses"][number]),
       commissions: commissionSnap.docs.map(

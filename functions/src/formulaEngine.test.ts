@@ -8,15 +8,15 @@ test("computeMonth handles carry-forward", () => {
       {
         dayNo: 1,
         expenses: [{ amount: 19540 }],
-        commissions: [{ amount: 11436, category: "Jazz Load" }],
-        credits: [{ opening: 0, today: 0, receive: 0, partyName: "p1" }],
-        ownerBalances: [{ label: "Cash", amount: 1000 }]
+        commissions: [{ amount: 11436, category: "JazzLoad" }],
+        credits: [{ opening: 0, loan: 0, receive: 0, partyName: "p1" }],
+        ownerBalances: [{ description: "Cash", opening: 100, amount: 900 }]
       },
       {
         dayNo: 2,
         expenses: [{ amount: 0 }],
-        commissions: [{ amount: 0, category: "Jazz Load" }],
-        credits: [{ opening: 0, today: 0, receive: 0, partyName: "p1" }],
+        commissions: [{ amount: 0, category: "JazzLoad" }],
+        credits: [{ opening: 0, loan: 0, receive: 0, partyName: "p1" }],
         ownerBalances: []
       }
     ],

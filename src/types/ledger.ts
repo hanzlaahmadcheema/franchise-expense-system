@@ -1,6 +1,6 @@
 export const COMMISSION_CATEGORIES = [
-  "Jazz Load",
-  "Jazz Cash",
+  "JazzCash",
+  "JazzLoad",
   "Efics MFS",
   "Efics BILL",
   "SIM Commission",
@@ -15,7 +15,7 @@ export const COMMISSION_CATEGORIES = [
 
 export type CommissionCategory = (typeof COMMISSION_CATEGORIES)[number];
 
-export type UserRole = "owner" | "staff";
+export type UserRole = "owner" | "admin" | "viewer";
 
 export type MonthStatus = "open" | "closed";
 
@@ -30,6 +30,7 @@ export type ExpenseItem = {
   name: string;
   description: string;
   amount: number;
+  categoryId?: string;
   category?: string;
 };
 
@@ -41,17 +42,22 @@ export type CommissionItem = {
 
 export type CreditRow = {
   id: string;
+  partyId?: string;
   partyName: string;
   opening: number;
-  today: number;
+  loan: number;
   receive: number;
   balance?: number;
+  today?: number;
 };
 
 export type OwnerBalanceRow = {
   id: string;
-  label: string;
+  description: string;
   amount: number;
+  opening?: number;
+  balance?: number;
+  label?: string;
 };
 
 export type DailyLedgerInput = {
@@ -131,6 +137,24 @@ export type MonthRecord = {
   openingBalance: number;
   status: MonthStatus;
   importedFileName?: string;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+export type CatalogItem = {
+  id: string;
+  name: string;
+  active: boolean;
+  sortOrder: number;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+export type UserProfile = {
+  uid: string;
+  email?: string | null;
+  role: UserRole;
+  active: boolean;
   createdAt?: number;
   updatedAt?: number;
 };
