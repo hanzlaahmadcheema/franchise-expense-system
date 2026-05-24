@@ -961,6 +961,7 @@ function App() {
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
+  const canSelectDailyDate = role === "owner" || role === "admin";
   const canUseImportBackup = roleCan(role, "importBackup");
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
@@ -1156,16 +1157,28 @@ function App() {
 
               {expenseSection === "daily-entry" && (
                 <>
-                  <section className="mb-4 max-w-sm rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
-                    <label>
-                      Day / Period · {formatMonth(monthId)}
-                      <select value={selectedDay} disabled={!canUseOwnerControls} onChange={(event) => setSelectedDay(Number(event.target.value))}>
-                        {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                          <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
-                        ))}
-                        <option value={32}>FINAL</option>
-                      </select>
-                    </label>
+                  <section className="mb-4 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr] md:items-end">
+                      <label>
+                        Calendar date
+                        <input
+                          type="date"
+                          value={calendarValue}
+                          disabled={!canSelectDailyDate || selectedDay === 32}
+                          onChange={(event) => selectCalendarDate(event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Day / Period · {formatMonth(monthId)}
+                        <select value={selectedDay} disabled={!canSelectDailyDate} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+                          {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                            <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
+                          ))}
+                          <option value={32}>FINAL</option>
+                        </select>
+                      </label>
+                    </div>
+                    <p className="mt-3 text-sm text-slate-400">Live date: {liveClock}</p>
                   </section>
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
