@@ -6,6 +6,7 @@ import {
   Cloud,
   FileDown,
   FileSpreadsheet,
+  History,
   LayoutDashboard,
   Moon,
   RefreshCw,
@@ -53,7 +54,7 @@ import {
   upsertCatalogItem
 } from "./lib/firestoreService";
 
-type View = "dashboard" | "expense" | "users" | "import" | "backup";
+type View = "dashboard" | "records" | "expense" | "users" | "import" | "backup";
 type ExpenseSection = "daily-entry" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
 
 type BackupPackage = {
@@ -285,6 +286,177 @@ function UserManager({
                 </td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function currency(value: number) {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
+function RecordsView({
+  months,
+  monthId,
+  selectedDay,
+  days,
+  computed,
+  loading,
+  onMonthSelect,
+  onDaySelect
+}: {
+  months: MonthRecord[];
+  monthId: string;
+  selectedDay: number;
+  days: DailyLedgerInput[];
+  computed: MonthComputed | null;
+  loading: boolean;
+  onMonthSelect: (monthId: string) => void;
+  onDaySelect: (dayNo: number) => void;
+}) {
+  const dayInput = days.find((day) => day.dayNo === selectedDay);
+  const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
+
+  return (
+    <section className="space-y-5">
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <h2>Previous Records</h2>
+            <p>Select a month, then inspect a single date without entering edit mode.</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+          <label>
+            Month
+            <select value={monthId} disabled={loading || months.length === 0} onChange={(event) => onMonthSelect(event.target.value)}>
+              {months.map((month) => (
+                <option key={month.id} value={month.id}>
+                  {formatMonth(month.id)} · {month.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Date / Period
+            <select value={selectedDay} disabled={loading} onChange={(event) => onDaySelect(Number(event.target.value))}>
+              {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+                <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
+              ))}
+              <option value={32}>FINAL</option>
+            </select>
+          </label>
+          <button className="btn-secondary" disabled={loading} onClick={() => onMonthSelect(monthId)}>
+            Load Records
+          </button>
+        </div>
+      </section>
+
+      {dayInput && dayComputed ? (
+        <>
+          <section className="grid gap-3 md:grid-cols-5">
+            {[
+              ["Opening", dayComputed.openingBalance],
+              ["Commission", dayComputed.commissionTotal],
+              ["Expense", dayComputed.expenseTotal],
+              ["Return", dayComputed.returnBalance],
+              ["Credit", dayComputed.creditTotals.balance]
+            ].map(([label, value]) => (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4" key={label}>
+                <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
+                <p className="mt-2 text-2xl font-semibold text-white">{currency(Number(value))}</p>
+              </div>
+            ))}
+          </section>
+
+          <section className="panel">
+            <div className="panel-title">
+              <div>
+                <h3>{dayInput.label ?? `Day ${selectedDay}`}</h3>
+                <p>{dayInput.date ?? dateLabelFor(monthId, selectedDay)} · read-only record</p>
+              </div>
+            </div>
+            {dayInput.notes && <p className="status">{dayInput.notes}</p>}
+          </section>
+
+          <section className="grid gap-5 xl:grid-cols-2">
+            <RecordTable
+              title="Expenses"
+              headers={["Category", "Name", "Description", "Amount"]}
+              rows={dayInput.expenses.map((item) => [
+                item.category ?? "-",
+                item.name || "-",
+                item.description || "-",
+                currency(item.amount)
+              ])}
+            />
+            <RecordTable
+              title="Commissions"
+              headers={["Category", "Amount"]}
+              rows={dayInput.commissions.map((item) => [item.category, currency(item.amount)])}
+            />
+            <RecordTable
+              title="Credit Parties"
+              headers={["Party", "Opening", "Loan", "Receive", "Balance"]}
+              rows={dayComputed.creditRows.map((row) => [
+                row.partyName,
+                currency(row.opening),
+                currency(row.loan ?? row.today ?? 0),
+                currency(row.receive),
+                currency(row.balance ?? 0)
+              ])}
+            />
+            <RecordTable
+              title="Franchise Owner"
+              headers={["Opening", "Description", "Amount", "Balance"]}
+              rows={dayComputed.ownerBalances.map((row) => [
+                currency(row.opening ?? 0),
+                row.description ?? row.label ?? "-",
+                currency(row.amount),
+                currency(row.balance ?? 0)
+              ])}
+            />
+          </section>
+        </>
+      ) : (
+        <section className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/50 p-10 text-center">
+          <h2 className="text-xl font-semibold text-white">No record for this date</h2>
+          <p className="mt-2 text-sm text-slate-400">Choose another day or load a month that has saved entries.</p>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function RecordTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <div>
+          <h3>{title}</h3>
+          <p>{rows.length} saved rows</p>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {headers.map((header) => <th key={header}>{header}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${title}-${index}`}>
+                {row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={headers.length}>No saved rows.</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -638,6 +810,7 @@ function App() {
       : "theme-light bg-[linear-gradient(180deg,#f8fafc,#e2e8f0)] text-slate-950";
   const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; show: boolean }> = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
+    { id: "records", label: "Previous Records", icon: History, show: true },
     { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
     { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseImportBackup },
@@ -780,6 +953,19 @@ function App() {
               </div>
               <HomeDashboard month={computed} />
             </>
+          )}
+
+          {view === "records" && (
+            <RecordsView
+              months={months}
+              monthId={monthId}
+              selectedDay={selectedDay}
+              days={days}
+              computed={computed}
+              loading={loading}
+              onMonthSelect={(nextMonthId) => void loadMonth(nextMonthId)}
+              onDaySelect={setSelectedDay}
+            />
           )}
 
           {view === "expense" && (

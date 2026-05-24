@@ -145,6 +145,7 @@ Connected to Firestore
 Global sidebar:
 
 - `Dashboard`: KPI cards, charts, reports, export, backup, close/reopen month.
+- `Previous Records`: read-only month and single-date record lookup.
 - `Expense`: top-tab workspace for daily entry, dashboard review, expense categories, credit parties, and commission categories.
 - `Users`: owner-only user role management.
 - `Excel Import`: owner/admin workbook upload and validation.
