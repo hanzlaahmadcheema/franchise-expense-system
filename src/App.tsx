@@ -316,8 +316,10 @@ function RecordsView({
   onMonthSelect: (monthId: string) => void;
   onDaySelect: (dayNo: number) => void;
 }) {
+  const [recordMode, setRecordMode] = useState<"month" | "day">("month");
   const dayInput = days.find((day) => day.dayNo === selectedDay);
   const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
+  const monthRows = computed?.homeSummary.dayRows ?? [];
 
   return (
     <section className="space-y-5">
@@ -325,8 +327,22 @@ function RecordsView({
         <div className="panel-title">
           <div>
             <h2>Previous Records</h2>
-            <p>Select a month, then inspect a single date without entering edit mode.</p>
+            <p>Review a full month or drill into a single date without entering edit mode.</p>
           </div>
+        </div>
+        <div className="mb-4 flex flex-wrap gap-2">
+          {[
+            ["month", "Whole Month"],
+            ["day", "Single Date"]
+          ].map(([id, label]) => (
+            <button
+              className={recordMode === id ? "btn-tab btn-tab-active" : "btn-tab"}
+              key={id}
+              onClick={() => setRecordMode(id as "month" | "day")}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
           <label>
@@ -339,9 +355,9 @@ function RecordsView({
               ))}
             </select>
           </label>
-          <label>
+          <label className={recordMode === "day" ? "" : "opacity-50"}>
             Date / Period
-            <select value={selectedDay} disabled={loading} onChange={(event) => onDaySelect(Number(event.target.value))}>
+            <select value={selectedDay} disabled={loading || recordMode === "month"} onChange={(event) => onDaySelect(Number(event.target.value))}>
               {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
                 <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
               ))}
@@ -354,7 +370,54 @@ function RecordsView({
         </div>
       </section>
 
-      {dayInput && dayComputed ? (
+      {recordMode === "month" && computed ? (
+        <>
+          <HomeDashboard month={computed} />
+          <section className="grid gap-5 xl:grid-cols-2">
+            <RecordTable
+              title="Month Day Records"
+              headers={["Period", "Opening", "Issue", "Expense", "Return", "Credit"]}
+              rows={monthRows.map((row) => [
+                row.label ?? `Day ${row.dayNo}`,
+                currency(row.openingBalance),
+                currency(row.issueBalance),
+                currency(row.expenseTotal),
+                currency(row.returnBalance),
+                currency(row.creditBalance)
+              ])}
+            />
+            <RecordTable
+              title="Expense Categories"
+              headers={["Category", "Amount"]}
+              rows={computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)])}
+            />
+            <RecordTable
+              title="Commission Categories"
+              headers={["Category", "Amount"]}
+              rows={[...computed.homeSummary.commissionMatrix
+                .reduce((totals, row) => {
+                  for (const [category, amount] of Object.entries(row.byCategory)) {
+                    totals.set(category, (totals.get(category) ?? 0) + amount);
+                  }
+                  return totals;
+                }, new Map<string, number>())
+                .entries()]
+                .filter(([, amount]) => amount !== 0)
+                .sort((a, b) => b[1] - a[1])
+                .map(([category, amount]) => [category, currency(amount)])}
+            />
+            <RecordTable
+              title="Credit Party Aging"
+              headers={["Party", "Latest Balance", "Active Days"]}
+              rows={computed.homeSummary.creditPartyBalances.map((row) => [
+                row.partyName,
+                currency(row.balance),
+                String(row.activeDays)
+              ])}
+            />
+          </section>
+        </>
+      ) : recordMode === "day" && dayInput && dayComputed ? (
         <>
           <section className="grid gap-3 md:grid-cols-5">
             {[
