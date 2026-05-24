@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
   CalendarDays,
@@ -651,6 +651,7 @@ function App() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [now, setNow] = useState(() => new Date());
+  const syncedLiveDateRef = useRef(false);
 
   useEffect(() => {
     const firebaseAuth = auth;
@@ -706,6 +707,7 @@ function App() {
   }
 
   async function loadMonth(nextMonthId = monthId) {
+    const liveDateOnLoad = currentDateState();
     setLoadingMessage(`Loading ${formatMonth(nextMonthId)} records...`);
     setLoading(true);
     setStatus("");
@@ -721,6 +723,10 @@ function App() {
         const created = createMonth(nextMonthId, resolvedOpening);
         const nextComputed = await saveMonthRecord(created, []);
         setMonthId(created.id);
+        if (!syncedLiveDateRef.current && created.id === liveDateOnLoad.monthId) {
+          setSelectedDay(liveDateOnLoad.dayNo);
+          syncedLiveDateRef.current = true;
+        }
         setOpeningBalance(created.openingBalance);
         setMonthStatusState(created.status);
         setDays([]);
@@ -731,6 +737,10 @@ function App() {
       }
       const loadedDays = await fetchMonthDays(existing.id);
       setMonthId(existing.id);
+      if (!syncedLiveDateRef.current && existing.id === liveDateOnLoad.monthId) {
+        setSelectedDay(liveDateOnLoad.dayNo);
+        syncedLiveDateRef.current = true;
+      }
       setOpeningBalance(existing.openingBalance);
       setMonthStatusState(existing.status);
       setDays(loadedDays);
