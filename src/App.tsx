@@ -427,6 +427,19 @@ function RecordsView({
                 String(row.activeDays)
               ])}
             />
+            <RecordTable
+              title="Franchise Owner"
+              headers={["Period", "Opening", "Description", "Amount", "Balance"]}
+              rows={computed.days.flatMap((day) =>
+                day.ownerBalances.map((row) => [
+                  day.label ?? `Day ${day.dayNo}`,
+                  currency(row.opening ?? 0),
+                  row.description ?? row.label ?? "-",
+                  currency(row.amount),
+                  currency(row.balance ?? 0)
+                ])
+              )}
+            />
           </section>
         </>
       ) : recordMode === "day" && dayInput && dayComputed ? (
