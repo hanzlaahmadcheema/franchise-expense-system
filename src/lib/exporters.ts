@@ -1,8 +1,11 @@
 import * as XLSX from "xlsx";
-import { COMMISSION_CATEGORIES, type MonthComputed } from "../types/ledger";
+import type { MonthComputed } from "../types/ledger";
 
 export function exportMonthToExcel(month: MonthComputed) {
   const workbook = XLSX.utils.book_new();
+  const commissionCategories = [
+    ...new Set(month.homeSummary.commissionMatrix.flatMap((row) => Object.keys(row.byCategory)))
+  ];
   const summaryRows = [
     ["Month", month.monthId ?? ""],
     ["Opening Balance", month.openingBalance],
@@ -31,8 +34,8 @@ export function exportMonthToExcel(month: MonthComputed) {
     XLSX.utils.json_to_sheet(
       month.homeSummary.commissionMatrix.map((row) => ({
         Day: row.dayNo,
-        ...COMMISSION_CATEGORIES.reduce(
-          (acc, category) => ({ ...acc, [category]: row.byCategory[category] }),
+        ...commissionCategories.reduce(
+          (acc, category) => ({ ...acc, [category]: row.byCategory[category] ?? 0 }),
           {}
         ),
         Total: row.rowTotal

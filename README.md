@@ -146,12 +146,10 @@ Global sidebar:
 
 - `Dashboard`: KPI cards, charts, reports, export, backup, close/reopen month.
 - `Daily Entry`: sectioned daily operational entry.
-- `Expense Categories`: managed expense category IDs for dropdown use.
-- `Credit Parties`: managed party IDs for credit rows.
+- `Expense`: top-tab workspace for dashboard review, expense categories, credit parties, and commission categories.
 - `Users`: owner-only user role management.
 - `Excel Import`: owner-only workbook upload and validation.
 - `Backup`: owner-only backup export and restore.
-- `System Blueprint`: the product direction and formula understanding.
 
 Roles:
 

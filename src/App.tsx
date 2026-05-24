@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
-  BookOpen,
   CalendarDays,
   Cloud,
   FileDown,
   FileSpreadsheet,
   LayoutDashboard,
-  ListTree,
   Moon,
   RefreshCw,
   Shield,
@@ -54,7 +52,8 @@ import {
   upsertCatalogItem
 } from "./lib/firestoreService";
 
-type View = "dashboard" | "entry" | "expense-categories" | "credit-parties" | "users" | "import" | "backup" | "blueprint";
+type View = "dashboard" | "entry" | "expense" | "users" | "import" | "backup";
+type ExpenseSection = "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
 
 type BackupPackage = {
   exportedAt: number;
@@ -278,55 +277,6 @@ function UserManager({
   );
 }
 
-function SystemBlueprint() {
-  return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
-      <div className="panel-title">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">What This System Should Become</h2>
-          <p className="mt-2 text-sm text-slate-400">A daily operating cockpit for a franchise, not just a spreadsheet replacement.</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-5">
-          <h3 className="font-semibold text-white">Single Entrance</h3>
-          <p className="mt-2 text-sm text-slate-400">One daily entry captures expenses, commissions, cash/owner balance, credit parties, notes, and corrections.</p>
-        </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-5">
-          <h3 className="font-semibold text-white">Automatic Ledger</h3>
-          <p className="mt-2 text-sm text-slate-400">Opening, issue, total, expense, return, commission matrix, and credit balances recalculate from raw entries.</p>
-        </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-5">
-          <h3 className="font-semibold text-white">Decision Dashboard</h3>
-          <p className="mt-2 text-sm text-slate-400">The owner sees cash position, expense pressure, credit exposure, missing days, and unusual values quickly.</p>
-        </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-5">
-          <h3 className="font-semibold text-white">Cloud With Escape Hatch</h3>
-          <p className="mt-2 text-sm text-slate-400">Firestore is the working database, while backup/export packages keep the data portable.</p>
-        </div>
-      </div>
-
-      <h3 className="mt-6 font-semibold text-white">Workbook Formula Understanding</h3>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {[
-          "Home rows 1-31 map to day sheets",
-          "FINAL acts as adjustment period",
-          "Daily F15 is issue total",
-          "Daily C30 is expense total",
-          "Daily I18 is return balance",
-          "Credit opening carries previous balance",
-          "Home C34/E34 are validation totals"
-        ].map((item) => (
-          <span className="rounded-full border border-slate-700 bg-slate-950 px-3 py-1 text-sm text-slate-300" key={item}>
-            {item}
-          </span>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function FirebaseMissing() {
   return (
     <main className="auth-page">
@@ -341,6 +291,7 @@ function FirebaseMissing() {
 function App() {
   const initialDate = currentDateState();
   const [view, setView] = useState<View>("dashboard");
+  const [expenseSection, setExpenseSection] = useState<ExpenseSection>("expense-dashboard");
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
@@ -355,6 +306,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
   const [expenseCategories, setExpenseCategories] = useState<CatalogItem[]>([]);
+  const [commissionCategories, setCommissionCategories] = useState<CatalogItem[]>([]);
   const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
@@ -401,12 +353,14 @@ function App() {
 
   async function refreshCatalogs() {
     if (roleCan(role, "catalogs")) await ensureDefaultCatalogs();
-    const [expenses, parties, profiles] = await Promise.all([
+    const [expenses, commissions, parties, profiles] = await Promise.all([
       listCatalogItems("expenseCategories"),
+      listCatalogItems("commissionCategories"),
       listCatalogItems("creditParties"),
       roleCan(role, "users") ? listUsers().catch(() => []) : Promise.resolve([])
     ]);
     setExpenseCategories(expenses);
+    setCommissionCategories(commissions);
     setCreditParties(parties);
     setUsers(profiles);
   }
@@ -637,12 +591,10 @@ function App() {
   const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; show: boolean }> = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
     { id: "entry", label: "Daily Entry", icon: WalletCards, show: true },
-    { id: "expense-categories", label: "Expense Categories", icon: Tags, show: true },
-    { id: "credit-parties", label: "Credit Parties", icon: ListTree, show: true },
+    { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
     { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseOwnerControls },
-    { id: "backup", label: "Backup", icon: FileDown, show: canUseOwnerControls },
-    { id: "blueprint", label: "System Blueprint", icon: BookOpen, show: true }
+    { id: "backup", label: "Backup", icon: FileDown, show: canUseOwnerControls }
   ];
 
   async function saveCatalog(
@@ -792,6 +744,7 @@ function App() {
                 dateLabel={dateLabel}
                 liveClock={liveClock}
                 expenseCategories={expenseCategories}
+                commissionCategories={commissionCategories}
                 creditParties={creditParties}
                 initial={selectedDayInput}
                 previousDay={previousDayInput}
@@ -801,12 +754,36 @@ function App() {
             </>
           )}
 
-          {view === "expense-categories" && (
-            <CatalogManager title="Expense Categories" items={expenseCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("expenseCategories", item)} />
-          )}
+          {view === "expense" && (
+            <section>
+              <nav className="mb-5 flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2 text-slate-100 shadow-xl shadow-black/20">
+                {[
+                  ["expense-dashboard", "Dashboard"],
+                  ["expense-categories", "Expense Categories"],
+                  ["credit-parties", "Credit Parties"],
+                  ["commission-categories", "Commission Categories"]
+                ].map(([id, label]) => (
+                  <button
+                    className={expenseSection === id ? "btn-tab btn-tab-active" : "btn-tab"}
+                    key={id}
+                    onClick={() => setExpenseSection(id as ExpenseSection)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </nav>
 
-          {view === "credit-parties" && (
-            <CatalogManager title="Credit Parties" items={creditParties} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("creditParties", item)} />
+              {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} />}
+              {expenseSection === "expense-categories" && (
+                <CatalogManager title="Expense Categories" items={expenseCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("expenseCategories", item)} />
+              )}
+              {expenseSection === "credit-parties" && (
+                <CatalogManager title="Credit Parties" items={creditParties} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("creditParties", item)} />
+              )}
+              {expenseSection === "commission-categories" && (
+                <CatalogManager title="Commission Categories" items={commissionCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("commissionCategories", item)} />
+              )}
+            </section>
           )}
 
           {view === "users" && (
@@ -888,7 +865,6 @@ function App() {
             </section>
           )}
 
-          {view === "blueprint" && <SystemBlueprint />}
         </div>
       </div>
     </main>

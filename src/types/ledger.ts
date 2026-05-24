@@ -13,7 +13,7 @@ export const COMMISSION_CATEGORIES = [
   "Other 2"
 ] as const;
 
-export type CommissionCategory = (typeof COMMISSION_CATEGORIES)[number];
+export type CommissionCategory = string;
 
 export type UserRole = "owner" | "admin" | "viewer";
 
@@ -36,6 +36,7 @@ export type ExpenseItem = {
 
 export type CommissionItem = {
   id: string;
+  categoryId?: string;
   category: CommissionCategory;
   amount: number;
 };
@@ -125,7 +126,7 @@ export type MonthComputed = {
     }>;
     commissionMatrix: Array<{
       dayNo: number;
-      byCategory: Record<CommissionCategory, number>;
+      byCategory: Record<string, number>;
       rowTotal: number;
     }>;
   };

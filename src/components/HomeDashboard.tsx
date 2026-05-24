@@ -23,7 +23,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import { COMMISSION_CATEGORIES, type MonthComputed } from "../types/ledger";
+import type { MonthComputed } from "../types/ledger";
 
 type Props = {
   month: MonthComputed | null;
@@ -144,13 +144,16 @@ export function HomeDashboard({ month }: Props) {
     name: row.category,
     value: row.amount
   }));
-  const commissionData = COMMISSION_CATEGORIES.map((category) => ({
-    name: category,
-    value: month.homeSummary.commissionMatrix.reduce(
-      (total, row) => total + row.byCategory[category],
-      0
-    )
-  })).filter((row) => row.value !== 0);
+  const commissionTotals = new Map<string, number>();
+  for (const row of month.homeSummary.commissionMatrix) {
+    for (const [category, amount] of Object.entries(row.byCategory)) {
+      commissionTotals.set(category, (commissionTotals.get(category) ?? 0) + amount);
+    }
+  }
+  const commissionData = [...commissionTotals.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .filter((row) => row.value !== 0)
+    .sort((a, b) => b.value - a.value);
   const creditData = month.homeSummary.creditPartyBalances.slice(0, 8);
 
   return (

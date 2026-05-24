@@ -1,6 +1,4 @@
 import {
-  COMMISSION_CATEGORIES,
-  type CommissionCategory,
   type DailyLedgerComputed,
   type DailyLedgerInput,
   type MonthComputed
@@ -21,16 +19,10 @@ function expenseCategory(item: { category?: string; name?: string; description?:
   return "General";
 }
 
-const emptyCommissionMap = (): Record<CommissionCategory, number> =>
-  COMMISSION_CATEGORIES.reduce(
-    (acc, category) => ({ ...acc, [category]: 0 }),
-    {} as Record<CommissionCategory, number>
-  );
-
-function normalizeCommissionCategory(category: string): CommissionCategory | null {
+function normalizeCommissionCategory(category: string): string {
   if (category === "Jazz Cash") return "JazzCash";
   if (category === "Jazz Load") return "JazzLoad";
-  return COMMISSION_CATEGORIES.find((item) => item === category) ?? null;
+  return category;
 }
 
 export function computeDay(day: DailyLedgerInput, openingBalance: number): DailyLedgerComputed {
@@ -97,10 +89,10 @@ export function computeMonth(
   });
 
   const commissionMatrix = days.map((day) => {
-    const byCategory = emptyCommissionMap();
+    const byCategory: Record<string, number> = {};
     for (const item of sorted.find((d) => d.dayNo === day.dayNo)?.commissions ?? []) {
       const category = normalizeCommissionCategory(item.category);
-      if (category) byCategory[category] += item.amount;
+      byCategory[category] = (byCategory[category] ?? 0) + item.amount;
     }
     return {
       dayNo: day.dayNo,

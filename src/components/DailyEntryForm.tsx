@@ -3,7 +3,6 @@ import { Pencil, Trash2 } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
-  type CommissionCategory,
   type CommissionItem,
   type CreditRow,
   type DailyLedgerInput,
@@ -19,6 +18,7 @@ type Props = {
   dateLabel: string;
   liveClock: string;
   expenseCategories: CatalogItem[];
+  commissionCategories: CatalogItem[];
   creditParties: CatalogItem[];
   initial?: DailyLedgerInput;
   disabled?: boolean;
@@ -75,15 +75,14 @@ function activeOrFallback(items: CatalogItem[], fallback: string[]) {
   }));
 }
 
-function normalizeCommissionCategory(category: string): CommissionCategory | null {
+function normalizeCommissionCategory(category: string): string {
   if (category === "Jazz Cash") return "JazzCash";
   if (category === "Jazz Load") return "JazzLoad";
-  return COMMISSION_CATEGORIES.find((item) => item === category) ?? null;
+  return category;
 }
 
-const commissionOrder = new Map(COMMISSION_CATEGORIES.map((category, index) => [category, index]));
-
-function sortCommissions(rows: CommissionItem[]) {
+function sortCommissions(rows: CommissionItem[], options: CatalogItem[]) {
+  const commissionOrder = new Map(options.map((category, index) => [category.name, index]));
   return [...rows].sort(
     (a, b) =>
       (commissionOrder.get(a.category) ?? Number.MAX_SAFE_INTEGER) -
@@ -97,6 +96,7 @@ export function DailyEntryForm({
   dateLabel,
   liveClock,
   expenseCategories,
+  commissionCategories,
   creditParties,
   initial,
   disabled,
@@ -104,6 +104,7 @@ export function DailyEntryForm({
   onSave
 }: Props) {
   const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
+  const commissionOptions = activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
   const partyOptions = creditParties.filter((item) => item.active);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [expenses, setExpenses] = useState<ExpenseItem[]>(
@@ -119,17 +120,17 @@ export function DailyEntryForm({
     const rows = (initial?.commissions ?? [])
       .map((item) => {
         const category = normalizeCommissionCategory(item.category);
-        return category ? { ...item, category } : null;
+        const catalog = commissionOptions.find((option) => option.name === category || option.id === item.categoryId);
+        return { ...item, category, categoryId: catalog?.id ?? item.categoryId };
       })
-      .filter((item): item is CommissionItem => Boolean(item))
       .filter((item) => item.amount !== 0);
-    return sortCommissions(rows);
+    return sortCommissions(rows, commissionOptions);
   });
   const [commissionDraft, setCommissionDraft] = useState<Pick<CommissionItem, "category" | "amount">>({
-    category: COMMISSION_CATEGORIES[0],
+    category: commissionOptions[0]?.name ?? COMMISSION_CATEGORIES[0],
     amount: 0
   });
-  const [commissionFilter, setCommissionFilter] = useState<"all" | CommissionCategory>("all");
+  const [commissionFilter, setCommissionFilter] = useState("all");
   const [saving, setSaving] = useState(false);
 
   const payload = useMemo<DailyLedgerInput>(
@@ -145,9 +146,9 @@ export function DailyEntryForm({
       credits: credits.filter(
         (row) => row.partyName || row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0
       ),
-      commissions: sortCommissions(commissions.filter((item) => item.amount !== 0))
+      commissions: sortCommissions(commissions.filter((item) => item.amount !== 0), commissionOptions)
     }),
-    [commissions, credits, dateLabel, dayNo, expenses, notes, ownerBalances]
+    [commissionOptions, commissions, credits, dateLabel, dayNo, expenses, notes, ownerBalances]
   );
 
   const preview: MonthComputed["days"][number] = computeDay(payload, openingBalance);
@@ -193,7 +194,13 @@ export function DailyEntryForm({
   }
 
   const visibleCommissions = sortCommissions(
-    commissions.filter((item) => item.amount !== 0 && (commissionFilter === "all" || item.category === commissionFilter))
+    commissions.filter((item) => {
+      if (item.amount === 0) return false;
+      if (commissionFilter === "all") return true;
+      const selected = commissionOptions.find((category) => category.id === commissionFilter);
+      return item.categoryId === commissionFilter || item.category === selected?.name;
+    }),
+    commissionOptions
   );
 
   function editCommission(item: CommissionItem) {
@@ -214,10 +221,11 @@ export function DailyEntryForm({
         ...rows,
         {
           id: `${dayNo}-commission-${crypto.randomUUID()}`,
+          categoryId: commissionOptions.find((option) => option.name === commissionDraft.category)?.id,
           category: commissionDraft.category,
           amount: commissionDraft.amount
         }
-      ])
+      ], commissionOptions)
     );
     setCommissionDraft((draft) => ({ ...draft, amount: 0 }));
   }
@@ -257,9 +265,9 @@ export function DailyEntryForm({
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
             <label>
               Category
-              <select disabled={disabled} value={commissionDraft.category} onChange={(event) => setCommissionDraft((draft) => ({ ...draft, category: event.target.value as CommissionCategory }))}>
-                {COMMISSION_CATEGORIES.map((category) => (
-                  <option key={category} value={category}>{category}</option>
+              <select disabled={disabled} value={commissionDraft.category} onChange={(event) => setCommissionDraft((draft) => ({ ...draft, category: event.target.value }))}>
+                {commissionOptions.map((category) => (
+                  <option key={category.id} value={category.name}>{category.name}</option>
                 ))}
               </select>
             </label>
@@ -274,10 +282,10 @@ export function DailyEntryForm({
           <div className="mb-4 max-w-xs">
             <label>
               Filter
-              <select value={commissionFilter} onChange={(event) => setCommissionFilter(event.target.value as "all" | CommissionCategory)}>
+              <select value={commissionFilter} onChange={(event) => setCommissionFilter(event.target.value)}>
                 <option value="all">All non-zero</option>
-                {COMMISSION_CATEGORIES.map((category) => (
-                  <option key={category} value={category}>{category}</option>
+                {commissionOptions.map((category) => (
+                  <option key={category.id} value={category.id}>{category.name}</option>
                 ))}
               </select>
             </label>
@@ -294,9 +302,10 @@ export function DailyEntryForm({
               </thead>
               <tbody>
                 {visibleCommissions.map((item) => {
+                  const order = commissionOptions.findIndex((category) => category.name === item.category || category.id === item.categoryId);
                   return (
                     <tr key={item.id}>
-                      <td>{(commissionOrder.get(item.category) ?? 0) + 1}</td>
+                      <td>{order >= 0 ? order + 1 : "-"}</td>
                       <td>{item.category}</td>
                       <td>{item.amount.toLocaleString()}</td>
                       <td>
