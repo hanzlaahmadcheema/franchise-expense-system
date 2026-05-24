@@ -343,6 +343,44 @@ function RecordsView({
   const dayInput = days.find((day) => day.dayNo === selectedDay);
   const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
   const monthRows = computed?.homeSummary.dayRows ?? [];
+  const ownerMonthRows = computed?.days.map((day) => {
+    const opening = day.ownerBalances.reduce((total, row) => total + (row.opening ?? 0), 0);
+    const debt = day.ownerBalances.reduce((total, row) => total + Math.abs(Math.min(row.amount, 0)), 0);
+    const credit = day.ownerBalances.reduce((total, row) => total + Math.max(row.amount, 0), 0);
+    return [
+      day.label ?? `Day ${day.dayNo}`,
+      currency(opening),
+      currency(debt),
+      currency(credit),
+      currency(day.ownerBalanceTotal)
+    ];
+  }) ?? [];
+  const creditAgingRows = computed
+    ? [...computed.days
+        .flatMap((day) => day.creditRows)
+        .reduce((totals, row) => {
+          const current = totals.get(row.partyName) ?? {
+            opening: row.opening,
+            debt: 0,
+            credit: 0,
+            balance: 0
+          };
+          current.debt += row.loan ?? row.today ?? 0;
+          current.credit += row.receive;
+          current.balance = row.balance ?? 0;
+          totals.set(row.partyName, current);
+          return totals;
+        }, new Map<string, { opening: number; debt: number; credit: number; balance: number }>())
+        .entries()]
+        .sort((a, b) => b[1].balance - a[1].balance)
+        .map(([partyName, row]) => [
+          partyName,
+          currency(row.opening),
+          currency(row.debt),
+          currency(row.credit),
+          currency(row.balance)
+        ])
+    : [];
 
   return (
     <section className="space-y-5">
@@ -405,23 +443,6 @@ function RecordsView({
           <HomeDashboard month={computed} />
           <section className="grid gap-5 xl:grid-cols-2">
             <RecordTable
-              title="Month Day Records"
-              headers={["Period", "Opening", "Issue", "Expense", "Return", "Credit"]}
-              rows={monthRows.map((row) => [
-                row.label ?? `Day ${row.dayNo}`,
-                currency(row.openingBalance),
-                currency(row.issueBalance),
-                currency(row.expenseTotal),
-                currency(row.returnBalance),
-                currency(row.creditBalance)
-              ])}
-            />
-            <RecordTable
-              title="Expense Categories"
-              headers={["Category", "Amount"]}
-              rows={computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)])}
-            />
-            <RecordTable
               title="Commission Categories"
               headers={["Category", "Amount"]}
               rows={[...computed.homeSummary.commissionMatrix
@@ -437,21 +458,31 @@ function RecordsView({
                 .map(([category, amount]) => [category, currency(amount)])}
             />
             <RecordTable
-              title="Credit Party Aging"
-              headers={["Party", "Latest Balance", "Active Days"]}
-              rows={computed.homeSummary.creditPartyBalances.map((row) => [
-                row.partyName,
-                currency(row.balance),
-                String(row.activeDays)
+              title="Expense Categories"
+              headers={["Category", "Amount"]}
+              rows={computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)])}
+            />
+            <RecordTable
+              title="Month Day Records"
+              headers={["Period", "Opening", "Issue", "Expense", "Return", "Credit"]}
+              rows={monthRows.map((row) => [
+                row.label ?? `Day ${row.dayNo}`,
+                currency(row.openingBalance),
+                currency(row.issueBalance),
+                currency(row.expenseTotal),
+                currency(row.returnBalance),
+                currency(row.creditBalance)
               ])}
             />
             <RecordTable
+              title="Credit Party Aging"
+              headers={["Party", "Opening", "Debt", "Credit", "Balance"]}
+              rows={creditAgingRows}
+            />
+            <RecordTable
               title="Franchise Owner"
-              headers={["Period", "Total Balance"]}
-              rows={computed.days.map((day) => [
-                day.label ?? `Day ${day.dayNo}`,
-                currency(day.ownerBalanceTotal)
-              ])}
+              headers={["Day", "Opening", "Debt", "Credit", "Balance"]}
+              rows={ownerMonthRows}
             />
           </section>
         </>
