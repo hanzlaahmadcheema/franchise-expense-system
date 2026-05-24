@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
-  CalendarDays,
   CircleCheck,
   Cloud,
   FileDown,
@@ -132,11 +131,6 @@ function formatMonth(monthId: string) {
   const date = new Date(Number(yearText), Number(monthText) - 1, 1);
   if (Number.isNaN(date.getTime())) return monthId;
   return new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(date);
-}
-
-function ordinal(value: number) {
-  const suffix = value % 10 === 1 && value % 100 !== 11 ? "st" : value % 10 === 2 && value % 100 !== 12 ? "nd" : value % 10 === 3 && value % 100 !== 13 ? "rd" : "th";
-  return `${value}${suffix}`;
 }
 
 function dateParts(monthId: string, dayNo: number) {
@@ -865,7 +859,7 @@ function App() {
 
   async function recalc() {
     if (!roleCan(role, "ownerControls")) {
-      setStatus("Manual recalculation is restricted to owner access.");
+      setStatus("Manual recalculation is restricted to owner or admin access.");
       return;
     }
     setLoadingMessage(`Recalculating ${formatMonth(monthId)}...`);
@@ -887,7 +881,7 @@ function App() {
 
   async function toggleClosed() {
     if (!roleCan(role, "ownerControls")) {
-      setStatus("Closing and reopening months is restricted to owner access.");
+      setStatus("Closing and reopening months is restricted to owner or admin access.");
       return;
     }
     const nextStatus = monthStatus === "open" ? "closed" : "open";
@@ -962,7 +956,7 @@ function App() {
   const isSelectedLiveDay = monthId === liveDate.monthId && selectedDay === liveDate.dayNo;
   const canEditSelectedDay =
     canEditDaily && (role === "owner" || (role === "admin" && isSelectedLiveDay && !selectedDayLocked));
-  const canCloseSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || isSelectedLiveDay);
+  const canCloseSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || role === "admin");
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
@@ -971,7 +965,6 @@ function App() {
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
-  const dayCaption = selectedDay === 32 ? `FINAL · ${formatMonth(monthId)}` : `${ordinal(selectedDay)} day · ${dateLabel}`;
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -1039,15 +1032,6 @@ function App() {
                 Operating Dashboard
                 <CircleCheck className="h-6 w-6 text-emerald-400" aria-hidden="true" />
               </h2>
-              <p className="mt-2 text-sm text-slate-400">{dayCaption} · {monthStatus} · {role ?? "connecting"}</p>
-              <p className="mt-1 text-sm text-slate-500">{liveClock}</p>
-            </div>
-            <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3">
-              <CalendarDays className="h-5 w-5 text-blue-300" />
-              <div>
-                <p className="text-xs text-slate-500">Active period</p>
-                <p className="font-semibold text-white">{formatMonth(monthId)} · {selectedDay === 32 ? "FINAL" : `Day ${selectedDay}`}</p>
-              </div>
             </div>
           </header>
 
@@ -1087,11 +1071,11 @@ function App() {
           {status && <p className="status">{status}</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
           {role === "admin" && !isSelectedLiveDay && (
-            <p className="warning">Previous dates and months are view-only for admin users. Owner access can edit records.</p>
+            <p className="warning">Previous dates are read-only for admin edits. Admin can still recalculate and close records.</p>
           )}
           {selectedDayLocked && (
             <p className="warning">
-              Day {selectedDay} is closed. Admin users can view it only; owner access can still edit.
+              Day {selectedDay} is closed. Owner access can edit closed days; admin can view and manage status.
             </p>
           )}
 
@@ -1155,7 +1139,6 @@ function App() {
                         <option value={32}>FINAL</option>
                       </select>
                     </label>
-                    <p className="mt-3 text-sm text-slate-400">Live: {liveClock}</p>
                   </section>
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
@@ -1165,6 +1148,9 @@ function App() {
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
                     dateLabel={dateLabel}
+                    liveClock={liveClock}
+                    monthStatus={monthStatus}
+                    role={role ?? "connecting"}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
                     creditParties={creditParties}

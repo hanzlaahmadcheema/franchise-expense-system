@@ -186,7 +186,9 @@ export function roleCan(role: UserRole | null, permission: "daily" | "catalogs" 
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily" || permission === "catalogs" || permission === "importBackup";
+  if (role === "admin") {
+    return permission === "daily" || permission === "catalogs" || permission === "ownerControls" || permission === "importBackup";
+  }
   return false;
 }
 

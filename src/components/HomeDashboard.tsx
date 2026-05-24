@@ -137,7 +137,7 @@ export function HomeDashboard({ month }: Props) {
     period: row.label ?? row.dayNo,
     issue: row.issueBalance,
     expense: row.expenseTotal,
-    return: row.returnBalance,
+    balance: row.returnBalance,
     credit: row.creditBalance
   }));
   const categoryData = month.homeSummary.expenseByCategory.slice(0, 6).map((row) => ({
@@ -239,7 +239,7 @@ export function HomeDashboard({ month }: Props) {
                 />
                 <Area dataKey="issue" stroke="#34d399" fill="url(#issue)" strokeWidth={2} />
                 <Area dataKey="expense" stroke="#fb7185" fill="url(#expense)" strokeWidth={2} />
-                <Area dataKey="return" stroke="#60a5fa" fill="transparent" strokeWidth={2} />
+                <Area dataKey="balance" stroke="#60a5fa" fill="transparent" strokeWidth={2} />
               </AreaChart>
             )}
           </div>
