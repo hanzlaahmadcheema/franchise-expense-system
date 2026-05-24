@@ -31,11 +31,6 @@ service cloud.firestore {
       return isAuthenticated() && userDoc().data.active == true;
     }
 
-    function canEditDaily(monthId) {
-      return (isOwner() || isAdmin()) &&
-        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
-    }
-
     function canOwnerEditDaily(monthId) {
       return isOwner() &&
         get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
@@ -97,7 +92,7 @@ service cloud.firestore {
 
       match /summary/{summaryId} {
         allow read: if isActiveUser();
-        allow create, update: if isOwner() || canEditDaily(monthId);
+        allow create, update: if isOwner() || isAdmin();
         allow delete: if isOwner();
       }
 
@@ -109,8 +104,8 @@ service cloud.firestore {
 
       match /days/{dayId} {
         allow read: if isActiveUser();
-        allow create: if canOwnerEditDaily(monthId) || canAdminEditLiveDay(monthId) || canAdminImportExpense(monthId);
-        allow update: if canOwnerEditDaily(monthId) ||
+        allow create: if canOwnerEditDaily(monthId) || canAdminEditLiveDay(monthId) || isAdmin();
+        allow update: if canOwnerEditDaily(monthId) || isAdmin() ||
           (canAdminEditLiveDay(monthId) && isUnlockedDay()) ||
           (isAdmin() && request.resource.data.diff(resource.data).changedKeys().hasOnly(["updatedAt"])) ||
           canAdminImportExpense(monthId);
@@ -130,7 +125,7 @@ service cloud.firestore {
 
       match /days/{dayId}/{subCollection=**}/{docId} {
         allow read: if isActiveUser();
-        allow create, update: if canOwnerEditDaily(monthId) ||
+        allow create, update: if canOwnerEditDaily(monthId) || isAdmin() ||
           (isAdmin() &&
             get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
             parentDayIsLiveAdminDay(monthId, dayId) &&
