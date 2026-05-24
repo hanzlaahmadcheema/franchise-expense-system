@@ -104,6 +104,12 @@
 
   .table-wrap {
     @apply overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .table-wrap::-webkit-scrollbar {
+    display: none;
   }
 
   .panel {

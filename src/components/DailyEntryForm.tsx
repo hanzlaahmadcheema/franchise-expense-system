@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { LoaderCircle, Pencil, Trash2 } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -33,6 +33,10 @@ type Props = {
 };
 
 const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+
+function LoadingIcon({ label = "Loading" }: { label?: string }) {
+  return <LoaderCircle className="h-4 w-4 animate-spin" aria-label={label} />;
+}
 
 const emptyExpense = (dayNo: number, category?: CatalogItem): ExpenseItem => ({
   id: `${dayNo}-expense-${crypto.randomUUID()}`,
@@ -445,11 +449,14 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
-              <p>
-                {dateLabel} · {liveClock} · {locked && disabled ? "closed" : autoSaveState === "saving" ? "autosaving" : autoSaveState === "error" ? "autosave failed" : "autosaved"}
+              <p className="flex flex-wrap items-center gap-1.5">
+                <span>{dateLabel} · {liveClock} ·</span>
+                {autoSaveState === "saving" && <LoadingIcon label="Autosaving" />}
+                <span>{locked && disabled ? "closed" : autoSaveState === "saving" ? "autosaving" : autoSaveState === "error" ? "autosave failed" : "autosaved"}</span>
               </p>
             </div>
             <button className="btn-primary" disabled={!canClose || saving} onClick={handleCloseDay}>
+              {saving && <LoadingIcon label="Closing day" />}
               {saving ? "Closing..." : locked ? "Day Closed" : "Close Day"}
             </button>
           </div>

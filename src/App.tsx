@@ -8,6 +8,7 @@ import {
   FileSpreadsheet,
   History,
   LayoutDashboard,
+  LoaderCircle,
   Moon,
   RefreshCw,
   Shield,
@@ -102,6 +103,10 @@ function currentDateState(date = new Date()) {
     monthId: `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`,
     dayNo: date.getDate()
   };
+}
+
+function LoadingIcon({ label = "Loading" }: { label?: string }) {
+  return <LoaderCircle className="animate-spin" aria-label={label} />;
 }
 
 function formatMonth(monthId: string) {
@@ -365,9 +370,16 @@ function RecordsView({
             </select>
           </label>
           <button className="btn-secondary" disabled={loading} onClick={() => onMonthSelect(monthId)}>
+            {loading && <LoadingIcon label="Loading records" />}
             Load Records
           </button>
         </div>
+        {loading && (
+          <p className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-300">
+            <LoadingIcon label="Loading previous records" />
+            Loading records...
+          </p>
+        )}
       </section>
 
       {recordMode === "month" && computed ? (
@@ -972,13 +984,15 @@ function App() {
               <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
             </label>
             <button className="btn-primary" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
+              {loading && <LoadingIcon label="Loading month" />}
               Load / Create
             </button>
             <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
-              <RefreshCw />
+              {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
               Recalculate
             </button>
             <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
+              {loading && <LoadingIcon label="Updating month status" />}
               {isClosed ? "Reopen Month" : "Close Month"}
             </button>
           </section>
@@ -1114,13 +1128,13 @@ function App() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <button className="btn-secondary" disabled={loading || !user || !canUseImportBackup} onClick={exportBackup}>
-                  <FileDown />
+                  {loading ? <LoadingIcon label="Exporting backup" /> : <FileDown />}
                   Export Backup
                 </button>
-                <label className={`file-button ${!canUseImportBackup ? "pointer-events-none opacity-50" : ""}`}>
-                  <Upload />
+                <label className={`file-button ${loading || !canUseImportBackup ? "pointer-events-none opacity-50" : ""}`}>
+                  {loading ? <LoadingIcon label="Importing backup" /> : <Upload />}
                   Import Backup
-                  <input type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
+                  <input disabled={loading || !canUseImportBackup} type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
                 </label>
               </div>
             </section>
@@ -1162,12 +1176,19 @@ function App() {
             <label>
               Workbook
               <input
+                disabled={loading}
                 type="file"
                 accept=".xlsx,.xls"
                 onChange={(event) => handleWorkbook(event.target.files?.[0] ?? null)}
               />
             </label>
           </div>
+          {loading && (
+            <p className="mb-4 flex items-center gap-2 text-sm font-medium text-slate-300">
+              <LoadingIcon label="Processing import" />
+              Processing...
+            </p>
+          )}
           {importPreview && (
             <>
               <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -1203,6 +1224,7 @@ function App() {
               )}
               <HomeDashboard month={importPreview.computed} />
               <button className="btn-primary" disabled={loading || !user} onClick={commitImport}>
+                {loading && <LoadingIcon label="Saving import" />}
                 Save {importPreview.importType === "expense" ? "Expense Only" : "Full Workbook"} Import to Firestore
               </button>
             </>
