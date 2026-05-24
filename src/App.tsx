@@ -9,6 +9,8 @@ import {
   LayoutDashboard,
   LoaderCircle,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Shield,
   Sun,
@@ -169,6 +171,26 @@ function liveClockText(now: Date) {
   }).format(now);
 }
 
+function roleLabel(role: UserRole | null) {
+  if (role === "owner") return "Owner";
+  if (role === "admin") return "Admin";
+  if (role === "viewer") return "Viewer";
+  return "Connecting";
+}
+
+function userDisplayName(user: { uid: string; email?: string | null; displayName?: string | null } | null) {
+  if (!user) return "No user";
+  if (user.displayName) return user.displayName;
+  if (user.email) return user.email.split("@")[0].replace(/[._-]+/g, " ");
+  return "Anonymous User";
+}
+
+function userSimpleId(user: { uid: string } | null) {
+  if (!user) return "0000";
+  const total = Array.from(user.uid).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return String(total % 10000).padStart(4, "0");
+}
+
 function CatalogManager({
   title,
   items,
@@ -274,7 +296,7 @@ function UserManager({
           <tbody>
             {users.map((profile) => (
               <tr key={profile.uid}>
-                <td>{profile.uid === currentUid ? `${profile.uid.slice(0, 8)} (you)` : profile.uid.slice(0, 12)}</td>
+                <td>{profile.uid === currentUid ? `${userDisplayName(profile)} · ID ${userSimpleId(profile)} (you)` : `${userDisplayName(profile)} · ID ${userSimpleId(profile)}`}</td>
                 <td>{profile.email || "Anonymous"}</td>
                 <td>
                   <select
@@ -282,9 +304,9 @@ function UserManager({
                     disabled={!canEdit || profile.uid === currentUid}
                     onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
                   >
-                    <option value="owner">owner</option>
-                    <option value="admin">admin</option>
-                    <option value="viewer">viewer</option>
+                    <option value="owner">Owner</option>
+                    <option value="admin">Admin</option>
+                    <option value="viewer">Viewer</option>
                   </select>
                 </td>
                 <td>
@@ -310,22 +332,18 @@ function currency(value: number) {
 }
 
 function RecordsView({
-  months,
   monthId,
   selectedDay,
   days,
   computed,
   loading,
-  onMonthSelect,
   onDaySelect
 }: {
-  months: MonthRecord[];
   monthId: string;
   selectedDay: number;
   days: DailyLedgerInput[];
   computed: MonthComputed | null;
   loading: boolean;
-  onMonthSelect: (monthId: string) => void;
   onDaySelect: (dayNo: number) => void;
 }) {
   const [recordMode, setRecordMode] = useState<"month" | "day">("month");
@@ -394,16 +412,10 @@ function RecordsView({
             </button>
           ))}
         </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr] md:items-end">
           <label>
-            Month
-            <select value={monthId} disabled={loading || months.length === 0} onChange={(event) => onMonthSelect(event.target.value)}>
-              {months.map((month) => (
-                <option key={month.id} value={month.id}>
-                  {formatMonth(month.id)} · {month.status}
-                </option>
-              ))}
-            </select>
+            Active Month
+            <input value={formatMonth(monthId)} disabled readOnly />
           </label>
           <label className={recordMode === "day" ? "" : "opacity-50"}>
             Date / Period
@@ -414,10 +426,6 @@ function RecordsView({
               <option value={32}>FINAL</option>
             </select>
           </label>
-          <button className="btn-secondary" disabled={loading} onClick={() => onMonthSelect(monthId)}>
-            {loading && <LoadingIcon label="Loading records" />}
-            Load Records
-          </button>
         </div>
         {loading && (
           <p className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-300">
@@ -639,6 +647,7 @@ function App() {
   const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const syncedLiveDateRef = useRef(false);
 
@@ -965,6 +974,10 @@ function App() {
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
+  const accessLabel = roleLabel(role);
+  const displayName = userDisplayName(user);
+  const displayId = userSimpleId(user);
+  const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[5rem_minmax(0,1fr)]";
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -996,14 +1009,23 @@ function App() {
   return (
     <main className={`min-h-screen ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
-      <div className="grid min-h-screen lg:grid-cols-[17rem_minmax(0,1fr)]">
+      <div className={`grid min-h-screen ${shellGrid}`}>
         <aside className="border-b border-slate-800 bg-slate-950/95 p-4 text-slate-100 lg:border-b-0 lg:border-r">
-          <div className="mb-6 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase text-emerald-300">Franchise Finance</p>
-              <h1 className="text-xl font-semibold">Operating Ledger</h1>
-            </div>
-            <button className="btn-ghost !h-9 !px-3" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
+          <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-center justify-between" : "flex-col items-center"}`}>
+            {sidebarOpen && (
+              <div>
+                <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
+                <h1 className="text-xl font-semibold">Jazz Franchise - 7301</h1>
+              </div>
+            )}
+            <button
+              className="btn-ghost !h-11 !w-11 !px-0"
+              onClick={() => setSidebarOpen((open) => !open)}
+              title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+            >
+              {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+            </button>
+            <button className={`${sidebarOpen ? "btn-ghost !h-9 !px-3" : "btn-ghost !h-11 !w-11 !px-0"}`} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
               {theme === "dark" ? <Sun /> : <Moon />}
             </button>
           </div>
@@ -1011,39 +1033,77 @@ function App() {
             {navItems.filter((item) => item.show).map((item) => {
               const Icon = item.icon;
               return (
-                <button key={item.id} className={view === item.id ? "btn-tab btn-tab-active justify-start" : "btn-tab justify-start"} onClick={() => setView(item.id)}>
+                <button
+                  key={item.id}
+                  className={`${view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} !h-12 ${sidebarOpen ? "justify-start" : "!w-12 !px-0 justify-center"}`}
+                  onClick={() => setView(item.id)}
+                  title={item.label}
+                >
                   <Icon />
-                  {item.label}
+                  {sidebarOpen && item.label}
                 </button>
               );
             })}
           </nav>
-          <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
-            <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
-            <p className="mt-2 text-sm font-semibold text-white">{liveClock}</p>
-            <div className="mt-4 grid gap-2 text-sm text-slate-300">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Selected</span>
-                <span className="text-right font-medium text-slate-100">{dateLabel}</span>
+          {sidebarOpen && (
+            <>
+              <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
+                <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
+                <p className="mt-2 text-sm font-semibold text-white">{liveClock}</p>
+                <div className="mt-4 grid gap-2 text-sm text-slate-300">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-slate-500">Access</span>
+                    <span className="font-medium text-slate-100">{accessLabel}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-slate-500">Month Status</span>
+                    <span className="font-medium capitalize text-slate-100">{monthStatus}</span>
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Period</span>
-                <span className="font-medium text-slate-100">{selectedDay === 32 ? "FINAL" : `Day ${selectedDay}`}</span>
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
+                <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
+                <label className="mt-3">
+                  Active Month
+                  <input type="month" value={monthId} disabled={!canUseOwnerControls} onChange={(event) => setMonthId(event.target.value)} />
+                </label>
+                <label className="mt-3">
+                  Opening Balance
+                  <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+                </label>
+                <div className="mt-4 grid gap-2">
+                  <button className="btn-primary !h-11" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
+                    {loading && <LoadingIcon label="Loading month" />}
+                    Load / Create
+                  </button>
+                  <button className="btn-secondary !h-11" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
+                    {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
+                    Recalculate
+                  </button>
+                  <button className="btn-secondary !h-11" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
+                    {loading && <LoadingIcon label="Updating month status" />}
+                    {isClosed ? "Reopen Month" : "Close Month"}
+                  </button>
+                </div>
+                {months.length > 0 && (
+                  <div className="mt-4 grid gap-2">
+                    {months.slice(0, 8).map((month) => (
+                      <button className={month.id === monthId ? "btn-chip btn-chip-active !justify-start" : "btn-chip !justify-start"} key={month.id} onClick={() => loadMonth(month.id)}>
+                        {formatMonth(month.id)} · {month.status}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Access</span>
-                <span className="font-medium capitalize text-slate-100">{role ?? "connecting"}</span>
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
+                <p className="text-xs font-semibold uppercase text-slate-500">User</p>
+                <p className="mt-2 text-sm font-semibold text-white">{displayName}</p>
+                <p className="mt-1 text-sm text-slate-400">ID {displayId} · {accessLabel}</p>
+                <p className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
+                <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> Connected</p>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Status</span>
-                <span className="font-medium capitalize text-slate-100">{monthStatus}</span>
-              </div>
-            </div>
-          </div>
-          <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <p className="flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
-            <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> {user ? user.uid.slice(0, 8) : "No user"}</p>
-          </div>
+            </>
+          )}
         </aside>
 
         <div className="min-w-0 px-4 py-5 sm:px-6 lg:px-8">
@@ -1056,39 +1116,6 @@ function App() {
               </h2>
             </div>
           </header>
-
-          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_auto_auto_auto] md:items-end">
-            <label>
-              Month
-              <input value={monthId} disabled={!canUseOwnerControls} onChange={(event) => setMonthId(event.target.value)} />
-            </label>
-            <label>
-              Opening Balance
-              <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
-            </label>
-            <button className="btn-primary" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
-              {loading && <LoadingIcon label="Loading month" />}
-              Load / Create
-            </button>
-            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
-              {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
-              Recalculate
-            </button>
-            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
-              {loading && <LoadingIcon label="Updating month status" />}
-              {isClosed ? "Reopen Month" : "Close Month"}
-            </button>
-          </section>
-
-          {months.length > 0 && (
-            <div className="mb-4 flex flex-wrap gap-2">
-              {months.slice(0, 8).map((month) => (
-                <button className={month.id === monthId ? "btn-chip btn-chip-active" : "btn-chip"} key={month.id} onClick={() => loadMonth(month.id)}>
-                  {formatMonth(month.id)} · {month.status}
-                </button>
-              ))}
-            </div>
-          )}
 
           {status && <p className="status">{status}</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
@@ -1118,13 +1145,11 @@ function App() {
 
           {view === "records" && (
             <RecordsView
-              months={months}
               monthId={monthId}
               selectedDay={selectedDay}
               days={days}
               computed={computed}
               loading={loading}
-              onMonthSelect={(nextMonthId) => void loadMonth(nextMonthId)}
               onDaySelect={setSelectedDay}
             />
           )}
