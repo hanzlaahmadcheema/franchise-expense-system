@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, Pencil, Trash2 } from "lucide-react";
+import { LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -29,6 +29,8 @@ type Props = {
   previousDay?: DailyLedgerInput;
   onSave: (input: DailyLedgerInput, options?: { silent?: boolean }) => Promise<void>;
   onCloseDay: (input: DailyLedgerInput) => Promise<void>;
+  canCreateCatalogs?: boolean;
+  onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
 };
 
 const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -153,7 +155,9 @@ export function DailyEntryForm({
   canClose,
   previousDay,
   onSave,
-  onCloseDay
+  onCloseDay,
+  canCreateCatalogs,
+  onCreateCatalog
 }: Props) {
   const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
   const commissionOptions = activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
@@ -199,6 +203,9 @@ export function DailyEntryForm({
   const [commissionFilter, setCommissionFilter] = useState("all");
   const [saving, setSaving] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
+  const [catalogName, setCatalogName] = useState("");
+  const [catalogSaving, setCatalogSaving] = useState(false);
   const saveInFlightRef = useRef(false);
   const lastSavedRef = useRef("");
 
@@ -439,8 +446,71 @@ export function DailyEntryForm({
     setCommissionDraft((draft) => ({ ...draft, amount: 0 }));
   }
 
+  async function createCatalogItem() {
+    if (!catalogModal || !onCreateCatalog) return;
+    const clean = catalogName.trim();
+    if (!clean) return;
+    setCatalogSaving(true);
+    try {
+      const config = {
+        expense: {
+          catalog: "expenseCategories" as const,
+          sortOrder: expenseCategories.length,
+          apply: (item: CatalogItem) => setExpenseDraft((draft) => ({ ...draft, categoryId: item.id, category: item.name }))
+        },
+        commission: {
+          catalog: "commissionCategories" as const,
+          sortOrder: commissionCategories.length,
+          apply: (item: CatalogItem) => setCommissionDraft((draft) => ({ ...draft, category: item.name }))
+        },
+        credit: {
+          catalog: "creditParties" as const,
+          sortOrder: creditParties.length,
+          apply: (item: CatalogItem) => setCreditDraft((draft) => ({ ...draft, partyId: item.id, partyName: item.name }))
+        }
+      }[catalogModal];
+      const item = { id: slug(clean), name: clean, active: true, sortOrder: config.sortOrder };
+      await onCreateCatalog(config.catalog, item);
+      config.apply(item);
+      setCatalogName("");
+      setCatalogModal(null);
+    } finally {
+      setCatalogSaving(false);
+    }
+  }
+
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      {catalogModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-2xl shadow-black/40">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase text-emerald-300">Create Option</p>
+                <h3 className="mt-1 text-lg font-semibold">
+                  {catalogModal === "expense" ? "Expense Category" : catalogModal === "commission" ? "Commission Category" : "Credit Party"}
+                </h3>
+              </div>
+              <button className="btn-ghost !h-9 !w-9 !px-0" onClick={() => setCatalogModal(null)} title="Close popup">
+                <X />
+              </button>
+            </div>
+            <label>
+              Name
+              <input autoFocus value={catalogName} onChange={(event) => setCatalogName(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "Enter") void createCatalogItem();
+              }} />
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="btn-secondary" disabled={catalogSaving} onClick={() => setCatalogModal(null)}>Cancel</button>
+              <button className="btn-primary" disabled={catalogSaving || !catalogName.trim()} onClick={() => void createCatalogItem()}>
+                {catalogSaving && <LoadingIcon label="Saving option" />}
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="space-y-5">
         <section className="panel">
           <div className="panel-title">
@@ -484,9 +554,14 @@ export function DailyEntryForm({
               Amount
               {inputText(commissionDraft.amount, (amount) => setCommissionDraft((draft) => ({ ...draft, amount })), disabled)}
             </label>
-            <button className="btn-primary self-end" disabled={disabled || commissionDraft.amount === 0} onClick={addCommission}>
-              Add Entry
-            </button>
+            <div className="flex items-end gap-2">
+              <button className="btn-primary" disabled={disabled || commissionDraft.amount === 0} onClick={addCommission}>
+                Add Entry
+              </button>
+              <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add commission category" onClick={() => setCatalogModal("commission")}>
+                <Plus />
+              </button>
+            </div>
           </div>
           {/* <div className="mb-4 max-w-xs">
             <label>
@@ -596,13 +671,18 @@ export function DailyEntryForm({
               Amount
               {inputText(expenseDraft.amount, (amount) => setExpenseDraft((draft) => ({ ...draft, amount })), disabled)}
             </label>
-            <button
-              className="btn-primary self-end"
-              disabled={disabled || (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0)}
-              onClick={addExpense}
-            >
-              Add Entry
-            </button>
+            <div className="flex items-end gap-2">
+              <button
+                className="btn-primary"
+                disabled={disabled || (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0)}
+                onClick={addExpense}
+              >
+                Add Entry
+              </button>
+              <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add expense category" onClick={() => setCatalogModal("expense")}>
+                <Plus />
+              </button>
+            </div>
           </div>
           <div className="table-wrap">
             <table>
@@ -779,13 +859,18 @@ export function DailyEntryForm({
               Receive
               {inputText(creditDraft.receive, (receive) => setCreditDraft((draft) => ({ ...draft, receive })), disabled)}
             </label>
-            <button
-              className="btn-primary self-end"
-              disabled={disabled || !creditDraft.partyId}
-              onClick={addCredit}
-            >
-              Add Entry
-            </button>
+            <div className="flex items-end gap-2">
+              <button
+                className="btn-primary"
+                disabled={disabled || !creditDraft.partyId}
+                onClick={addCredit}
+              >
+                Add Entry
+              </button>
+              <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add credit party" onClick={() => setCatalogModal("credit")}>
+                <Plus />
+              </button>
+            </div>
           </div>
           <div className="table-wrap">
             <table>

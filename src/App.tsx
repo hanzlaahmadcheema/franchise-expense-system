@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
-  CircleCheck,
   Cloud,
   FileDown,
   FileSpreadsheet,
@@ -977,7 +976,10 @@ function App() {
   const accessLabel = roleLabel(role);
   const displayName = userDisplayName(user);
   const displayId = userSimpleId(user);
-  const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[5rem_minmax(0,1fr)]";
+  const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[6rem_minmax(0,1fr)]";
+  const monthChoices = Array.from(
+    new Map([liveDate.monthId, monthId, ...months.map((month) => month.id)].map((id) => [id, months.find((month) => month.id === id)?.status ?? (id === liveDate.monthId ? "current" : "new")]))
+  );
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -1037,7 +1039,7 @@ function App() {
               return (
                 <button
                   key={item.id}
-                  className={`${view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} !h-12 ${sidebarOpen ? "justify-start" : "!w-12 !px-0 justify-center"}`}
+                  className={`${view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} ${sidebarOpen ? "!h-12 justify-start" : "!h-14 !w-14 !px-0 justify-center [&_svg]:!h-6 [&_svg]:!w-6"}`}
                   onClick={() => setView(item.id)}
                   title={item.label}
                 >
@@ -1050,8 +1052,8 @@ function App() {
           {sidebarOpen && (
             <>
               <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
-                <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
-                <p className="mt-2 text-sm font-semibold text-white">{liveClock}</p>
+                <p className="text-sm font-semibold uppercase text-emerald-300">Current Status</p>
+                <p className="mt-2 text-lg font-semibold text-white">{liveClock}</p>
                 <div className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-slate-500">Access</span>
@@ -1067,7 +1069,13 @@ function App() {
                 <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
                 <label className="mt-3">
                   Active Month
-                  <input type="month" value={monthId} disabled={!canUseOwnerControls} onChange={(event) => setMonthId(event.target.value)} />
+                  <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
+                    {monthChoices.map(([id, status]) => (
+                      <option key={id} value={id}>
+                        {formatMonth(id)} · {status}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="mt-3">
                   Opening Balance
@@ -1076,7 +1084,7 @@ function App() {
                 <div className="mt-4 flex flex-col gap-2">
                   <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
                     {loading && <LoadingIcon label="Loading month" />}
-                    Load / Create
+                    Load
                   </button>
                   <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
                     {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
@@ -1109,21 +1117,8 @@ function App() {
         </aside>
 
         <div className="min-w-0 px-4 py-5 sm:px-6 lg:px-8">
-          <header className="mb-5 flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20 md:flex-row md:items-center md:justify-between">
-            <div>
-              <p className="text-sm font-semibold uppercase text-emerald-300">{formatMonth(monthId)}</p>
-              <h2 className="mt-1 flex items-center gap-2 text-2xl font-semibold">
-                Operating Dashboard
-                <CircleCheck className="h-6 w-6 text-emerald-400" aria-hidden="true" />
-              </h2>
-            </div>
-          </header>
-
           {status && <p className="status">{status}</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
-          {role === "admin" && !isSelectedLiveDay && (
-            <p className="warning">Previous dates are read-only for admin edits. Admin can still recalculate and close records.</p>
-          )}
           {selectedDayLocked && (
             <p className="warning">
               Day {selectedDay} is closed. Owner access can edit closed days; admin can view and manage status.
@@ -1132,7 +1127,8 @@ function App() {
 
           {view === "dashboard" && (
             <>
-              <div className="mb-5 flex flex-wrap gap-2">
+              <HomeDashboard month={computed} />
+              <div className="mt-5 flex flex-wrap gap-2">
                 <button className="btn-primary" disabled={!computed} onClick={() => computed && exportMonthToExcel(computed)}>
                   <FileSpreadsheet />
                   Export Excel
@@ -1141,7 +1137,6 @@ function App() {
                   Print / PDF
                 </button>
               </div>
-              <HomeDashboard month={computed} />
             </>
           )}
 
@@ -1205,8 +1200,10 @@ function App() {
                     disabled={!canEditSelectedDay || !user}
                     locked={selectedDayLocked}
                     canClose={canCloseSelectedDay && !loading && Boolean(user)}
+                    canCreateCatalogs={canManageCatalogs}
                     onSave={saveDay}
                     onCloseDay={closeDay}
+                    onCreateCatalog={saveCatalog}
                   />
                 </>
               )}
