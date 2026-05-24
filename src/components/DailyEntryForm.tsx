@@ -19,9 +19,6 @@ type Props = {
   entryDay?: number;
   openingBalance: number;
   dateLabel: string;
-  liveClock: string;
-  monthStatus: string;
-  role: string;
   expenseCategories: CatalogItem[];
   commissionCategories: CatalogItem[];
   creditParties: CatalogItem[];
@@ -147,9 +144,6 @@ export function DailyEntryForm({
   entryDay,
   openingBalance,
   dateLabel,
-  liveClock,
-  monthStatus,
-  role,
   expenseCategories,
   commissionCategories,
   creditParties,
@@ -418,15 +412,6 @@ export function DailyEntryForm({
     }),
     commissionOptions
   );
-  const dailyStatus =
-    locked && disabled
-      ? "closed"
-      : autoSaveState === "saving"
-        ? "autosaving"
-        : autoSaveState === "error"
-          ? "autosave failed"
-          : "autosaved";
-
   function editCommission(item: CommissionItem) {
     if (!window.confirm(`Edit ${item.category} commission entry? It will move back to the entry controls.`)) return;
     setCommissionDraft({ category: item.category, amount: item.amount });
@@ -859,31 +844,6 @@ export function DailyEntryForm({
       </div>
 
       <aside className="space-y-3 xl:sticky xl:top-5 xl:self-start">
-        <div className="rounded-xl border border-emerald-500/30 bg-slate-900/95 p-4 shadow-xl shadow-black/20">
-          <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
-          <p className="mt-2 text-lg font-semibold text-white">{liveClock}</p>
-          <div className="mt-4 grid gap-2 text-sm text-slate-300">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-500">Selected</span>
-              <span className="text-right font-medium text-slate-100">{dateLabel}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-500">Period</span>
-              <span className="font-medium text-slate-100">{dayNo === 32 ? "FINAL" : `Day ${dayNo}`}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-500">Access</span>
-              <span className="font-medium capitalize text-slate-100">{role}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-500">Status</span>
-              <span className="flex items-center gap-1.5 font-medium capitalize text-slate-100">
-                {autoSaveState === "saving" && <LoadingIcon label="Autosaving" />}
-                {monthStatus} · {dailyStatus}
-              </span>
-            </div>
-          </div>
-        </div>
         {[
           ["Opening Balance", preview.openingBalance],
           ["Commission", preview.commissionTotal],

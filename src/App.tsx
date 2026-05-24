@@ -1018,6 +1018,28 @@ function App() {
               );
             })}
           </nav>
+          <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
+            <p className="text-xs font-semibold uppercase text-emerald-300">Current Status</p>
+            <p className="mt-2 text-sm font-semibold text-white">{liveClock}</p>
+            <div className="mt-4 grid gap-2 text-sm text-slate-300">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Selected</span>
+                <span className="text-right font-medium text-slate-100">{dateLabel}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Period</span>
+                <span className="font-medium text-slate-100">{selectedDay === 32 ? "FINAL" : `Day ${selectedDay}`}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Access</span>
+                <span className="font-medium capitalize text-slate-100">{role ?? "connecting"}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Status</span>
+                <span className="font-medium capitalize text-slate-100">{monthStatus}</span>
+              </div>
+            </div>
+          </div>
           <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
             <p className="flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
             <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> {user ? user.uid.slice(0, 8) : "No user"}</p>
@@ -1148,9 +1170,6 @@ function App() {
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
                     dateLabel={dateLabel}
-                    liveClock={liveClock}
-                    monthStatus={monthStatus}
-                    role={role ?? "connecting"}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
                     creditParties={creditParties}
