@@ -154,8 +154,6 @@ export function HomeDashboard({ month }: Props) {
     .map(([name, value]) => ({ name, value }))
     .filter((row) => row.value !== 0)
     .sort((a, b) => b.value - a.value);
-  const creditData = month.homeSummary.creditPartyBalances.slice(0, 8);
-
   return (
     <section className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -332,31 +330,6 @@ export function HomeDashboard({ month }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
-          <h3 className="text-lg font-semibold text-white">Credit Party Aging</h3>
-          <div className="mt-4 table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Party</th>
-                  <th>Latest Balance</th>
-                  <th>Active Days</th>
-                </tr>
-              </thead>
-              <tbody>
-                {creditData.map((row) => (
-                  <tr key={row.partyName}>
-                    <td>{row.partyName}</td>
-                    <td>{money(row.balance)}</td>
-                    <td>{row.activeDays}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
     </section>
   );
 }
