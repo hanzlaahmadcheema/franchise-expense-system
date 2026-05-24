@@ -109,6 +109,24 @@ function LoadingIcon({ label = "Loading" }: { label?: string }) {
   return <LoaderCircle className="animate-spin" aria-label={label} />;
 }
 
+function LoadingPopup({ message }: { message: string }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 text-slate-100 backdrop-blur-sm" role="status" aria-live="polite">
+      <div className="w-full max-w-sm rounded-xl border border-emerald-400/30 bg-slate-900 p-6 text-center shadow-2xl shadow-black/40">
+        <div className="relative mx-auto flex h-16 w-16 items-center justify-center">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/30" />
+          <LoaderCircle className="relative h-11 w-11 animate-spin text-emerald-300" aria-hidden="true" />
+        </div>
+        <h2 className="mt-5 text-lg font-semibold text-white">Processing</h2>
+        <p className="mt-2 text-sm text-slate-300">{message}</p>
+        <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-slate-800">
+          <div className="loading-bar h-full rounded-full bg-emerald-400" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function formatMonth(monthId: string) {
   const [yearText, monthText] = monthId.split("-");
   const date = new Date(Number(yearText), Number(monthText) - 1, 1);
@@ -594,6 +612,7 @@ function App() {
   const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState("Working...");
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
   const [expenseCategories, setExpenseCategories] = useState<CatalogItem[]>([]);
   const [commissionCategories, setCommissionCategories] = useState<CatalogItem[]>([]);
@@ -656,6 +675,7 @@ function App() {
   }
 
   async function loadMonth(nextMonthId = monthId) {
+    setLoadingMessage(`Loading ${formatMonth(nextMonthId)} records...`);
     setLoading(true);
     setStatus("");
     try {
@@ -719,7 +739,10 @@ function App() {
       setStatus("Your role can view this month but cannot edit daily entries.");
       return;
     }
-    if (!options.silent) setLoading(true);
+    if (!options.silent) {
+      setLoadingMessage(`Saving ${day.label ?? `Day ${day.dayNo}`}...`);
+      setLoading(true);
+    }
     try {
       const nextComputed = await saveDayAndRecalculate(monthId, openingBalance, day);
       const nextDays = await fetchMonthDays(monthId);
@@ -741,6 +764,7 @@ function App() {
       setStatus("Your role can view this month but cannot close days.");
       return;
     }
+    setLoadingMessage(`Closing ${day.label ?? `Day ${day.dayNo}`}...`);
     setLoading(true);
     try {
       const nextComputed = await lockDayAndRecalculate(monthId, openingBalance, day, role);
@@ -762,6 +786,7 @@ function App() {
       setStatus("Workbook import is restricted to owner or admin access.");
       return;
     }
+    setLoadingMessage(`Parsing ${file.name}...`);
     setLoading(true);
     setStatus("Parsing workbook...");
     try {
@@ -782,6 +807,7 @@ function App() {
       setStatus("Workbook import is restricted to owner or admin access.");
       return;
     }
+    setLoadingMessage(`Saving ${importPreview.fileName} to Firestore...`);
     setLoading(true);
     try {
       const nextComputed = await commitWorkbookImport(importPreview);
@@ -806,6 +832,7 @@ function App() {
       setStatus("Manual recalculation is restricted to owner access.");
       return;
     }
+    setLoadingMessage(`Recalculating ${formatMonth(monthId)}...`);
     setLoading(true);
     try {
       const nextComputed = await saveMonthRecord(
@@ -828,6 +855,7 @@ function App() {
       return;
     }
     const nextStatus = monthStatus === "open" ? "closed" : "open";
+    setLoadingMessage(`${nextStatus === "closed" ? "Closing" : "Reopening"} ${formatMonth(monthId)}...`);
     setLoading(true);
     try {
       await setMonthStatus(monthId, nextStatus);
@@ -846,6 +874,7 @@ function App() {
       setStatus("Backup export is restricted to owner or admin access.");
       return;
     }
+    setLoadingMessage("Preparing backup package...");
     setLoading(true);
     try {
       const records = await refreshMonthList();
@@ -871,6 +900,7 @@ function App() {
       setStatus("Backup restore is restricted to owner or admin access.");
       return;
     }
+    setLoadingMessage(`Importing backup ${file.name}...`);
     setLoading(true);
     try {
       const backup = (await readBackupPackage(file)) as BackupPackage;
@@ -943,6 +973,7 @@ function App() {
 
   return (
     <main className={`min-h-screen ${shellTone}`}>
+      {loading && <LoadingPopup message={loadingMessage} />}
       <div className="grid min-h-screen lg:grid-cols-[17rem_minmax(0,1fr)]">
         <aside className="border-b border-slate-800 bg-slate-950/95 p-4 text-slate-100 lg:border-b-0 lg:border-r">
           <div className="mb-6 flex items-center justify-between gap-3">

@@ -4,6 +4,20 @@
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+@keyframes loading-bar {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  50% {
+    transform: translateX(40%);
+  }
+
+  100% {
+    transform: translateX(220%);
+  }
+}
+
 @layer base {
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
@@ -110,6 +124,11 @@
 
   .table-wrap::-webkit-scrollbar {
     display: none;
+  }
+
+  .loading-bar {
+    width: 45%;
+    animation: loading-bar 1.15s ease-in-out infinite;
   }
 
   .panel {
