@@ -17,7 +17,7 @@ type Props = {
   dayNo: number;
   openingBalance: number;
   dateLabel: string;
-  utcClock: string;
+  liveClock: string;
   expenseCategories: CatalogItem[];
   creditParties: CatalogItem[];
   initial?: DailyLedgerInput;
@@ -95,7 +95,7 @@ export function DailyEntryForm({
   dayNo,
   openingBalance,
   dateLabel,
-  utcClock,
+  liveClock,
   expenseCategories,
   creditParties,
   initial,
@@ -229,7 +229,7 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
-              <p>{dateLabel} · UTC {utcClock}</p>
+              <p>{dateLabel} · {liveClock}</p>
             </div>
             <button className="btn-primary" disabled={disabled || saving} onClick={handleSave}>
               {saving ? "Saving..." : "Save Day"}

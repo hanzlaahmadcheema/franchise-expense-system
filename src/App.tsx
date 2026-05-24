@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
 import {
   BookOpen,
+  CalendarDays,
   Cloud,
-  Database,
   FileDown,
   FileSpreadsheet,
   LayoutDashboard,
@@ -88,34 +88,57 @@ function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function currentDateState(date = new Date()) {
+  return {
+    monthId: `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`,
+    dayNo: date.getDate()
+  };
+}
+
 function formatMonth(monthId: string) {
   const [yearText, monthText] = monthId.split("-");
-  const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, 1));
+  const date = new Date(Number(yearText), Number(monthText) - 1, 1);
   if (Number.isNaN(date.getTime())) return monthId;
-  return new Intl.DateTimeFormat("en", { month: "long", year: "numeric", timeZone: "UTC" }).format(date);
+  return new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(date);
+}
+
+function ordinal(value: number) {
+  const suffix = value % 10 === 1 && value % 100 !== 11 ? "st" : value % 10 === 2 && value % 100 !== 12 ? "nd" : value % 10 === 3 && value % 100 !== 13 ? "rd" : "th";
+  return `${value}${suffix}`;
+}
+
+function selectedDateValue(monthId: string, dayNo: number) {
+  if (dayNo === 32) return "";
+  return `${monthId}-${pad2(dayNo)}`;
 }
 
 function dateLabelFor(monthId: string, dayNo: number) {
   if (dayNo === 32) return `FINAL - ${formatMonth(monthId)}`;
   const [yearText, monthText] = monthId.split("-");
-  const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, dayNo));
+  const date = new Date(Number(yearText), Number(monthText) - 1, dayNo);
   if (Number.isNaN(date.getTime())) return `Day ${dayNo}`;
   return new Intl.DateTimeFormat("en", {
     weekday: "long",
     month: "long",
     day: "numeric",
-    year: "numeric",
-    timeZone: "UTC"
+    year: "numeric"
   }).format(date);
 }
 
-function utcClockText(now: Date) {
+function liveClockText(now: Date) {
   return new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
-    timeZone: "UTC"
+    hour12: true
   }).format(now);
 }
 
@@ -316,13 +339,14 @@ function FirebaseMissing() {
 }
 
 function App() {
+  const initialDate = currentDateState();
   const [view, setView] = useState<View>("dashboard");
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
-  const [monthId, setMonthId] = useState("2026-04");
+  const [monthId, setMonthId] = useState(initialDate.monthId);
   const [openingBalance, setOpeningBalance] = useState(0);
-  const [selectedDay, setSelectedDay] = useState(1);
+  const [selectedDay, setSelectedDay] = useState(initialDate.dayNo);
   const [months, setMonths] = useState<MonthRecord[]>([]);
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
@@ -603,7 +627,9 @@ function App() {
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
   const dateLabel = dateLabelFor(monthId, selectedDay);
-  const utcClock = utcClockText(now);
+  const liveClock = liveClockText(now);
+  const calendarValue = selectedDateValue(monthId, selectedDay);
+  const dayCaption = selectedDay === 32 ? `FINAL · ${formatMonth(monthId)}` : `${ordinal(selectedDay)} day · ${dateLabel}`;
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -632,6 +658,13 @@ function App() {
     await updateUserProfile(uid, updates);
     setUsers(await listUsers());
     setStatus("User access updated.");
+  }
+
+  function selectCalendarDate(value: string) {
+    if (!value) return;
+    const [yearText, monthText, dayText] = value.split("-");
+    setMonthId(`${yearText}-${monthText}`);
+    setSelectedDay(Number(dayText));
   }
 
   return (
@@ -669,21 +702,31 @@ function App() {
             <div>
               <p className="text-sm font-semibold uppercase text-emerald-300">{formatMonth(monthId)}</p>
               <h2 className="mt-1 text-2xl font-semibold">Operating Dashboard</h2>
-              <p className="mt-2 text-sm text-slate-400">UTC {utcClock} · {monthStatus} · {role ?? "connecting"}</p>
+              <p className="mt-2 text-sm text-slate-400">{dayCaption} · {monthStatus} · {role ?? "connecting"}</p>
+              <p className="mt-1 text-sm text-slate-500">{liveClock}</p>
             </div>
             <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-4 py-3">
-              <Database className="h-5 w-5 text-blue-300" />
+              <CalendarDays className="h-5 w-5 text-blue-300" />
               <div>
-                <p className="text-xs text-slate-500">Active month</p>
-                <p className="font-semibold text-white">{monthId}</p>
+                <p className="text-xs text-slate-500">Active period</p>
+                <p className="font-semibold text-white">{formatMonth(monthId)} · {selectedDay === 32 ? "FINAL" : `Day ${selectedDay}`}</p>
               </div>
             </div>
           </header>
 
-          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_auto_auto_auto] md:items-end">
+          <section className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20 md:grid-cols-[1fr_1fr_1fr_auto_auto_auto] md:items-end">
+            <label>
+              Calendar date
+              <input
+                type="date"
+                value={calendarValue}
+                disabled={!canUseOwnerControls || selectedDay === 32}
+                onChange={(event) => selectCalendarDate(event.target.value)}
+              />
+            </label>
             <label>
               Month
-              <input value={monthId} onChange={(event) => setMonthId(event.target.value)} />
+              <input value={monthId} disabled={!canUseOwnerControls} onChange={(event) => setMonthId(event.target.value)} />
             </label>
             <label>
               Opening Balance
@@ -733,10 +776,10 @@ function App() {
             <>
               <section className="mb-4 max-w-sm rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
                 <label>
-                  Day / Period
-                  <select value={selectedDay} onChange={(event) => setSelectedDay(Number(event.target.value))}>
+                  Day / Period · {formatMonth(monthId)}
+                  <select value={selectedDay} disabled={!canUseOwnerControls} onChange={(event) => setSelectedDay(Number(event.target.value))}>
                     {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                      <option key={day} value={day}>Day {day}</option>
+                      <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
                     ))}
                     <option value={32}>FINAL</option>
                   </select>
@@ -747,7 +790,7 @@ function App() {
                 dayNo={selectedDay}
                 openingBalance={selectedOpening}
                 dateLabel={dateLabel}
-                utcClock={utcClock}
+                liveClock={liveClock}
                 expenseCategories={expenseCategories}
                 creditParties={creditParties}
                 initial={selectedDayInput}
