@@ -275,3 +275,150 @@
     --tw-shadow: var(--tw-shadow-colored);
   }
 }
+
+.theme-light {
+  background: linear-gradient(180deg, #f8fafc, #e8eef6) !important;
+  color: #0f172a !important;
+}
+
+.theme-light aside {
+  background: #ffffff !important;
+  border-color: #dbe3ee !important;
+  color: #0f172a !important;
+  box-shadow: 12px 0 30px rgb(15 23 42 / 0.06) !important;
+}
+
+.theme-light header,
+.theme-light .panel,
+.theme-light .card,
+.theme-light .table-wrap,
+.theme-light .rounded-xl.border.bg-slate-900\/80,
+.theme-light .rounded-xl.border.bg-slate-950\/70,
+.theme-light .rounded-xl.border.bg-slate-950\/60,
+.theme-light .rounded-xl.border.bg-slate-950\/50,
+.theme-light .rounded-lg.border.bg-slate-950\/60 {
+  background: #ffffff !important;
+  border-color: #dbe3ee !important;
+  color: #0f172a !important;
+  box-shadow: 0 16px 36px rgb(15 23 42 / 0.08) !important;
+}
+
+.theme-light .bg-slate-950,
+.theme-light .bg-slate-950\/95,
+.theme-light .bg-slate-950\/70,
+.theme-light .bg-slate-950\/60,
+.theme-light .bg-slate-950\/50,
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-900,
+.theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-900\/50 {
+  background-color: #ffffff !important;
+}
+
+.theme-light .bg-slate-800 {
+  background-color: #f1f5f9 !important;
+}
+
+.theme-light .border-slate-900,
+.theme-light .border-slate-800,
+.theme-light .border-slate-800\/70,
+.theme-light .border-slate-700 {
+  border-color: #dbe3ee !important;
+}
+
+.theme-light h1,
+.theme-light h2,
+.theme-light h3,
+.theme-light strong,
+.theme-light td,
+.theme-light .text-white,
+.theme-light .text-slate-100,
+.theme-light .text-slate-200 {
+  color: #0f172a !important;
+}
+
+.theme-light .text-slate-300 {
+  color: #334155 !important;
+}
+
+.theme-light p,
+.theme-light th,
+.theme-light label,
+.theme-light .text-slate-400,
+.theme-light .text-slate-500 {
+  color: #64748b !important;
+}
+
+.theme-light th {
+  background-color: #f8fafc !important;
+  border-color: #dbe3ee !important;
+  color: #475569 !important;
+}
+
+.theme-light td {
+  border-color: #e7edf5 !important;
+}
+
+.theme-light input,
+.theme-light select {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.theme-light input:disabled,
+.theme-light select:disabled {
+  background-color: #eef2f7 !important;
+  color: #64748b !important;
+}
+
+.theme-light .btn-secondary,
+.theme-light .btn-tab,
+.theme-light .btn-ghost,
+.theme-light .file-button,
+.theme-light .btn-chip {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+.theme-light .btn-secondary:hover,
+.theme-light .btn-tab:hover,
+.theme-light .btn-ghost:hover,
+.theme-light .file-button:hover,
+.theme-light .btn-chip:hover {
+  background-color: #f8fafc !important;
+  border-color: #94a3b8 !important;
+}
+
+.theme-light .btn-primary {
+  background-color: #10b981 !important;
+  color: #022c22 !important;
+  box-shadow: 0 10px 20px rgb(16 185 129 / 0.22) !important;
+}
+
+.theme-light .btn-tab-active,
+.theme-light .btn-chip-active {
+  background-color: #dcfce7 !important;
+  border-color: #10b981 !important;
+  color: #065f46 !important;
+}
+
+.theme-light .status {
+  background-color: #ecfdf5 !important;
+  border-color: #a7f3d0 !important;
+  color: #065f46 !important;
+}
+
+.theme-light .warning,
+.theme-light .error {
+  background-color: #fffbeb !important;
+  border-color: #fcd34d !important;
+  color: #92400e !important;
+}
+
+.theme-light .shadow-black\/20,
+.theme-light .shadow-black\/40 {
+  --tw-shadow-color: rgb(148 163 184 / 0.28) !important;
+  --tw-shadow: var(--tw-shadow-colored) !important;
+}
