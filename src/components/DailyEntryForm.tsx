@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { MoreVertical, Pencil, Trash2 } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -129,6 +130,7 @@ export function DailyEntryForm({
     amount: 0
   });
   const [commissionFilter, setCommissionFilter] = useState<"all" | CommissionCategory>("all");
+  const [openCommissionActionId, setOpenCommissionActionId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const payload = useMemo<DailyLedgerInput>(
@@ -195,8 +197,17 @@ export function DailyEntryForm({
     commissions.filter((item) => item.amount !== 0 && (commissionFilter === "all" || item.category === commissionFilter))
   );
 
-  function updateCommission(index: number, patch: Partial<CommissionItem>) {
-    setCommissions((rows) => sortCommissions(rows.map((row, i) => (i === index ? { ...row, ...patch } : row))));
+  function editCommission(item: CommissionItem) {
+    if (!window.confirm(`Edit ${item.category} commission entry? It will move back to the entry controls.`)) return;
+    setCommissionDraft({ category: item.category, amount: item.amount });
+    setCommissions((rows) => rows.filter((row) => row.id !== item.id));
+    setOpenCommissionActionId(null);
+  }
+
+  function deleteCommission(item: CommissionItem) {
+    if (!window.confirm(`Delete ${item.category} commission entry of ${item.amount.toLocaleString()}?`)) return;
+    setCommissions((rows) => rows.filter((row) => row.id !== item.id));
+    setOpenCommissionActionId(null);
   }
 
   function addCommission() {
@@ -281,28 +292,46 @@ export function DailyEntryForm({
                   <th>Order</th>
                   <th>Category</th>
                   <th>Amount</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {visibleCommissions.map((item) => {
-                  const index = commissions.findIndex((row) => row.id === item.id);
                   return (
                     <tr key={item.id}>
                       <td>{(commissionOrder.get(item.category) ?? 0) + 1}</td>
+                      <td>{item.category}</td>
+                      <td>{item.amount.toLocaleString()}</td>
                       <td>
-                        <select value={item.category} disabled={disabled} onChange={(event) => updateCommission(index, { category: event.target.value as CommissionCategory })}>
-                          {COMMISSION_CATEGORIES.map((category) => (
-                            <option key={category} value={category}>{category}</option>
-                          ))}
-                        </select>
+                        <div className="relative inline-flex">
+                          <button
+                            className="btn-ghost !h-9 !w-9 !px-0"
+                            disabled={disabled}
+                            title="Commission actions"
+                            onClick={() => setOpenCommissionActionId((id) => (id === item.id ? null : item.id))}
+                          >
+                            <MoreVertical />
+                          </button>
+                          {openCommissionActionId === item.id && (
+                            <div className="absolute right-0 top-10 z-20 min-w-36 rounded-lg border border-slate-700 bg-slate-950 p-1 shadow-xl shadow-black/30">
+                              <button className="btn-ghost w-full justify-start !border-0 !bg-transparent" onClick={() => editCommission(item)}>
+                                <Pencil />
+                                Edit
+                              </button>
+                              <button className="btn-ghost w-full justify-start !border-0 !bg-transparent text-rose-200" onClick={() => deleteCommission(item)}>
+                                <Trash2 />
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </td>
-                      <td>{inputNumber(item.amount, (amount) => updateCommission(index, { amount }), disabled)}</td>
                     </tr>
                   );
                 })}
                 {visibleCommissions.length === 0 && (
                   <tr>
-                    <td colSpan={3}>No commission entries match this filter.</td>
+                    <td colSpan={4}>No commission entries match this filter.</td>
                   </tr>
                 )}
               </tbody>
