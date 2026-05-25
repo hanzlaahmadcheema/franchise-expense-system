@@ -872,6 +872,18 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!status) return;
+    const timer = window.setTimeout(() => setStatus(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
+  useEffect(() => {
+    if (!authMessage) return;
+    const timer = window.setTimeout(() => setAuthMessage(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [authMessage]);
+
   async function handleEmailLinkAuth() {
     const firebaseAuth = auth;
     if (!firebaseAuth) return;
