@@ -71,7 +71,7 @@ franchise-expense-system
 Required Firebase services:
 
 - Authentication
-- Anonymous sign-in provider
+- Google sign-in provider
 - Cloud Firestore
 - Firestore rules and indexes
 
@@ -445,15 +445,15 @@ Fix:
 2. Fill the Firebase web app config.
 3. Restart Vite.
 
-### Enable Anonymous Auth
+### Enable Google Auth
 
-Cause: anonymous sign-in is disabled in Firebase Authentication.
+Cause: Google sign-in is disabled in Firebase Authentication.
 
 Fix:
 
 1. Open Firebase Console.
 2. Go to Authentication.
-3. Enable the Anonymous provider.
+3. Enable the Google provider.
 4. Reload the app.
 
 ### Permission Denied
@@ -489,8 +489,8 @@ Fix for now:
 
 ## Known Limitations
 
-- Anonymous auth is useful for MVP testing, but production should use email/password or Google login.
-- Owner/staff management does not have a full UI yet.
+- Owner-authorized Google emails control who can enter the app.
+- Users must be added in `Users -> Authorized Emails` before they can sign in.
 - Removed row cleanup is not fully implemented for nested Firestore subcollections.
 - Month-to-month comparison exists as a product goal, but deeper comparison workflows can still be expanded.
 - Bundle size can be improved by lazy-loading workbook import and chart libraries.

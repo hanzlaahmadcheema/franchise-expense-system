@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  isSignInWithEmailLink,
+  GoogleAuthProvider,
   onAuthStateChanged,
-  sendSignInLinkToEmail,
-  signInWithEmailLink,
+  signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User
 } from "firebase/auth";
@@ -280,8 +280,7 @@ function UserManager({
   currentUid,
   canEdit,
   onUpdate,
-  onAuthorizeEmail,
-  onSendRoleLink
+  onAuthorizeEmail
 }: {
   users: UserProfile[];
   authorizedEmails: AuthorizedEmail[];
@@ -289,7 +288,6 @@ function UserManager({
   canEdit: boolean;
   onUpdate: (uid: string, updates: Pick<UserProfile, "role" | "active">) => Promise<void>;
   onAuthorizeEmail: (email: string, role: UserRole, active?: boolean) => Promise<void>;
-  onSendRoleLink: (email: string, role: UserRole) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
   return (
@@ -298,7 +296,7 @@ function UserManager({
         <div className="panel-title">
           <div>
             <h2>Authorized Emails</h2>
-            <p>Only these emails can sign in with a passwordless link.</p>
+            <p>Only these Google account emails can enter the app.</p>
           </div>
         </div>
         {canEdit && (
@@ -309,16 +307,16 @@ function UserManager({
             </label>
             <div className="flex flex-wrap gap-2">
               {([
-                ["owner", "Owner Link"],
-                ["admin", "Admin Link"],
-                ["viewer", "Viewer Link"]
+                ["owner", "Add Owner"],
+                ["admin", "Add Admin"],
+                ["viewer", "Add Viewer"]
               ] as Array<[UserRole, string]>).map(([role, label]) => (
                 <button
                   key={role}
                   className={role === "owner" ? "btn-primary" : "btn-secondary"}
                   disabled={!email.trim()}
                   onClick={async () => {
-                    await onSendRoleLink(email, role);
+                    await onAuthorizeEmail(email, role, true);
                     setEmail("");
                   }}
                 >
@@ -335,7 +333,6 @@ function UserManager({
                 <th>Email</th>
                 <th>Role</th>
                 <th>Active</th>
-                <th>Link</th>
               </tr>
             </thead>
             <tbody>
@@ -358,16 +355,11 @@ function UserManager({
                       {entry.active ? "Active" : "Inactive"}
                     </button>
                   </td>
-                  <td>
-                    <button className="btn-secondary" disabled={!canEdit || !entry.active} onClick={() => onSendRoleLink(entry.email, entry.role)}>
-                      Send Link
-                    </button>
-                  </td>
                 </tr>
               ))}
               {authorizedEmails.length === 0 && (
                 <tr>
-                  <td colSpan={4}>No authorized emails yet.</td>
+                  <td colSpan={3}>No authorized emails yet.</td>
                 </tr>
               )}
             </tbody>
@@ -379,7 +371,7 @@ function UserManager({
         <div className="panel-title">
           <div>
             <h2>Signed-In Users</h2>
-            <p>Users appear here after opening their email sign-in link.</p>
+            <p>Users appear here after signing in with Google.</p>
           </div>
         </div>
         <div className="table-wrap">
@@ -728,18 +720,12 @@ function FirebaseMissing() {
 }
 
 function AuthPanel({
-  email,
   message,
   busy,
-  isEmailLink,
-  onEmailChange,
   onSubmit
 }: {
-  email: string;
   message: string;
   busy: boolean;
-  isEmailLink: boolean;
-  onEmailChange: (value: string) => void;
   onSubmit: () => Promise<void>;
 }) {
   return (
@@ -748,24 +734,11 @@ function AuthPanel({
         <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
         <p className="mt-4 text-sm text-slate-400">
-          Sign in with an owner-authorized email. A secure login link will be sent to your inbox.
+          Sign in with a Google account that the owner has authorized.
         </p>
-        <label className="mt-5">
-          Email
-          <input
-            type="email"
-            value={email}
-            autoComplete="email"
-            placeholder="name@example.com"
-            onChange={(event) => onEmailChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void onSubmit();
-            }}
-          />
-        </label>
-        <button className="btn-primary mt-5 !w-full" disabled={busy || !email.trim()} onClick={() => void onSubmit()}>
+        <button className="btn-primary mt-5 !w-full" disabled={busy} onClick={() => void onSubmit()}>
           {busy && <LoadingIcon label="Signing in" />}
-          {isEmailLink ? "Complete Sign In" : "Send Sign-In Link"}
+          Continue with Google
         </button>
         {message && <p className="mt-4 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">{message}</p>}
       </section>
@@ -802,7 +775,6 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const [authReady, setAuthReady] = useState(false);
-  const [authEmail, setAuthEmail] = useState(() => localStorage.getItem("emailForSignIn") ?? "");
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const syncedLiveDateRef = useRef(false);
@@ -810,24 +782,6 @@ function App() {
   useEffect(() => {
     const firebaseAuth = auth;
     if (!firebaseAuth) return;
-    const href = window.location.href;
-    if (isSignInWithEmailLink(firebaseAuth, href)) {
-      const storedEmail = localStorage.getItem("emailForSignIn");
-      if (storedEmail) {
-        setAuthBusy(true);
-        void signInWithEmailLink(firebaseAuth, storedEmail, href)
-          .then(() => {
-            localStorage.removeItem("emailForSignIn");
-            window.history.replaceState({}, document.title, window.location.pathname);
-          })
-          .catch((err) => {
-            setAuthMessage(err instanceof Error ? err.message : "Could not complete email sign-in.");
-          })
-          .finally(() => setAuthBusy(false));
-      } else {
-        setAuthMessage("Enter the same email address used to request this sign-in link.");
-      }
-    }
     return onAuthStateChanged(firebaseAuth, async (nextUser) => {
       if (!nextUser) {
         setUser(null);
@@ -840,7 +794,7 @@ function App() {
         await signOut(firebaseAuth);
         setUser(null);
         setRole(null);
-        setAuthStatus("Email sign-in required.");
+        setAuthStatus("Google sign-in required.");
         setAuthReady(true);
         return;
       }
@@ -854,7 +808,7 @@ function App() {
         setUser(null);
         setRole(null);
         setAuthMessage(err instanceof Error ? err.message : "This email is not authorized.");
-        setAuthStatus("Email not authorized.");
+        setAuthStatus("Google account not authorized.");
         await signOut(firebaseAuth);
       } finally {
         setAuthReady(true);
@@ -884,31 +838,23 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [authMessage]);
 
-  async function handleEmailLinkAuth() {
+  async function handleGoogleAuth() {
     const firebaseAuth = auth;
     if (!firebaseAuth) return;
-    const cleanEmail = emailKey(authEmail);
-    if (!cleanEmail) return;
     setAuthBusy(true);
     setAuthMessage("");
     try {
-      const href = window.location.href;
-      if (isSignInWithEmailLink(firebaseAuth, href)) {
-        await signInWithEmailLink(firebaseAuth, cleanEmail, href);
-        localStorage.removeItem("emailForSignIn");
-        window.history.replaceState({}, document.title, window.location.pathname);
-        setAuthMessage("Signed in.");
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await signInWithPopup(firebaseAuth, provider);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("auth/popup-blocked")) {
+        const provider = new GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: "select_account" });
+        await signInWithRedirect(firebaseAuth, provider);
         return;
       }
-      await sendSignInLinkToEmail(firebaseAuth, cleanEmail, {
-        url: `${window.location.origin}${window.location.pathname}`,
-        handleCodeInApp: true
-      });
-      localStorage.setItem("emailForSignIn", cleanEmail);
-      setAuthEmail(cleanEmail);
-      setAuthMessage("Sign-in link sent. Open it from this browser to continue.");
-    } catch (err) {
-      setAuthMessage(err instanceof Error ? err.message : "Could not send sign-in link.");
+      setAuthMessage(err instanceof Error ? err.message : "Could not sign in with Google.");
     } finally {
       setAuthBusy(false);
     }
@@ -1192,12 +1138,9 @@ function App() {
   if (!authReady || !user || !role) {
     return (
       <AuthPanel
-        email={authEmail}
         message={authMessage || authStatus}
         busy={authBusy}
-        isEmailLink={auth ? isSignInWithEmailLink(auth, window.location.href) : false}
-        onEmailChange={setAuthEmail}
-        onSubmit={handleEmailLinkAuth}
+        onSubmit={handleGoogleAuth}
       />
     );
   }
@@ -1257,18 +1200,6 @@ function App() {
     await upsertAuthorizedEmail(email, nextRole, active);
     setAuthorizedEmails(await listAuthorizedEmails());
     setStatus(`${emailKey(email)} authorization saved.`);
-  }
-
-  async function sendRoleLink(email: string, nextRole: UserRole) {
-    if (!auth) return;
-    const cleanEmail = emailKey(email);
-    await upsertAuthorizedEmail(cleanEmail, nextRole, true);
-    await sendSignInLinkToEmail(auth, cleanEmail, {
-      url: `${window.location.origin}${window.location.pathname}`,
-      handleCodeInApp: true
-    });
-    setAuthorizedEmails(await listAuthorizedEmails());
-    setStatus(`${roleLabel(nextRole)} sign-in link sent to ${cleanEmail}.`);
   }
 
   return (
@@ -1492,7 +1423,6 @@ function App() {
               canEdit={canManageUsers}
               onUpdate={saveUserRole}
               onAuthorizeEmail={saveAuthorizedEmail}
-              onSendRoleLink={sendRoleLink}
             />
           )}
 
