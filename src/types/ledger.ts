@@ -168,6 +168,15 @@ export type UserProfile = {
   updatedAt?: number;
 };
 
+export type AuthorizedEmail = {
+  id: string;
+  email: string;
+  role: UserRole;
+  active: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
 export type WorkbookImportPreview = {
   monthId: string;
   fileName: string;

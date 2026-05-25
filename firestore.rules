@@ -9,12 +9,25 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.uid));
     }
 
+    function authorizedEmailDoc() {
+      return get(/databases/$(database)/documents/authorizedEmails/$(request.auth.token.email));
+    }
+
+    function isAuthorizedEmail() {
+      return isAuthenticated() &&
+        request.auth.token.email != null &&
+        exists(/databases/$(database)/documents/authorizedEmails/$(request.auth.token.email)) &&
+        authorizedEmailDoc().data.active == true;
+    }
+
     function isSelfBootstrappingUser(uid) {
       return isAuthenticated() &&
         request.auth.uid == uid &&
+        isAuthorizedEmail() &&
         request.resource.data.uid == uid &&
+        request.resource.data.email == request.auth.token.email &&
         request.resource.data.active == true &&
-        request.resource.data.role == "viewer";
+        request.resource.data.role == authorizedEmailDoc().data.role;
     }
 
     function isOwner() {
@@ -81,7 +94,13 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isAuthenticated() && (request.auth.uid == uid || isOwner());
       allow create: if isSelfBootstrappingUser(uid);
-      allow update, delete: if isOwner();
+      allow update: if isOwner() || isSelfBootstrappingUser(uid);
+      allow delete: if isOwner();
+    }
+
+    match /authorizedEmails/{emailId} {
+      allow read: if isOwner() || (isAuthenticated() && request.auth.token.email == emailId);
+      allow create, update, delete: if isOwner();
     }
 
     match /months/{monthId} {

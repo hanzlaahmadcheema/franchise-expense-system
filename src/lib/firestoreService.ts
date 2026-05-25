@@ -15,6 +15,7 @@ import { auth, db, functions } from "./firebase";
 import { computeMonth } from "./formulaEngine";
 import type {
   AuditEvent,
+  AuthorizedEmail,
   DailyLedgerInput,
   MonthComputed,
   MonthRecord,
@@ -60,6 +61,10 @@ function actor() {
   };
 }
 
+export function emailKey(email: string) {
+  return email.trim().toLowerCase();
+}
+
 async function addAudit(monthId: string, event: Omit<AuditEvent, "id" | "createdAt">) {
   const firestore = requireDb();
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -75,20 +80,27 @@ export async function getUserRole(uid: string, email?: string | null): Promise<U
   const ref = doc(firestore, "users", uid);
   const snap = await getDoc(ref);
   if (snap.exists()) {
-    const role = snap.data().role;
+    const data = snap.data() as Omit<UserProfile, "role"> & { role?: UserRole | "staff" };
+    if (data.active === false) throw new Error("This user account is inactive.");
+    const role = data.role;
     return role === "staff" ? "admin" : ((role as UserRole) ?? "viewer");
   }
 
-  const firstUserRole: UserRole = "viewer";
+  if (!email) throw new Error("This sign-in account does not have an email address.");
+  const authorizedSnap = await getDoc(doc(firestore, "authorizedEmails", emailKey(email)));
+  if (!authorizedSnap.exists()) throw new Error("This email is not authorized by the owner.");
+  const authorized = authorizedSnap.data() as Omit<AuthorizedEmail, "role"> & { role?: UserRole | "staff" };
+  if (!authorized.active) throw new Error("This email access is inactive.");
+  const role: UserRole = authorized.role === "staff" ? "admin" : (authorized.role ?? "viewer");
   await setDoc(ref, {
     uid,
-    email: email ?? "",
-    role: firstUserRole,
+    email: emailKey(email),
+    role,
     active: true,
     createdAt: now(),
     updatedAt: now()
   });
-  return firstUserRole;
+  return role;
 }
 
 export async function listUsers(): Promise<UserProfile[]> {
@@ -110,6 +122,32 @@ export async function updateUserProfile(uid: string, updates: Pick<UserProfile, 
     ...updates,
     updatedAt: now()
   });
+}
+
+export async function listAuthorizedEmails(): Promise<AuthorizedEmail[]> {
+  const firestore = requireDb();
+  const snap = await getDocs(query(collection(firestore, "authorizedEmails"), orderBy("email", "asc")));
+  return snap.docs.map((emailDoc) => {
+    const data = emailDoc.data() as Omit<AuthorizedEmail, "id" | "role"> & { role?: UserRole | "staff" };
+    return {
+      ...data,
+      id: emailDoc.id,
+      role: data.role === "staff" ? "admin" : (data.role ?? "viewer")
+    };
+  });
+}
+
+export async function upsertAuthorizedEmail(email: string, role: UserRole, active = true) {
+  const firestore = requireDb();
+  const cleanEmail = emailKey(email);
+  await setDoc(doc(firestore, "authorizedEmails", cleanEmail), {
+    id: cleanEmail,
+    email: cleanEmail,
+    role,
+    active,
+    updatedAt: now(),
+    createdAt: now()
+  }, { merge: true });
 }
 
 const defaultExpenseCategories = ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"];

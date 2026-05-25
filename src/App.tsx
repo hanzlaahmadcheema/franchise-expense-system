@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth";
+import {
+  isSignInWithEmailLink,
+  onAuthStateChanged,
+  sendSignInLinkToEmail,
+  signInWithEmailLink,
+  signOut,
+  type User
+} from "firebase/auth";
 import {
   Cloud,
   FileDown,
@@ -20,6 +27,7 @@ import {
 import { DailyEntryForm } from "./components/DailyEntryForm";
 import { HomeDashboard } from "./components/HomeDashboard";
 import type {
+  AuthorizedEmail,
   CatalogItem,
   DailyLedgerInput,
   MonthComputed,
@@ -39,11 +47,13 @@ import { parseWorkbookFile } from "./lib/workbookImport";
 import { auth, isFirebaseConfigured } from "./lib/firebase";
 import {
   commitWorkbookImport,
+  emailKey,
   ensureDefaultCatalogs,
   fetchMonthDays,
   getUserRole,
   lockDayAndRecalculate,
   listCatalogItems,
+  listAuthorizedEmails,
   listMonths,
   listUsers,
   resolveOpeningBalance,
@@ -51,6 +61,7 @@ import {
   saveDayAndRecalculate,
   saveMonthRecord,
   setMonthStatus,
+  upsertAuthorizedEmail,
   updateUserProfile,
   upsertCatalogItem
 } from "./lib/firestoreService";
@@ -265,63 +276,151 @@ function CatalogManager({
 
 function UserManager({
   users,
+  authorizedEmails,
   currentUid,
   canEdit,
-  onUpdate
+  onUpdate,
+  onAuthorizeEmail
 }: {
   users: UserProfile[];
+  authorizedEmails: AuthorizedEmail[];
   currentUid?: string;
   canEdit: boolean;
   onUpdate: (uid: string, updates: Pick<UserProfile, "role" | "active">) => Promise<void>;
+  onAuthorizeEmail: (email: string, role: UserRole, active?: boolean) => Promise<void>;
 }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<UserRole>("viewer");
   return (
-    <section className="panel">
-      <div className="panel-title">
-        <div>
-          <h2>Users</h2>
-          <p>Owner assigns owner/admin/viewer access after sign-in.</p>
+    <section className="space-y-5">
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <h2>Authorized Emails</h2>
+            <p>Only these emails can sign in with a passwordless link.</p>
+          </div>
         </div>
-      </div>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Active</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((profile) => (
-              <tr key={profile.uid}>
-                <td>{profile.uid === currentUid ? `${userDisplayName(profile)} · ID ${userSimpleId(profile)} (you)` : `${userDisplayName(profile)} · ID ${userSimpleId(profile)}`}</td>
-                <td>{profile.email || "Anonymous"}</td>
-                <td>
-                  <select
-                    value={profile.role}
-                    disabled={!canEdit || profile.uid === currentUid}
-                    onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
-                  >
-                    <option value="owner">Owner</option>
-                    <option value="admin">Admin</option>
-                    <option value="viewer">Viewer</option>
-                  </select>
-                </td>
-                <td>
-                  <button
-                    className="btn-secondary"
-                    disabled={!canEdit || profile.uid === currentUid}
-                    onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
-                  >
-                    {profile.active ? "Active" : "Inactive"}
-                  </button>
-                </td>
+        {canEdit && (
+          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_12rem_auto] md:items-end">
+            <label>
+              Email
+              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+            </label>
+            <label>
+              Role
+              <select value={role} onChange={(event) => setRole(event.target.value as UserRole)}>
+                <option value="owner">Owner</option>
+                <option value="admin">Admin</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </label>
+            <button
+              className="btn-primary"
+              disabled={!email.trim()}
+              onClick={async () => {
+                await onAuthorizeEmail(email, role, true);
+                setEmail("");
+                setRole("viewer");
+              }}
+            >
+              Authorize
+            </button>
+          </div>
+        )}
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Active</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {authorizedEmails.map((entry) => (
+                <tr key={entry.id}>
+                  <td>{entry.email}</td>
+                  <td>
+                    <select
+                      value={entry.role}
+                      disabled={!canEdit}
+                      onChange={(event) => onAuthorizeEmail(entry.email, event.target.value as UserRole, entry.active)}
+                    >
+                      <option value="owner">Owner</option>
+                      <option value="admin">Admin</option>
+                      <option value="viewer">Viewer</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button className="btn-secondary" disabled={!canEdit} onClick={() => onAuthorizeEmail(entry.email, entry.role, !entry.active)}>
+                      {entry.active ? "Active" : "Inactive"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {authorizedEmails.length === 0 && (
+                <tr>
+                  <td colSpan={3}>No authorized emails yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <h2>Signed-In Users</h2>
+            <p>Users appear here after opening their email sign-in link.</p>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Active</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((profile) => (
+                <tr key={profile.uid}>
+                  <td>{profile.uid === currentUid ? `${userDisplayName(profile)} · ID ${userSimpleId(profile)} (you)` : `${userDisplayName(profile)} · ID ${userSimpleId(profile)}`}</td>
+                  <td>{profile.email || "No email"}</td>
+                  <td>
+                    <select
+                      value={profile.role}
+                      disabled={!canEdit || profile.uid === currentUid}
+                      onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
+                    >
+                      <option value="owner">Owner</option>
+                      <option value="admin">Admin</option>
+                      <option value="viewer">Viewer</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button
+                      className="btn-secondary"
+                      disabled={!canEdit || profile.uid === currentUid}
+                      onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
+                    >
+                      {profile.active ? "Active" : "Inactive"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {users.length === 0 && (
+                <tr>
+                  <td colSpan={4}>No signed-in users yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </section>
   );
 }
@@ -621,6 +720,52 @@ function FirebaseMissing() {
   );
 }
 
+function AuthPanel({
+  email,
+  message,
+  busy,
+  isEmailLink,
+  onEmailChange,
+  onSubmit
+}: {
+  email: string;
+  message: string;
+  busy: boolean;
+  isEmailLink: boolean;
+  onEmailChange: (value: string) => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">
+      <section className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/40">
+        <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
+        <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
+        <p className="mt-4 text-sm text-slate-400">
+          Sign in with an owner-authorized email. A secure login link will be sent to your inbox.
+        </p>
+        <label className="mt-5">
+          Email
+          <input
+            type="email"
+            value={email}
+            autoComplete="email"
+            placeholder="name@example.com"
+            onChange={(event) => onEmailChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void onSubmit();
+            }}
+          />
+        </label>
+        <button className="btn-primary mt-5 !w-full" disabled={busy || !email.trim()} onClick={() => void onSubmit()}>
+          {busy && <LoadingIcon label="Signing in" />}
+          {isEmailLink ? "Complete Sign In" : "Send Sign-In Link"}
+        </button>
+        {message && <p className="mt-4 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">{message}</p>}
+      </section>
+    </main>
+  );
+}
+
 function App() {
   const initialDate = currentDateState();
   const [view, setView] = useState<View>("dashboard");
@@ -645,31 +790,68 @@ function App() {
   const [commissionCategories, setCommissionCategories] = useState<CatalogItem[]>([]);
   const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [authorizedEmails, setAuthorizedEmails] = useState<AuthorizedEmail[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
+  const [authReady, setAuthReady] = useState(false);
+  const [authEmail, setAuthEmail] = useState(() => localStorage.getItem("emailForSignIn") ?? "");
+  const [authMessage, setAuthMessage] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const syncedLiveDateRef = useRef(false);
 
   useEffect(() => {
     const firebaseAuth = auth;
     if (!firebaseAuth) return;
+    const href = window.location.href;
+    if (isSignInWithEmailLink(firebaseAuth, href)) {
+      const storedEmail = localStorage.getItem("emailForSignIn");
+      if (storedEmail) {
+        setAuthBusy(true);
+        void signInWithEmailLink(firebaseAuth, storedEmail, href)
+          .then(() => {
+            localStorage.removeItem("emailForSignIn");
+            window.history.replaceState({}, document.title, window.location.pathname);
+          })
+          .catch((err) => {
+            setAuthMessage(err instanceof Error ? err.message : "Could not complete email sign-in.");
+          })
+          .finally(() => setAuthBusy(false));
+      } else {
+        setAuthMessage("Enter the same email address used to request this sign-in link.");
+      }
+    }
     return onAuthStateChanged(firebaseAuth, async (nextUser) => {
       if (!nextUser) {
-        try {
-          await signInAnonymously(firebaseAuth);
-        } catch (err) {
-          setAuthStatus(
-            err instanceof Error
-              ? `${err.message}. Enable Anonymous Auth in Firebase Authentication.`
-              : "Enable Anonymous Auth in Firebase Authentication."
-          );
-        }
+        setUser(null);
+        setRole(null);
+        setAuthStatus("Sign in required.");
+        setAuthReady(true);
         return;
       }
-      setUser(nextUser);
-      const nextRole = await getUserRole(nextUser.uid, nextUser.email);
-      setRole(nextRole);
-      setAuthStatus(`Connected to Firestore · ${nextRole}`);
+      if (nextUser.isAnonymous) {
+        await signOut(firebaseAuth);
+        setUser(null);
+        setRole(null);
+        setAuthStatus("Email sign-in required.");
+        setAuthReady(true);
+        return;
+      }
+      try {
+        const nextRole = await getUserRole(nextUser.uid, nextUser.email);
+        setUser(nextUser);
+        setRole(nextRole);
+        setAuthStatus(`Connected to Firestore · ${roleLabel(nextRole)}`);
+        setAuthMessage("");
+      } catch (err) {
+        setUser(null);
+        setRole(null);
+        setAuthMessage(err instanceof Error ? err.message : "This email is not authorized.");
+        setAuthStatus("Email not authorized.");
+        await signOut(firebaseAuth);
+      } finally {
+        setAuthReady(true);
+      }
     });
   }, []);
 
@@ -683,6 +865,36 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  async function handleEmailLinkAuth() {
+    const firebaseAuth = auth;
+    if (!firebaseAuth) return;
+    const cleanEmail = emailKey(authEmail);
+    if (!cleanEmail) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      const href = window.location.href;
+      if (isSignInWithEmailLink(firebaseAuth, href)) {
+        await signInWithEmailLink(firebaseAuth, cleanEmail, href);
+        localStorage.removeItem("emailForSignIn");
+        window.history.replaceState({}, document.title, window.location.pathname);
+        setAuthMessage("Signed in.");
+        return;
+      }
+      await sendSignInLinkToEmail(firebaseAuth, cleanEmail, {
+        url: `${window.location.origin}${window.location.pathname}`,
+        handleCodeInApp: true
+      });
+      localStorage.setItem("emailForSignIn", cleanEmail);
+      setAuthEmail(cleanEmail);
+      setAuthMessage("Sign-in link sent. Open it from this browser to continue.");
+    } catch (err) {
+      setAuthMessage(err instanceof Error ? err.message : "Could not send sign-in link.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function refreshMonthList() {
     const records = await listMonths();
     setMonths(records);
@@ -691,16 +903,18 @@ function App() {
 
   async function refreshCatalogs() {
     if (roleCan(role, "catalogs")) await ensureDefaultCatalogs();
-    const [expenses, commissions, parties, profiles] = await Promise.all([
+    const [expenses, commissions, parties, profiles, authorized] = await Promise.all([
       listCatalogItems("expenseCategories"),
       listCatalogItems("commissionCategories"),
       listCatalogItems("creditParties"),
-      roleCan(role, "users") ? listUsers().catch(() => []) : Promise.resolve([])
+      roleCan(role, "users") ? listUsers().catch(() => []) : Promise.resolve([]),
+      roleCan(role, "users") ? listAuthorizedEmails().catch(() => []) : Promise.resolve([])
     ]);
     setExpenseCategories(expenses);
     setCommissionCategories(commissions);
     setCreditParties(parties);
     setUsers(profiles);
+    setAuthorizedEmails(authorized);
   }
 
   async function loadMonth(nextMonthId = monthId) {
@@ -956,6 +1170,18 @@ function App() {
   }
 
   if (!isFirebaseConfigured) return <FirebaseMissing />;
+  if (!authReady || !user || !role) {
+    return (
+      <AuthPanel
+        email={authEmail}
+        message={authMessage || authStatus}
+        busy={authBusy}
+        isEmailLink={auth ? isSignInWithEmailLink(auth, window.location.href) : false}
+        onEmailChange={setAuthEmail}
+        onSubmit={handleEmailLinkAuth}
+      />
+    );
+  }
 
   const isClosed = monthStatus === "closed";
   const selectedDayLocked = Boolean(selectedDayInput.lockedAt);
@@ -1006,6 +1232,12 @@ function App() {
     await updateUserProfile(uid, updates);
     setUsers(await listUsers());
     setStatus("User access updated.");
+  }
+
+  async function saveAuthorizedEmail(email: string, nextRole: UserRole, active = true) {
+    await upsertAuthorizedEmail(email, nextRole, active);
+    setAuthorizedEmails(await listAuthorizedEmails());
+    setStatus(`${emailKey(email)} authorization saved.`);
   }
 
   return (
@@ -1111,6 +1343,7 @@ function App() {
                 <p className="mt-1 text-sm text-slate-400">ID {displayId} · {accessLabel}</p>
                 <p className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
                 <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> Connected</p>
+                <button className="btn-secondary mt-4 !w-full" onClick={() => auth && signOut(auth)}>Sign Out</button>
               </div>
             </>
           )}
@@ -1221,7 +1454,14 @@ function App() {
           )}
 
           {view === "users" && (
-            <UserManager users={users} currentUid={user?.uid} canEdit={canManageUsers} onUpdate={saveUserRole} />
+            <UserManager
+              users={users}
+              authorizedEmails={authorizedEmails}
+              currentUid={user?.uid}
+              canEdit={canManageUsers}
+              onUpdate={saveUserRole}
+              onAuthorizeEmail={saveAuthorizedEmail}
+            />
           )}
 
           {view === "backup" && (
