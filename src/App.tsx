@@ -280,7 +280,8 @@ function UserManager({
   currentUid,
   canEdit,
   onUpdate,
-  onAuthorizeEmail
+  onAuthorizeEmail,
+  onSendRoleLink
 }: {
   users: UserProfile[];
   authorizedEmails: AuthorizedEmail[];
@@ -288,9 +289,9 @@ function UserManager({
   canEdit: boolean;
   onUpdate: (uid: string, updates: Pick<UserProfile, "role" | "active">) => Promise<void>;
   onAuthorizeEmail: (email: string, role: UserRole, active?: boolean) => Promise<void>;
+  onSendRoleLink: (email: string, role: UserRole) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<UserRole>("viewer");
   return (
     <section className="space-y-5">
       <section className="panel">
@@ -301,30 +302,30 @@ function UserManager({
           </div>
         </div>
         {canEdit && (
-          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_12rem_auto] md:items-end">
+          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
             <label>
               Email
               <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
             </label>
-            <label>
-              Role
-              <select value={role} onChange={(event) => setRole(event.target.value as UserRole)}>
-                <option value="owner">Owner</option>
-                <option value="admin">Admin</option>
-                <option value="viewer">Viewer</option>
-              </select>
-            </label>
-            <button
-              className="btn-primary"
-              disabled={!email.trim()}
-              onClick={async () => {
-                await onAuthorizeEmail(email, role, true);
-                setEmail("");
-                setRole("viewer");
-              }}
-            >
-              Authorize
-            </button>
+            <div className="flex flex-wrap gap-2">
+              {([
+                ["owner", "Owner Link"],
+                ["admin", "Admin Link"],
+                ["viewer", "Viewer Link"]
+              ] as Array<[UserRole, string]>).map(([role, label]) => (
+                <button
+                  key={role}
+                  className={role === "owner" ? "btn-primary" : "btn-secondary"}
+                  disabled={!email.trim()}
+                  onClick={async () => {
+                    await onSendRoleLink(email, role);
+                    setEmail("");
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         <div className="table-wrap">
@@ -334,6 +335,7 @@ function UserManager({
                 <th>Email</th>
                 <th>Role</th>
                 <th>Active</th>
+                <th>Link</th>
               </tr>
             </thead>
             <tbody>
@@ -356,11 +358,16 @@ function UserManager({
                       {entry.active ? "Active" : "Inactive"}
                     </button>
                   </td>
+                  <td>
+                    <button className="btn-secondary" disabled={!canEdit || !entry.active} onClick={() => onSendRoleLink(entry.email, entry.role)}>
+                      Send Link
+                    </button>
+                  </td>
                 </tr>
               ))}
               {authorizedEmails.length === 0 && (
                 <tr>
-                  <td colSpan={3}>No authorized emails yet.</td>
+                  <td colSpan={4}>No authorized emails yet.</td>
                 </tr>
               )}
             </tbody>
@@ -1240,6 +1247,18 @@ function App() {
     setStatus(`${emailKey(email)} authorization saved.`);
   }
 
+  async function sendRoleLink(email: string, nextRole: UserRole) {
+    if (!auth) return;
+    const cleanEmail = emailKey(email);
+    await upsertAuthorizedEmail(cleanEmail, nextRole, true);
+    await sendSignInLinkToEmail(auth, cleanEmail, {
+      url: `${window.location.origin}${window.location.pathname}`,
+      handleCodeInApp: true
+    });
+    setAuthorizedEmails(await listAuthorizedEmails());
+    setStatus(`${roleLabel(nextRole)} sign-in link sent to ${cleanEmail}.`);
+  }
+
   return (
     <main className={`min-h-screen ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
@@ -1461,6 +1480,7 @@ function App() {
               canEdit={canManageUsers}
               onUpdate={saveUserRole}
               onAuthorizeEmail={saveAuthorizedEmail}
+              onSendRoleLink={sendRoleLink}
             />
           )}
 
