@@ -1149,83 +1149,72 @@ export function StockLedgerModule({
                 </div>
                 <Save />
               </div>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th rowSpan={2}>Account</th>
-                      {activeProducts.map((product) => (
-                        <th key={product.id} colSpan={productPaymentTrackingEnabled(product) ? 4 : 2} className="text-center">
-                          {product.name}
-                          <br />
-                          <span className="text-[10px] text-slate-500">@ {formatMoney(product.rate)}</span>
-                        </th>
-                      ))}
-                      <th rowSpan={2}>Total Qty</th>
-                      <th rowSpan={2}>Total Amount</th>
-                      <th rowSpan={2}>Payment</th>
-                      <th rowSpan={2}>Carry Forward</th>
-                      <th rowSpan={2}>Due</th>
-                    </tr>
-                    <tr>
-                      {activeProducts.flatMap((product) => {
-                        const headers = ["Qty", "Amount"];
-                        if (productPaymentTrackingEnabled(product)) headers.push("Payment", "Due");
-                        return headers.map((label) => (
-                          <th key={`${product.id}-${label}`} className="text-[11px] font-medium text-slate-400">
-                            {label}
-                          </th>
-                        ));
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>{selectedAccount.name}</td>
-                      {activeProducts.flatMap((product) => {
-                        const snapshot = previewEntry.products.find((item) => item.productId === product.id);
-                        const cells = [
-                          <td key={`${product.id}-qty`}>
-                            <NumberInput
-                              value={draft.productQuantities[product.id] ?? 0}
-                              disabled={!canEdit || monthBootstrapPending}
-                              onChange={(value) => setDraft((current) => ({ ...current, productQuantities: { ...current.productQuantities, [product.id]: value } }))}
-                            />
-                          </td>,
-                          <td key={`${product.id}-amount`} className="text-slate-300">
-                            {formatMoney(snapshot?.amount ?? 0)}
-                          </td>
-                        ];
-                        if (productPaymentTrackingEnabled(product)) {
-                          cells.push(
-                            <td key={`${product.id}-payment`}>
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {activeProducts.map((product) => {
+                  const snapshot = previewEntry.products.find((item) => item.productId === product.id);
+                  const tracksPayment = productPaymentTrackingEnabled(product);
+                  return (
+                    <section key={product.id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+                      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-100">{product.name}</h3>
+                          <p className="text-xs text-slate-500">Rate snapshot: {formatMoney(product.rate)}</p>
+                        </div>
+                        <span className={tracksPayment ? "btn-chip btn-chip-active" : "btn-chip"}>{tracksPayment ? "Payment tracked" : "Qty only"}</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <label>
+                          Quantity
+                          <NumberInput
+                            value={draft.productQuantities[product.id] ?? 0}
+                            disabled={!canEdit || monthBootstrapPending}
+                            onChange={(value) => setDraft((current) => ({ ...current, productQuantities: { ...current.productQuantities, [product.id]: value } }))}
+                          />
+                        </label>
+                        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                          <p className="text-xs uppercase text-slate-500">Amount</p>
+                          <p className="mt-1 text-lg font-semibold text-slate-100">{formatMoney(snapshot?.amount ?? 0)}</p>
+                        </div>
+                        {tracksPayment && (
+                          <>
+                            <label>
+                              Payment Received
                               <NumberInput
                                 value={draft.productPayments[product.id] ?? 0}
                                 disabled={!canEdit || monthBootstrapPending}
                                 onChange={(value) => setDraft((current) => ({ ...current, productPayments: { ...current.productPayments, [product.id]: value } }))}
                               />
-                            </td>,
-                            <td key={`${product.id}-due`} className="text-slate-300">
-                              {formatMoney(snapshot?.dueBalance ?? 0)}
-                            </td>
-                          );
-                        }
-                        return cells;
-                      })}
-                      <td>{formatMoney(previewEntry.totalQty)}</td>
-                      <td>{formatMoney(previewEntry.totalAmount)}</td>
-                      <td>{formatMoney(previewEntry.totalPaymentReceived)}</td>
-                      <td>
-                        <NumberInput
-                          value={draft.carryForwardBalance ?? 0}
-                          disabled={!canEdit || Boolean(previousEntry) || monthBootstrapPending}
-                          onChange={(value) => setDraft((current) => ({ ...current, carryForwardBalance: value }))}
-                        />
-                      </td>
-                      <td>{formatMoney(previewEntry.dueBalance)}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                            </label>
+                            <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                              <p className="text-xs uppercase text-slate-500">Due</p>
+                              <p className="mt-1 text-lg font-semibold text-slate-100">{formatMoney(snapshot?.dueBalance ?? 0)}</p>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </section>
+                  );
+                })}
+                {activeProducts.length === 0 && (
+                  <p className="warning">No active stock products configured. Owner must configure Stock Settings first.</p>
+                )}
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-5">
+                <MetricCard label="Total Qty" value={formatMoney(previewEntry.totalQty)} helper="All active products." />
+                <MetricCard label="Total Amount" value={formatMoney(previewEntry.totalAmount)} helper="Qty multiplied by rate snapshot." />
+                <MetricCard label="Payment" value={formatMoney(previewEntry.totalPaymentReceived)} helper="Tracked product payments." />
+                <div className="card card-pad">
+                  <p className="text-sm font-medium text-slate-400">Carry Forward</p>
+                  <div className="mt-2">
+                    <NumberInput
+                      value={draft.carryForwardBalance ?? 0}
+                      disabled={!canEdit || Boolean(previousEntry) || monthBootstrapPending}
+                      onChange={(value) => setDraft((current) => ({ ...current, carryForwardBalance: value }))}
+                    />
+                  </div>
+                  <p className="mt-3 text-xs text-slate-500">Previous due balance.</p>
+                </div>
+                <MetricCard label="Due" value={formatMoney(previewEntry.dueBalance)} helper="Amount minus payment plus carry." />
               </div>
               <label className="mt-4">
                 Notes
