@@ -504,7 +504,14 @@ export async function saveStockDay(
   };
 
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
-  batch.set(dayDocumentRef, cleanForFirestore({ ...nextDay, stockOut: nextDay.entries }), { merge: true });
+  batch.set(dayDocumentRef, {
+    ...cleanForFirestore({ ...nextDay, stockOut: nextDay.entries }),
+    closedAt: nextDay.closedAt ?? deleteField(),
+    closedBy: nextDay.closedBy ?? deleteField(),
+    reopenedAt: nextDay.reopenedAt ?? deleteField(),
+    reopenedBy: nextDay.reopenedBy ?? deleteField(),
+    reopenedUntilAt: nextDay.reopenedUntilAt ?? deleteField()
+  }, { merge: true });
   const nextEntryIds = new Set(nextDay.entries.map((entry) => entry.id));
   const nextStockInIds = new Set((nextDay.stockIn ?? []).map((record) => record.id));
   existingEntrySnap.docs.forEach((entryDoc) => {
