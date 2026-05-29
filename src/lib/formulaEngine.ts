@@ -4,7 +4,15 @@ import {
   type MonthComputed
 } from "../types/ledger";
 
-const sum = (nums: number[]) => nums.reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0);
+function roundAmount(value: number) {
+  return Number.isFinite(value) ? Math.round(value) : 0;
+}
+
+const sum = (nums: number[]) => roundAmount(nums.reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0));
+
+function normalizeKey(value: string) {
+  return value.trim().toLowerCase();
+}
 
 function expenseCategory(item: { category?: string; name?: string; description?: string }) {
   if (item.category) return item.category;
@@ -25,35 +33,45 @@ function normalizeCommissionCategory(category: string): string {
   return category;
 }
 
-export function computeDay(day: DailyLedgerInput, openingBalance: number): DailyLedgerComputed {
-  const issueBalance = sum(day.commissions.map((item) => item.amount));
-  const totalBalance = openingBalance + issueBalance;
-  const expenseTotal = sum(day.expenses.map((item) => item.amount));
-  const returnBalance = totalBalance - expenseTotal;
-  const ownerBalances = day.ownerBalances.map((row) => {
-    const rowOpening = row.opening ?? 0;
-    const balance = rowOpening + row.amount;
+export function computeDay(day: DailyLedgerInput, openingBalance: number, ownerOpeningBalance = 0): DailyLedgerComputed {
+  const issueBalance = roundAmount(sum(day.commissions.map((item) => item.amount)));
+  const totalBalance = roundAmount(openingBalance + issueBalance);
+  const expenseTotal = roundAmount(sum(day.expenses.map((item) => item.amount)));
+  const returnBalance = roundAmount(totalBalance - expenseTotal);
+  const ownerRows = day.ownerBalances.filter((row) => normalizeKey(row.description ?? row.label ?? "") !== "opening bal");
+  let ownerRunningOpening = roundAmount(ownerOpeningBalance || (ownerRows[0]?.opening ?? 0));
+  const ownerBalances = ownerRows.map((row) => {
+    const expense = roundAmount(row.expense ?? Math.max(row.amount, 0));
+    const received = roundAmount(row.received ?? Math.max(-row.amount, 0));
+    const amount = roundAmount(expense - received);
+    const rowOpening = roundAmount(ownerRunningOpening);
+    const balance = roundAmount(rowOpening + amount);
+    ownerRunningOpening = balance;
     return {
       ...row,
+      amount,
+      expense,
+      received,
+      opening: rowOpening,
       label: row.label ?? row.description,
       description: row.description ?? row.label ?? "",
       balance
     };
   });
-  const ownerBalanceTotal = sum(ownerBalances.map((row) => row.balance ?? row.amount));
+  const ownerBalanceTotal = roundAmount(ownerBalances.at(-1)?.balance ?? ownerOpeningBalance);
 
   const creditRows = day.credits.map((row) => ({
     ...row,
     loan: row.loan ?? row.today ?? 0,
     today: row.loan ?? row.today ?? 0,
-    balance: row.opening + (row.loan ?? row.today ?? 0) - row.receive
+    balance: roundAmount(row.opening + (row.loan ?? row.today ?? 0) - row.receive)
   }));
 
   const creditTotals = {
-    opening: sum(creditRows.map((row) => row.opening)),
-    today: sum(creditRows.map((row) => row.loan ?? row.today ?? 0)),
-    receive: sum(creditRows.map((row) => row.receive)),
-    balance: sum(creditRows.map((row) => row.balance ?? 0))
+    opening: roundAmount(sum(creditRows.map((row) => row.opening))),
+    today: roundAmount(sum(creditRows.map((row) => row.loan ?? row.today ?? 0))),
+    receive: roundAmount(sum(creditRows.map((row) => row.receive))),
+    balance: roundAmount(sum(creditRows.map((row) => row.balance ?? 0)))
   };
 
   return {
@@ -77,14 +95,17 @@ export function computeDay(day: DailyLedgerInput, openingBalance: number): Daily
 export function computeMonth(
   dailyInputs: DailyLedgerInput[],
   openingBalance: number,
-  monthId?: string
+  monthId?: string,
+  ownerOpeningBalance = 0
 ): MonthComputed {
   const sorted = [...dailyInputs].sort((a, b) => a.dayNo - b.dayNo);
   let currentOpening = openingBalance;
+  let currentOwnerOpening = ownerOpeningBalance;
 
   const days = sorted.map((day) => {
-    const computed = computeDay(day, currentOpening);
+    const computed = computeDay(day, currentOpening, currentOwnerOpening);
     currentOpening = computed.returnBalance;
+    currentOwnerOpening = computed.ownerBalanceTotal;
     return computed;
   });
 
@@ -129,7 +150,7 @@ export function computeMonth(
       monthlyIssueTotal: sum(days.map((d) => d.issueBalance)),
       monthlyExpenseTotal: sum(days.map((d) => d.expenseTotal)),
       monthlyReturnBalance: days.at(-1)?.returnBalance ?? openingBalance,
-      ownerBalanceTotal: sum(days.map((d) => d.ownerBalanceTotal)),
+      ownerBalanceTotal: days.at(-1)?.ownerBalanceTotal ?? ownerOpeningBalance,
       creditBalanceTotal: sum(days.map((d) => d.creditTotals.balance)),
       expenseByCategory: [...expenseMap.entries()]
         .map(([category, amount]) => ({ category, amount }))

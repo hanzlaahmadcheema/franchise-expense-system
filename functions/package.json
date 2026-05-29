@@ -3,18 +3,28 @@
   "private": true,
   "main": "lib/index.js",
   "type": "commonjs",
+  "engines": {
+    "node": "20"
+  },
   "scripts": {
     "build": "tsc",
     "serve": "firebase emulators:start --only functions,firestore",
     "deploy": "firebase deploy --only functions",
+    "email:test": "node scripts/send-test-email.cjs",
+    "stock:seed-opening": "node scripts/seed-stock-opening.cjs",
     "test": "node --test lib/formulaEngine.test.js"
   },
   "dependencies": {
     "firebase-admin": "^12.7.0",
-    "firebase-functions": "^5.1.1"
+    "firebase-functions": "^5.1.1",
+    "nodemailer": "^6.9.16",
+    "pdfkit": "^0.18.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "typescript": "^5.6.3",
-    "@types/node": "^22.7.6"
+    "@types/node": "^22.7.6",
+    "@types/nodemailer": "^6.4.17",
+    "@types/pdfkit": "^0.17.6",
+    "typescript": "^5.6.3"
   }
 }

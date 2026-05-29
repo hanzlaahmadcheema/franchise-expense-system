@@ -83,17 +83,17 @@ function MetricCard({
   };
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
+    <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-slate-400">{label}</p>
-          <p className="mt-2 text-3xl font-semibold tracking-tight text-white">{value}</p>
+          <p className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">{value}</p>
         </div>
         <div className={`rounded-lg p-2 ring-1 ${tones[tone]}`}>
           <Icon className="h-5 w-5" />
         </div>
       </div>
-      <p className="mt-4 text-sm text-slate-500">{helper}</p>
+      <p className="mt-3 text-xs text-slate-500 sm:mt-4 sm:text-sm">{helper}</p>
     </div>
   );
 }
@@ -161,7 +161,7 @@ export function HomeDashboard({ month }: Props) {
           <p className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-300">
             Monthly Command Center
           </p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-white">
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
             {month.monthId ?? "Current month"}
           </h2>
           <p className="mt-2 text-sm text-slate-400">
@@ -178,7 +178,7 @@ export function HomeDashboard({ month }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-4">
         <MetricCard
           label="Issue Total"
           value={money(month.homeSummary.monthlyIssueTotal)}
@@ -209,7 +209,7 @@ export function HomeDashboard({ month }: Props) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20 xl:col-span-2">
+        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5 xl:col-span-2">
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold text-white">Daily Flow</h3>
@@ -217,9 +217,9 @@ export function HomeDashboard({ month }: Props) {
             </div>
             <ArrowDownRight className="h-5 w-5 text-slate-500" />
           </div>
-          <div className="h-80 min-w-0" ref={flowChart.ref}>
+          <div className="h-64 min-w-0 sm:h-80" ref={flowChart.ref}>
             {chartsReady && (
-              <AreaChart data={dailyChart} width={flowChart.width} height={320}>
+              <AreaChart data={dailyChart} width={flowChart.width} height={flowChart.width < 520 ? 256 : 320}>
                 <defs>
                   <linearGradient id="issue" x1="0" x2="0" y1="0" y2="1">
                     <stop offset="5%" stopColor="#34d399" stopOpacity={0.35} />
@@ -245,12 +245,12 @@ export function HomeDashboard({ month }: Props) {
           </div>
         </div>
 
-        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
+        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
           <h3 className="text-lg font-semibold text-white">Expense Mix</h3>
           <p className="text-sm text-slate-400">Top expense categories</p>
-          <div className="mt-5 h-72 min-w-0" ref={expenseChart.ref}>
+          <div className="mt-5 h-64 min-w-0 sm:h-72" ref={expenseChart.ref}>
             {chartsReady && (
-              <PieChart width={expenseChart.width} height={288}>
+              <PieChart width={expenseChart.width} height={expenseChart.width < 520 ? 256 : 288}>
                 <Pie data={categoryData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={96}>
                   {categoryData.map((entry, index) => (
                     <Cell key={entry.name} fill={chartColors[index % chartColors.length]} />
@@ -281,12 +281,12 @@ export function HomeDashboard({ month }: Props) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20">
+        <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
           <h3 className="text-lg font-semibold text-white">Commission Breakdown</h3>
           <p className="text-sm text-slate-400">Category totals across the month</p>
-          <div className="mt-5 h-72 min-w-0" ref={commissionChart.ref}>
+          <div className="mt-5 h-64 min-w-0 sm:h-72" ref={commissionChart.ref}>
             {chartsReady && (
-              <BarChart data={commissionData} layout="vertical" margin={{ left: 12 }} width={commissionChart.width} height={288}>
+              <BarChart data={commissionData} layout="vertical" margin={{ left: 8 }} width={commissionChart.width} height={commissionChart.width < 520 ? 256 : 288}>
                 <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
                 <XAxis type="number" stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
                 <YAxis dataKey="name" type="category" stroke="#94a3b8" tickLine={false} width={110} />

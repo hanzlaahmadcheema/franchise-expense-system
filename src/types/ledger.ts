@@ -19,6 +19,16 @@ export type UserRole = "owner" | "admin" | "viewer";
 
 export type MonthStatus = "open" | "closed";
 
+export type NotificationSettings = {
+  enabled: boolean;
+  sendOnDayClose: boolean;
+  sendOnMonthClose: boolean;
+  sendOnImport: boolean;
+  sendOnRecalculate: boolean;
+  sendOnRoleChange: boolean;
+  updatedAt?: number;
+};
+
 export type ImportWarning = {
   level: "info" | "warning" | "error";
   message: string;
@@ -56,6 +66,8 @@ export type OwnerBalanceRow = {
   id: string;
   description: string;
   amount: number;
+  expense?: number;
+  received?: number;
   opening?: number;
   balance?: number;
   label?: string;
@@ -73,6 +85,10 @@ export type DailyLedgerInput = {
   lockedAt?: number;
   lockedBy?: string;
   lockedByRole?: UserRole;
+  reopenedUntilAt?: number;
+  reopenedAt?: number;
+  reopenedBy?: string;
+  reopenedByRole?: UserRole;
   updatedAt?: number;
   expenses: ExpenseItem[];
   commissions: CommissionItem[];
@@ -144,6 +160,7 @@ export type MonthRecord = {
   id: string;
   label: string;
   openingBalance: number;
+  ownerOpeningBalance?: number;
   status: MonthStatus;
   importedFileName?: string;
   createdAt?: number;
@@ -193,9 +210,86 @@ export type WorkbookImportPreview = {
 
 export type AuditEvent = {
   id: string;
-  action: "import" | "edit-day" | "lock-day" | "recalculate" | "export" | "close-month" | "reopen-month";
+  action: "import" | "edit-day" | "lock-day" | "recalculate" | "export" | "close-month" | "reopen-month" | "role-change" | "reopen-day" | "manual-day" | "manual-month";
   actorUid?: string;
   actorEmail?: string | null;
   createdAt: number;
   detail: string;
+};
+
+export type AuditLogModule = "expense" | "jazzLoad" | "stock" | "auth" | "settings" | "system";
+
+export type SystemAuditLog = {
+  id: string;
+  createdAt: number;
+  module: AuditLogModule;
+  action: string;
+  summary: string;
+  actorUid: string;
+  actorEmail: string | null;
+  actorRole: UserRole;
+  monthId?: string;
+  dayNo?: number;
+  targetType?: string;
+  targetId?: string;
+  sourcePath?: string;
+};
+
+export type AuditLogFilters = {
+  fromMs?: number;
+  toMs?: number;
+  module?: AuditLogModule;
+  action?: string;
+  actorUid?: string;
+  monthId?: string;
+  search?: string;
+};
+
+export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
+  expense: [
+    "edit-day",
+    "lock-day",
+    "reopen-day",
+    "reopen-window-close",
+    "import",
+    "recalculate",
+    "close-month",
+    "reopen-month",
+    "backup-restore",
+    "export-report",
+    "manual-email"
+  ],
+  jazzLoad: [
+    "save-day",
+    "close-day",
+    "reopen-day",
+    "close-month",
+    "reopen-month",
+    "do-assignment",
+    "backup-restore"
+  ],
+  stock: [
+    "save-day",
+    "close-day",
+    "reopen-day",
+    "close-month",
+    "reopen-month",
+    "backup-restore"
+  ],
+  settings: [
+    "catalog-upsert",
+    "catalog-delete",
+    "notification-update",
+    "jazz-rate-change",
+    "jazz-do-change",
+    "stock-settings-change"
+  ],
+  auth: [
+    "role-change",
+    "user-delete",
+    "authorized-email-upsert",
+    "authorized-email-delete",
+    "user-bootstrap"
+  ],
+  system: ["recalculate", "manual-email", "export-report"]
 };

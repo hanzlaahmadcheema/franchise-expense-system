@@ -32,6 +32,85 @@ describe("formulaEngine", () => {
     expect(month.homeSummary.creditBalanceTotal).toBe(22);
   });
 
+  it("carries owner closing through blank owner days", () => {
+    const month = computeMonth(
+      [
+        {
+          dayNo: 1,
+          expenses: [],
+          commissions: [],
+          credits: [],
+          ownerBalances: [{ id: "o1", description: "Cash", opening: -85427, amount: 50681 }]
+        },
+        {
+          dayNo: 2,
+          expenses: [],
+          commissions: [],
+          credits: [],
+          ownerBalances: []
+        }
+      ],
+      0,
+      "2026-05",
+      -85427
+    );
+
+    expect(month.days[0].ownerBalanceTotal).toBe(-34746);
+    expect(month.days[1].ownerBalanceTotal).toBe(-34746);
+    expect(month.homeSummary.ownerBalanceTotal).toBe(-34746);
+  });
+
+  it("uses the first owner row as the seed when the month owner seed is missing", () => {
+    const month = computeMonth(
+      [
+        {
+          dayNo: 1,
+          expenses: [],
+          commissions: [],
+          credits: [],
+          ownerBalances: [{ id: "o1", description: "Cash", opening: -85427, amount: 1000 }]
+        }
+      ],
+      0,
+      "2026-05"
+    );
+
+    expect(month.days[0].ownerBalances[0].opening).toBe(-85427);
+    expect(month.days[0].ownerBalanceTotal).toBe(-84427);
+    expect(month.homeSummary.ownerBalanceTotal).toBe(-84427);
+  });
+
+  it("recomputes deterministically after a locally queued offline edit", () => {
+    const originalDays = [
+      {
+        dayNo: 1,
+        expenses: [{ id: "e1", name: "Salary", description: "Salary", amount: 100 }],
+        commissions: [{ id: "c1", category: "JazzLoad", amount: 500 }],
+        credits: [],
+        ownerBalances: [{ id: "o1", description: "Cash", opening: 10, amount: 15 }]
+      },
+      {
+        dayNo: 2,
+        expenses: [],
+        commissions: [],
+        credits: [],
+        ownerBalances: []
+      }
+    ];
+    const editedDay = {
+      ...originalDays[0],
+      expenses: [{ id: "e1", name: "Salary", description: "Salary", amount: 250 }]
+    };
+    const offlineDays = [editedDay, originalDays[1]];
+
+    const localComputed = computeMonth(offlineDays, 1000, "2026-05", 10);
+    const reloadedComputed = computeMonth([...offlineDays].reverse(), 1000, "2026-05", 10);
+
+    expect(localComputed.homeSummary).toEqual(reloadedComputed.homeSummary);
+    expect(localComputed.days[1].openingBalance).toBe(1250);
+    expect(localComputed.homeSummary.monthlyExpenseTotal).toBe(250);
+  });
+
   it("keeps automated balance fields derived from inputs", () => {
     const month = computeMonth(
       [

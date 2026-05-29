@@ -18,6 +18,8 @@ type Props = {
   entryMonth?: number;
   entryDay?: number;
   openingBalance: number;
+  ownerOpeningBalance: number;
+  previousOwnerClosingBalance: number;
   dateLabel: string;
   expenseCategories: CatalogItem[];
   commissionCategories: CatalogItem[];
@@ -26,11 +28,20 @@ type Props = {
   disabled?: boolean;
   locked?: boolean;
   canClose?: boolean;
+  canReopen?: boolean;
+  reopenLabel?: string;
+  reopenExpiresAt?: number;
+  reopenRequiresTime?: boolean;
   previousDay?: DailyLedgerInput;
+  previousDayClosed?: boolean;
   onSave: (input: DailyLedgerInput, options?: { silent?: boolean }) => Promise<void>;
   onCloseDay: (input: DailyLedgerInput) => Promise<void>;
+  onSendEmail?: (input: DailyLedgerInput) => Promise<void>;
+  onReopenDay?: (reopenUntilAt?: number) => Promise<void>;
+  canSendEmail?: boolean;
   canCreateCatalogs?: boolean;
   onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
+  onPendingStateChange?: (pending: boolean) => void;
 };
 
 const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -39,30 +50,27 @@ function LoadingIcon({ label = "Loading" }: { label?: string }) {
   return <LoaderCircle className="h-4 w-4 animate-spin" aria-label={label} />;
 }
 
-const emptyExpense = (dayNo: number, category?: CatalogItem): ExpenseItem => ({
-  id: `${dayNo}-expense-${crypto.randomUUID()}`,
-  name: "",
-  description: "",
-  amount: 0,
-  categoryId: category?.id,
-  category: category?.name
-});
+function carryCreditsFromPrevious(dayNo: number, previousDay?: DailyLedgerInput, previousDayClosed?: boolean) {
+  if (!previousDay || !previousDayClosed) return [];
+  return previousDay.credits
+    .map((row) => {
+      const opening = creditClosingBalance(row);
+      return {
+        ...row,
+        id: `${dayNo}-credit-${crypto.randomUUID()}`,
+        opening,
+        loan: 0,
+        today: 0,
+        receive: 0
+      };
+    })
+    .filter(isCreditMovementRow);
+}
 
-const emptyCredit = (dayNo: number, party?: CatalogItem): CreditRow => ({
-  id: `${dayNo}-credit-${crypto.randomUUID()}`,
-  partyId: party?.id,
-  partyName: party?.name ?? "",
-  opening: 0,
-  loan: 0,
-  receive: 0
-});
-
-const emptyOwner = (dayNo: number): OwnerBalanceRow => ({
-  id: `${dayNo}-owner-${crypto.randomUUID()}`,
-  opening: 0,
-  description: "",
-  amount: 0
-});
+function creditClosingBalance(row: CreditRow) {
+  const loan = row.loan ?? row.today ?? 0;
+  return row.balance ?? row.opening + loan - row.receive;
+}
 
 function InputText({
   value,
@@ -113,6 +121,21 @@ function inputText(value: number, onChange: (value: number) => void, disabled?: 
   return <InputText value={value} onChange={onChange} disabled={disabled} />;
 }
 
+function formatTimeInputValue(timestamp: number) {
+  const date = new Date(timestamp);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function timeInputToTimestamp(timeValue: string) {
+  if (!timeValue) return null;
+  const [hours, minutes] = timeValue.split(":").map((part) => Number(part));
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+  const date = new Date();
+  date.setSeconds(0, 0);
+  date.setHours(hours, minutes, 0, 0);
+  return date.getTime();
+}
+
 function activeOrFallback(items: CatalogItem[], fallback: string[]) {
   const active = items.filter((item) => item.active);
   if (active.length) return active;
@@ -139,12 +162,92 @@ function sortCommissions(rows: CommissionItem[], options: CatalogItem[]) {
   );
 }
 
+function normalizeKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function mergeCommissionRows(rows: CommissionItem[], options: CatalogItem[]) {
+  const merged = new Map<string, CommissionItem>();
+  for (const row of rows) {
+    const categoryId = row.categoryId ?? options.find((option) => option.name === row.category)?.id;
+    const key = categoryId ?? normalizeKey(row.category);
+    const current = merged.get(key);
+    if (current) {
+      current.amount += row.amount;
+      continue;
+    }
+    merged.set(key, {
+      ...row,
+      categoryId,
+      category: row.category
+    });
+  }
+  return sortCommissions([...merged.values()].filter((row) => row.amount !== 0), options);
+}
+
+function normalizeOwnerRows(rows: OwnerBalanceRow[]) {
+  return rows
+    .map((row) => {
+      const description = row.description ?? row.label ?? "";
+      const expense = row.expense ?? Math.max(row.amount, 0);
+      const received = row.received ?? Math.max(-row.amount, 0);
+      const amount = expense - received;
+      return {
+        ...row,
+        amount,
+        expense,
+        received,
+        description,
+        label: row.label ?? description
+      };
+    })
+    .filter(
+      (row) =>
+        normalizeKey(row.description ?? row.label ?? "") !== "opening bal" &&
+        (row.description || row.label || row.amount !== 0 || row.expense !== 0 || row.received !== 0 || (row.opening ?? 0) !== 0)
+    );
+}
+
+function isOwnerMovementRow(row: OwnerBalanceRow) {
+  return row.amount !== 0 || (row.expense ?? 0) !== 0 || (row.received ?? 0) !== 0;
+}
+
+function ownerRowsForEntry(rows: OwnerBalanceRow[]) {
+  return normalizeOwnerRows(rows).filter(isOwnerMovementRow);
+}
+
+function mergeCreditRows(rows: CreditRow[]) {
+  const merged = new Map<string, CreditRow>();
+  for (const row of rows) {
+    const key = row.partyId ?? normalizeKey(row.partyName);
+    const current = merged.get(key);
+    if (current) {
+      current.loan = (current.loan ?? current.today ?? 0) + (row.loan ?? row.today ?? 0);
+      current.today = current.loan;
+      current.receive += row.receive;
+      continue;
+    }
+    merged.set(key, {
+      ...row,
+      loan: row.loan ?? row.today ?? 0,
+      today: row.loan ?? row.today ?? 0
+    });
+  }
+  return [...merged.values()].filter(isCreditMovementRow);
+}
+
+function isCreditMovementRow(row: CreditRow) {
+  return row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0;
+}
+
 export function DailyEntryForm({
   dayNo,
   entryYear,
   entryMonth,
   entryDay,
   openingBalance,
+  ownerOpeningBalance,
+  previousOwnerClosingBalance,
   dateLabel,
   expenseCategories,
   commissionCategories,
@@ -153,19 +256,32 @@ export function DailyEntryForm({
   disabled,
   locked,
   canClose,
+  canReopen,
+  reopenLabel = "Reopen 15 Min",
+  reopenExpiresAt,
+  reopenRequiresTime = false,
   previousDay,
+  previousDayClosed,
   onSave,
   onCloseDay,
+  onSendEmail,
+  onReopenDay,
+  canSendEmail,
   canCreateCatalogs,
-  onCreateCatalog
+  onCreateCatalog,
+  onPendingStateChange
 }: Props) {
   const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
   const commissionOptions = activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
   const partyOptions = creditParties.filter((item) => item.active);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [expenses, setExpenses] = useState<ExpenseItem[]>(initial?.expenses ?? []);
-  const [ownerBalances, setOwnerBalances] = useState<OwnerBalanceRow[]>(initial?.ownerBalances ?? []);
-  const [credits, setCredits] = useState<CreditRow[]>(initial?.credits ?? []);
+  const [ownerBalances, setOwnerBalances] = useState<OwnerBalanceRow[]>(
+    () => ownerRowsForEntry(initial?.ownerBalances ?? [])
+  );
+  const [credits, setCredits] = useState<CreditRow[]>(
+    () => mergeCreditRows(initial?.credits?.length ? initial.credits : carryCreditsFromPrevious(dayNo, previousDay, previousDayClosed))
+  );
 
   const [expenseDraft, setExpenseDraft] = useState<Pick<ExpenseItem, "categoryId" | "category" | "name" | "description" | "amount">>({
     categoryId: categoryOptions[0]?.id,
@@ -174,15 +290,14 @@ export function DailyEntryForm({
     description: "",
     amount: 0
   });
-  const [ownerDraft, setOwnerDraft] = useState<Pick<OwnerBalanceRow, "opening" | "description" | "amount">>({
-    opening: 0,
+  const [ownerDraft, setOwnerDraft] = useState<Pick<OwnerBalanceRow, "description" | "expense" | "received">>({
     description: "",
-    amount: 0
+    expense: 0,
+    received: 0
   });
-  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "opening" | "loan" | "receive">>({
+  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "loan" | "receive">>({
     partyId: partyOptions[0]?.id ?? "",
     partyName: partyOptions[0]?.name ?? "",
-    opening: 0,
     loan: 0,
     receive: 0
   });
@@ -192,22 +307,144 @@ export function DailyEntryForm({
         const category = normalizeCommissionCategory(item.category);
         const catalog = commissionOptions.find((option) => option.name === category || option.id === item.categoryId);
         return { ...item, category, categoryId: catalog?.id ?? item.categoryId };
-      })
-      .filter((item) => item.amount !== 0);
-    return sortCommissions(rows, commissionOptions);
+      });
+    return mergeCommissionRows(rows, commissionOptions);
   });
   const [commissionDraft, setCommissionDraft] = useState<Pick<CommissionItem, "category" | "amount">>({
     category: commissionOptions[0]?.name ?? COMMISSION_CATEGORIES[0],
     amount: 0
   });
+  const [editingCommissionId, setEditingCommissionId] = useState<string | null>(null);
+  const [editingOwnerId, setEditingOwnerId] = useState<string | null>(null);
+  const [editingCreditId, setEditingCreditId] = useState<string | null>(null);
   const [commissionFilter, setCommissionFilter] = useState("all");
   const [saving, setSaving] = useState(false);
+  const [emailing, setEmailing] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
+    const stored = localStorage.getItem("autoSaveEnabled");
+    return stored !== "false";
+  });
+  const toggleAutoSave = (enabled: boolean) => {
+    setAutoSaveEnabled(enabled);
+    localStorage.setItem("autoSaveEnabled", String(enabled));
+  };
+  const [creditVerifyMessage, setCreditVerifyMessage] = useState("");
   const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
+  const [reopenPickerOpen, setReopenPickerOpen] = useState(false);
+  const [reopenTimeDraft, setReopenTimeDraft] = useState(formatTimeInputValue(Date.now() + 15 * 60 * 1000));
+  const [reopenTimeError, setReopenTimeError] = useState("");
   const saveInFlightRef = useRef(false);
   const lastSavedRef = useRef("");
+  const [saveInFlight, setSaveInFlight] = useState(false);
+  const [saveBaselineReady, setSaveBaselineReady] = useState(false);
+
+function previousCreditOpening(partyId: string, partyName: string) {
+    if (!previousDayClosed || !previousDay) return 0;
+    const previousRow = previousDay.credits.find(
+      (row) => row.partyId === partyId || normalizeKey(row.partyName) === normalizeKey(partyName)
+    );
+    if (!previousRow) return 0;
+    return creditClosingBalance(previousRow);
+  }
+
+  function currentCreditOpening(partyId: string, partyName: string, excludeId?: string | null) {
+    void excludeId;
+    return previousCreditOpening(partyId, partyName);
+  }
+
+  function verifyCreditOpeningsFromPreviousDay() {
+    if (!previousDayClosed || !previousDay) {
+      setCreditVerifyMessage("Previous day is not closed or not loaded yet.");
+      return;
+    }
+    let addedCount = 0;
+    let carriedCount = 0;
+    setCredits((rows) => {
+      const existingKeys = new Set(rows.flatMap((row) => [row.partyId, normalizeKey(row.partyName)].filter(Boolean) as string[]));
+      const missingRows = previousDay.credits
+        .map((row) => ({ row, opening: creditClosingBalance(row) }))
+        .filter(({ row, opening }) => {
+          if (opening === 0) return false;
+          carriedCount += 1;
+          return !existingKeys.has(row.partyId ?? "") && !existingKeys.has(normalizeKey(row.partyName));
+        })
+        .map(({ row, opening }) => ({
+          id: `${dayNo}-credit-${crypto.randomUUID()}`,
+          partyId: row.partyId,
+          partyName: row.partyName,
+          opening,
+          loan: 0,
+          today: 0,
+          receive: 0
+        }));
+      addedCount = missingRows.length;
+      return missingRows.length ? mergeCreditRows([...rows, ...missingRows]) : rows;
+    });
+    setCreditVerifyMessage(
+      addedCount > 0
+        ? `Added ${addedCount} missing credit opening${addedCount === 1 ? "" : "s"} from previous closing balance.`
+        : carriedCount > 0
+          ? "Credit openings already match previous non-zero closing balances."
+          : "No non-zero previous credit closing balances to carry."
+    );
+  }
+
+  const derivedOwnerBalances = useMemo(
+    () => {
+      let runningOpening = previousOwnerClosingBalance;
+      return ownerRowsForEntry(ownerBalances).map((row) => {
+        const opening = runningOpening;
+        const balance = opening + row.amount;
+        runningOpening = balance;
+        return {
+          ...row,
+          opening,
+          balance
+        };
+      });
+    },
+    [ownerBalances, previousOwnerClosingBalance]
+  );
+
+  const derivedCredits = useMemo(
+    () =>
+      mergeCreditRows(credits)
+        .map((row) => {
+          const opening = previousCreditOpening(row.partyId ?? "", row.partyName);
+          const loan = row.loan ?? row.today ?? 0;
+          return {
+            ...row,
+            opening,
+            loan,
+            today: loan,
+            balance: opening + loan - row.receive
+          };
+        })
+        .filter(isCreditMovementRow),
+    [credits, previousDay, previousDayClosed]
+  );
+
+  useEffect(() => {
+    if (!previousDayClosed || !previousDay) return;
+    setCredits((rows) => {
+      const existingKeys = new Set(rows.map((row) => row.partyId ?? normalizeKey(row.partyName)));
+      const missingRows = previousDay.credits
+        .filter((row) => !existingKeys.has(row.partyId ?? normalizeKey(row.partyName)) && creditClosingBalance(row) !== 0)
+        .map((row) => ({
+          id: `${dayNo}-credit-${crypto.randomUUID()}`,
+          partyId: row.partyId,
+          partyName: row.partyName,
+          opening: creditClosingBalance(row),
+          loan: 0,
+          today: 0,
+          receive: 0
+        }));
+      return missingRows.length ? mergeCreditRows([...rows, ...missingRows]) : rows;
+    });
+  }, [dayNo, previousDay, previousDayClosed]);
 
   const payload = useMemo<DailyLedgerInput>(
     () => ({
@@ -221,22 +458,28 @@ export function DailyEntryForm({
       lockedAt: initial?.lockedAt,
       lockedBy: initial?.lockedBy,
       lockedByRole: initial?.lockedByRole,
+      reopenedUntilAt: initial?.reopenedUntilAt,
+      reopenedAt: initial?.reopenedAt,
+      reopenedBy: initial?.reopenedBy,
+      reopenedByRole: initial?.reopenedByRole,
       updatedAt: initial?.updatedAt,
       expenses: expenses.filter((item) => item.name || item.description || item.amount !== 0),
-      ownerBalances: ownerBalances.filter(
-        (row) => row.description || row.label || row.amount !== 0 || (row.opening ?? 0) !== 0
+      ownerBalances: derivedOwnerBalances.filter(
+        (row) =>
+          row.amount !== 0 ||
+          (row.expense ?? 0) !== 0 ||
+          (row.received ?? 0) !== 0
       ),
-      credits: credits.filter(
-        (row) => row.partyName || row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0
-      ),
+      credits: derivedCredits.filter(isCreditMovementRow),
       commissions: sortCommissions(commissions.filter((item) => item.amount !== 0), commissionOptions)
     }),
     [
       commissionOptions,
       commissions,
-      credits,
       dateLabel,
       dayNo,
+      derivedCredits,
+      derivedOwnerBalances,
       expenses,
       entryDay,
       entryMonth,
@@ -244,25 +487,61 @@ export function DailyEntryForm({
       initial?.lockedAt,
       initial?.lockedBy,
       initial?.lockedByRole,
+      initial?.reopenedUntilAt,
+      initial?.reopenedAt,
+      initial?.reopenedBy,
+      initial?.reopenedByRole,
       initial?.updatedAt,
-      notes,
-      ownerBalances
+      notes
     ]
   );
 
-  const preview: MonthComputed["days"][number] = computeDay(payload, openingBalance);
+  const preview: MonthComputed["days"][number] = computeDay(payload, openingBalance, ownerOpeningBalance);
+
+  const editingOwnerOpening = editingOwnerId
+    ? derivedOwnerBalances.find((row) => row.id === editingOwnerId)?.opening
+    : undefined;
+  const ownerOpeningPreview = editingOwnerOpening ?? derivedOwnerBalances[0]?.opening ?? previousOwnerClosingBalance;
+  const ownerClosingPreview = derivedOwnerBalances.at(-1)?.balance ?? previousOwnerClosingBalance;
+
+  const creditOpeningPreview = creditDraft.partyId
+    ? currentCreditOpening(creditDraft.partyId, creditDraft.partyName, editingCreditId)
+    : 0;
 
   useEffect(() => {
     lastSavedRef.current = JSON.stringify(payload);
+    setSaveInFlight(false);
     setAutoSaveState("saved");
+    setSaveBaselineReady(true);
   }, [dayNo, initial?.lockedAt, initial?.updatedAt]);
 
+  const hasPendingChanges = saveBaselineReady && (
+    saveInFlight ||
+    autoSaveState === "error" ||
+    JSON.stringify(payload) !== lastSavedRef.current
+  );
+
   useEffect(() => {
-    if (disabled) return;
+    onPendingStateChange?.(hasPendingChanges);
+  }, [hasPendingChanges, onPendingStateChange]);
+
+  useEffect(() => {
+    if (!hasPendingChanges) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [hasPendingChanges]);
+
+  useEffect(() => {
+    if (disabled || !autoSaveEnabled) return;
     const timer = window.setInterval(async () => {
       const signature = JSON.stringify(payload);
       if (signature === lastSavedRef.current || saveInFlightRef.current) return;
       saveInFlightRef.current = true;
+      setSaveInFlight(true);
       setAutoSaveState("saving");
       try {
         await onSave(payload, { silent: true });
@@ -272,10 +551,11 @@ export function DailyEntryForm({
         setAutoSaveState("error");
       } finally {
         saveInFlightRef.current = false;
+        setSaveInFlight(false);
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [disabled, onSave, payload]);
+  }, [disabled, autoSaveEnabled, onSave, payload]);
 
   async function handleCloseDay() {
     if (!window.confirm(`Close ${payload.label ?? `Day ${dayNo}`}? Admin users will only be able to view it after closing.`)) return;
@@ -289,21 +569,38 @@ export function DailyEntryForm({
     }
   }
 
-  function copyCreditsFromPrevious() {
-    if (!previousDay) return;
-    setCredits(
-      previousDay.credits.map((row) => {
-        const loan = row.loan ?? row.today ?? 0;
-        return {
-          ...row,
-          id: `${dayNo}-credit-${crypto.randomUUID()}`,
-          opening: row.balance ?? row.opening + loan - row.receive,
-          loan: 0,
-          today: 0,
-          receive: 0
-        };
-      })
-    );
+  async function handleManualSave() {
+    setSaving(true);
+    saveInFlightRef.current = true;
+    setSaveInFlight(true);
+    setAutoSaveState("saving");
+    try {
+      await onSave(payload);
+      lastSavedRef.current = JSON.stringify(payload);
+      setAutoSaveState("saved");
+      return true;
+    } catch {
+      setAutoSaveState("error");
+      return false;
+    } finally {
+      saveInFlightRef.current = false;
+      setSaveInFlight(false);
+      setSaving(false);
+    }
+  }
+
+  async function handleSendEmail() {
+    if (!onSendEmail) return;
+    setEmailing(true);
+    try {
+      if (hasPendingChanges) {
+        const saved = await handleManualSave();
+        if (!saved) return;
+      }
+      await onSendEmail(payload);
+    } finally {
+      setEmailing(false);
+    }
   }
 
   function addExpense() {
@@ -342,67 +639,116 @@ export function DailyEntryForm({
   }
 
   function addOwnerRow() {
-    if (ownerDraft.opening === 0 && !ownerDraft.description && ownerDraft.amount === 0) return;
-    setOwnerBalances((rows) => [
-      ...rows,
-      {
-        id: `${dayNo}-owner-${crypto.randomUUID()}`,
-        opening: ownerDraft.opening,
-        description: ownerDraft.description,
-        label: ownerDraft.description,
-        amount: ownerDraft.amount
+    const expense = ownerDraft.expense ?? 0;
+    const received = ownerDraft.received ?? 0;
+    const amount = expense - received;
+    if (!ownerDraft.description.trim() && expense === 0 && received === 0) return;
+    const description = ownerDraft.description.trim();
+    setOwnerBalances((rows) => {
+      if (editingOwnerId) {
+        return rows.map((row) =>
+          row.id === editingOwnerId
+            ? {
+                ...row,
+                description,
+                label: description,
+                amount,
+                expense,
+                received
+              }
+            : row
+        );
       }
-    ]);
-    setOwnerDraft({
-      opening: 0,
-      description: "",
-      amount: 0
+      return [
+        ...rows,
+        {
+          id: `${dayNo}-owner-${crypto.randomUUID()}`,
+          opening: 0,
+          description,
+          label: description,
+          amount,
+          expense,
+          received
+        }
+      ];
     });
+    setOwnerDraft({
+      description: "",
+      expense: 0,
+      received: 0
+    });
+    setEditingOwnerId(null);
   }
 
   function editOwnerRow(row: OwnerBalanceRow) {
-    if (!window.confirm(`Edit franchise owner entry? It will move back to the entry controls.`)) return;
+    if (!window.confirm(`Edit franchise owner entry?`)) return;
     setOwnerDraft({
-      opening: row.opening ?? 0,
       description: row.description ?? row.label ?? "",
-      amount: row.amount
+      expense: row.expense ?? Math.max(row.amount, 0),
+      received: row.received ?? Math.max(-row.amount, 0)
     });
-    setOwnerBalances((rows) => rows.filter((r) => r.id !== row.id));
+    setEditingOwnerId(row.id);
   }
 
   function deleteOwnerRow(row: OwnerBalanceRow) {
-    if (!window.confirm(`Delete franchise owner entry of ${row.amount.toLocaleString()}?`)) return;
+    if (!window.confirm(`Delete franchise owner entry for ${row.description || row.label || "this row"}?`)) return;
     setOwnerBalances((rows) => rows.filter((r) => r.id !== row.id));
   }
 
   function addCredit() {
     if (!creditDraft.partyId) return;
-    setCredits((rows) => [
-      ...rows,
-      {
-        id: `${dayNo}-credit-${crypto.randomUUID()}`,
-        ...creditDraft
+    const opening = currentCreditOpening(creditDraft.partyId, creditDraft.partyName, editingCreditId);
+    setCredits((rows) => {
+      const remainingRows = editingCreditId ? rows.filter((row) => row.id !== editingCreditId) : rows;
+      const duplicateRow = remainingRows.find(
+        (row) =>
+          row.partyId === creditDraft.partyId ||
+          normalizeKey(row.partyName) === normalizeKey(creditDraft.partyName)
+      );
+      if (duplicateRow) {
+        return remainingRows.map((row) =>
+          row.id === duplicateRow.id
+            ? {
+                ...row,
+                partyId: creditDraft.partyId,
+                partyName: creditDraft.partyName,
+                loan: (row.loan ?? row.today ?? 0) + (creditDraft.loan ?? 0),
+                today: (row.loan ?? row.today ?? 0) + (creditDraft.loan ?? 0),
+                receive: row.receive + creditDraft.receive
+              }
+            : row
+        );
       }
-    ]);
+      return [
+        ...remainingRows,
+        {
+          id: editingCreditId ?? `${dayNo}-credit-${crypto.randomUUID()}`,
+          partyId: creditDraft.partyId,
+          partyName: creditDraft.partyName,
+          opening,
+          loan: creditDraft.loan,
+          receive: creditDraft.receive
+        }
+      ];
+    });
     setCreditDraft({
       partyId: partyOptions[0]?.id ?? "",
       partyName: partyOptions[0]?.name ?? "",
-      opening: 0,
       loan: 0,
       receive: 0
     });
+    setEditingCreditId(null);
   }
 
   function editCredit(row: CreditRow) {
-    if (!window.confirm(`Edit credit entry for ${row.partyName}? It will move back to the entry controls.`)) return;
+    if (!window.confirm(`Edit credit entry for ${row.partyName}?`)) return;
     setCreditDraft({
       partyId: row.partyId ?? "",
       partyName: row.partyName ?? "",
-      opening: row.opening,
       loan: row.loan ?? row.today ?? 0,
       receive: row.receive
     });
-    setCredits((rows) => rows.filter((r) => r.id !== row.id));
+    setEditingCreditId(row.id);
   }
 
   function deleteCredit(row: CreditRow) {
@@ -420,9 +766,9 @@ export function DailyEntryForm({
     commissionOptions
   );
   function editCommission(item: CommissionItem) {
-    if (!window.confirm(`Edit ${item.category} commission entry? It will move back to the entry controls.`)) return;
+    if (!window.confirm(`Edit ${item.category} commission entry?`)) return;
     setCommissionDraft({ category: item.category, amount: item.amount });
-    setCommissions((rows) => rows.filter((row) => row.id !== item.id));
+    setEditingCommissionId(item.id);
   }
 
   function deleteCommission(item: CommissionItem) {
@@ -430,20 +776,59 @@ export function DailyEntryForm({
     setCommissions((rows) => rows.filter((row) => row.id !== item.id));
   }
 
+  function openReopenPicker() {
+    setReopenTimeDraft(formatTimeInputValue(reopenExpiresAt ?? Date.now() + 15 * 60 * 1000));
+    setReopenTimeError("");
+    setReopenPickerOpen(true);
+  }
+
+  async function confirmReopen() {
+    if (!onReopenDay) return;
+    if (!reopenRequiresTime) {
+      await onReopenDay();
+      return;
+    }
+    const reopenUntilAt = timeInputToTimestamp(reopenTimeDraft);
+    if (!reopenUntilAt) {
+      setReopenTimeError("Choose a valid time.");
+      return;
+    }
+    if (reopenUntilAt <= Date.now()) {
+      setReopenTimeError("Choose a future time.");
+      return;
+    }
+    setReopenPickerOpen(false);
+    await onReopenDay(reopenUntilAt);
+  }
+
   function addCommission() {
     if (commissionDraft.amount === 0) return;
-    setCommissions((rows) =>
-      sortCommissions([
-        ...rows,
+    const categoryId = commissionOptions.find((option) => option.name === commissionDraft.category)?.id;
+    setCommissions((rows) => {
+      const remainingRows = editingCommissionId ? rows.filter((row) => row.id !== editingCommissionId) : rows;
+      const duplicateRow = remainingRows.find((row) => row.category === commissionDraft.category || row.categoryId === categoryId);
+      if (duplicateRow) {
+        return sortCommissions(
+          remainingRows.map((row) =>
+            row.id === duplicateRow.id
+              ? { ...row, category: commissionDraft.category, categoryId, amount: row.amount + commissionDraft.amount }
+              : row
+          ),
+          commissionOptions
+        );
+      }
+      return sortCommissions([
+        ...remainingRows,
         {
-          id: `${dayNo}-commission-${crypto.randomUUID()}`,
-          categoryId: commissionOptions.find((option) => option.name === commissionDraft.category)?.id,
+          id: editingCommissionId ?? `${dayNo}-commission-${crypto.randomUUID()}`,
+          categoryId,
           category: commissionDraft.category,
           amount: commissionDraft.amount
         }
-      ], commissionOptions)
-    );
+      ], commissionOptions);
+    });
     setCommissionDraft((draft) => ({ ...draft, amount: 0 }));
+    setEditingCommissionId(null);
   }
 
   async function createCatalogItem() {
@@ -511,16 +896,106 @@ export function DailyEntryForm({
           </div>
         </div>
       )}
+      {reopenPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 text-slate-100 backdrop-blur-sm" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-black/40">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase text-emerald-300">Reopen Window</p>
+                <h3 className="mt-1 text-lg font-semibold">Select reopen time</h3>
+              </div>
+              <button className="btn-ghost !h-9 !w-9 !px-0" onClick={() => setReopenPickerOpen(false)} title="Close popup">
+                <X />
+              </button>
+            </div>
+            <label className="mt-4 block">
+              Reopen until
+              <input
+                type="time"
+                step={60}
+                value={reopenTimeDraft}
+                min={formatTimeInputValue(Date.now())}
+                onChange={(event) => {
+                  setReopenTimeDraft(event.target.value);
+                  setReopenTimeError("");
+                }}
+              />
+            </label>
+            <p className="mt-2 text-xs text-slate-400">Choose the time until this day stays open for corrections.</p>
+            {reopenTimeError && <p className="mt-2 text-sm text-rose-300">{reopenTimeError}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="btn-secondary" onClick={() => setReopenPickerOpen(false)}>Cancel</button>
+              <button className="btn-primary" disabled={saving || !onReopenDay} onClick={() => void confirmReopen()}>
+                Reopen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="space-y-5">
         <section className="panel">
           <div className="panel-title">
             <div>
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
             </div>
-            <button className="btn-primary" disabled={!canClose || saving} onClick={handleCloseDay}>
-              {saving && <LoadingIcon label="Closing day" />}
-              {saving ? "Closing..." : locked ? "Day Closed" : "Close Day"}
-            </button>
+            <div className="hidden items-center gap-3 md:flex">
+              <label className="flex flex-row items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={autoSaveEnabled}
+                  disabled={disabled}
+                  onChange={(event) => toggleAutoSave(event.target.checked)}
+                  className="h-4 w-4 accent-emerald-400 cursor-pointer rounded border-slate-700 bg-slate-950/70"
+                />
+                <span>Auto-Save</span>
+              </label>
+              {autoSaveEnabled ? (
+                <span className={`text-xs font-semibold uppercase ${
+                  autoSaveState === "error"
+                    ? "text-rose-300"
+                    : autoSaveState === "saving"
+                      ? "text-amber-300"
+                      : "text-emerald-300"
+                }`}>
+                  {autoSaveState === "error"
+                    ? "Save failed"
+                    : autoSaveState === "saving"
+                      ? "Saving..."
+                      : "Saved"}
+                </span>
+              ) : (
+                <span className="text-xs font-semibold uppercase text-slate-500">Auto-save off</span>
+              )}
+              <button className="btn-secondary" disabled={disabled || saving} onClick={() => void handleManualSave()}>
+                {saving && <LoadingIcon label="Saving day" />}
+                {saving ? "Saving..." : "Save Now"}
+              </button>
+              {onSendEmail && (
+                <button
+                  className="btn-secondary"
+                  disabled={!canSendEmail || saving || emailing || saveInFlight}
+                  title={!canSendEmail ? "Email sending is disabled until Firebase Functions deployment is available." : "Send email report"}
+                  onClick={() => void handleSendEmail()}
+                >
+                  {emailing && <LoadingIcon label="Sending email" />}
+                  {emailing ? "Sending..." : "Send Email"}
+                </button>
+              )}
+              {canReopen && (
+                <button className="btn-secondary" disabled={saving || !onReopenDay} onClick={() => void (reopenRequiresTime ? openReopenPicker() : onReopenDay?.())}>
+                  {reopenLabel}
+                </button>
+              )}
+              {!canReopen && reopenExpiresAt && reopenExpiresAt > Date.now() && (
+                <span className="text-xs font-semibold uppercase text-emerald-300">
+                  Open until {new Date(reopenExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+              <button className="btn-primary" disabled={!canClose || saving} onClick={handleCloseDay}>
+                {saving && <LoadingIcon label="Closing day" />}
+                {saving ? "Closing..." : locked ? "Day Closed" : "Close Day"}
+              </button>
+            </div>
           </div>
           <div className="grid two">
             <label>
@@ -533,6 +1008,53 @@ export function DailyEntryForm({
             </label>
           </div>
         </section>
+
+        <div className="mobile-entry-actions md:hidden">
+          <div className="flex flex-col gap-0.5">
+            <label className="flex flex-row items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={autoSaveEnabled}
+                disabled={disabled}
+                onChange={(event) => toggleAutoSave(event.target.checked)}
+                className="h-3.5 w-3.5 accent-emerald-400 cursor-pointer rounded border-slate-700 bg-slate-950/70"
+              />
+              <span>Auto-Save</span>
+            </label>
+            {autoSaveEnabled ? (
+              <p className={`text-[11px] font-semibold uppercase ${
+                autoSaveState === "error"
+                  ? "text-rose-300"
+                  : autoSaveState === "saving"
+                    ? "text-amber-300"
+                    : "text-emerald-300"
+              }`}>
+                {autoSaveState === "error" ? "Save failed" : autoSaveState === "saving" ? "Saving..." : "Saved"}
+              </p>
+            ) : (
+              <p className="text-[11px] font-semibold uppercase text-slate-500">Auto-save off</p>
+            )}
+            <p className="mt-0.5 text-xs text-slate-400">
+              {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
+            </p>
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button className="btn-secondary !h-10 !px-3" disabled={disabled || saving} onClick={() => void handleManualSave()}>
+              {saving && <LoadingIcon label="Saving day" />}
+              Save
+            </button>
+            {canReopen ? (
+              <button className="btn-secondary !h-10 !px-3" disabled={saving || !onReopenDay} onClick={() => void (reopenRequiresTime ? openReopenPicker() : onReopenDay?.())}>
+                Reopen
+              </button>
+            ) : (
+              <button className="btn-primary !h-10 !px-3" disabled={!canClose || saving} onClick={handleCloseDay}>
+                {saving && <LoadingIcon label="Closing day" />}
+                Close
+              </button>
+            )}
+          </div>
+        </div>
 
         <section className="panel">
           <div className="panel-title">
@@ -556,7 +1078,7 @@ export function DailyEntryForm({
             </label>
             <div className="flex items-end gap-2">
               <button className="btn-primary" disabled={disabled || commissionDraft.amount === 0} onClick={addCommission}>
-                Add Entry
+                {editingCommissionId ? "Update Entry" : "Add Entry"}
               </button>
               <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add commission category" onClick={() => setCatalogModal("commission")}>
                 <Plus />
@@ -574,7 +1096,33 @@ export function DailyEntryForm({
               </select>
             </label>
           </div> */}
-          <div className="table-wrap">
+          <div className="mobile-card-list md:hidden">
+            {visibleCommissions.map((item) => {
+              const order = commissionOptions.findIndex((category) => category.name === item.category || category.id === item.categoryId);
+              return (
+                <article className="mobile-list-card" key={item.id}>
+                  <div className="mobile-card-head">
+                    <div>
+                      <p className="mobile-label">Commission</p>
+                      <h3 className="mobile-card-title">{item.category}</h3>
+                    </div>
+                    <span className="mobile-pill mobile-pill-good">{item.amount.toLocaleString()}</span>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-400">Order {order >= 0 ? order + 1 : "-"}</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button className="btn-ghost" disabled={disabled} onClick={() => editCommission(item)}>
+                      <Pencil /> Edit
+                    </button>
+                    <button className="btn-ghost text-rose-200" disabled={disabled} onClick={() => deleteCommission(item)}>
+                      <Trash2 /> Delete
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+            {visibleCommissions.length === 0 && <p className="mobile-empty">No commission entries match this filter.</p>}
+          </div>
+          <div className="table-wrap hidden md:block">
             <table>
               <thead>
                 <tr>
@@ -684,7 +1232,30 @@ export function DailyEntryForm({
               </button>
             </div>
           </div>
-          <div className="table-wrap">
+          <div className="mobile-card-list md:hidden">
+            {expenses.map((item) => (
+              <article className="mobile-list-card" key={item.id}>
+                <div className="mobile-card-head">
+                  <div className="min-w-0">
+                    <p className="mobile-label">{item.category}</p>
+                    <h3 className="mobile-card-title">{item.name || "Expense"}</h3>
+                  </div>
+                  <span className="mobile-pill mobile-pill-good">{item.amount.toLocaleString()}</span>
+                </div>
+                {item.description && <p className="mt-2 text-sm text-slate-400">{item.description}</p>}
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button className="btn-ghost" disabled={disabled} onClick={() => editExpense(item)}>
+                    <Pencil /> Edit
+                  </button>
+                  <button className="btn-ghost text-rose-200" disabled={disabled} onClick={() => deleteExpense(item)}>
+                    <Trash2 /> Delete
+                  </button>
+                </div>
+              </article>
+            ))}
+            {expenses.length === 0 && <p className="mobile-empty">No expense entries.</p>}
+          </div>
+          <div className="table-wrap hidden md:block">
             <table>
               <thead>
                 <tr>
@@ -741,11 +1312,7 @@ export function DailyEntryForm({
               <p>Add owner balance entries, then review them in list</p>
             </div>
           </div>
-          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_2fr_1fr_auto]">
-            <label>
-              Opening
-              {inputText(ownerDraft.opening ?? 0, (opening) => setOwnerDraft((draft) => ({ ...draft, opening })), disabled)}
-            </label>
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_1fr_auto]">
             <label>
               Description
               <input
@@ -756,35 +1323,76 @@ export function DailyEntryForm({
               />
             </label>
             <label>
-              Amount
-              {inputText(ownerDraft.amount, (amount) => setOwnerDraft((draft) => ({ ...draft, amount })), disabled)}
+              Expense
+              {inputText(ownerDraft.expense ?? 0, (expense) => setOwnerDraft((draft) => ({ ...draft, expense })), disabled)}
+            </label>
+            <label>
+              Received
+              {inputText(ownerDraft.received ?? 0, (received) => setOwnerDraft((draft) => ({ ...draft, received })), disabled)}
+            </label>
+            <label>
+              Opening
+              <input value={ownerOpeningPreview.toLocaleString()} disabled readOnly />
+            </label>
+            <label>
+              Closing
+              <input value={ownerClosingPreview.toLocaleString()} disabled readOnly />
             </label>
             <button
               className="btn-primary self-end"
-              disabled={disabled || (ownerDraft.opening === 0 && !ownerDraft.description && ownerDraft.amount === 0)}
+              disabled={disabled || (!ownerDraft.description.trim() && (ownerDraft.expense ?? 0) === 0 && (ownerDraft.received ?? 0) === 0)}
               onClick={addOwnerRow}
             >
-              Add Entry
+              {editingOwnerId ? "Update Entry" : "Add Entry"}
             </button>
           </div>
-          <div className="table-wrap">
+          <div className="mobile-card-list md:hidden">
+            {derivedOwnerBalances.map((row) => (
+              <article className="mobile-list-card" key={row.id}>
+                <div className="mobile-card-head">
+                  <div className="min-w-0">
+                    <p className="mobile-label">Franchise Owner</p>
+                    <h3 className="mobile-card-title">{row.description ?? row.label ?? "Owner entry"}</h3>
+                  </div>
+                  <span className="mobile-pill">{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</span>
+                </div>
+                <dl className="mobile-kv-grid mt-3">
+                  <div><dt>Opening</dt><dd>{(row.opening ?? 0).toLocaleString()}</dd></div>
+                  <div><dt>Expense</dt><dd>{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</dd></div>
+                  <div><dt>Received</dt><dd>{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</dd></div>
+                </dl>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button className="btn-ghost" disabled={disabled} onClick={() => editOwnerRow(row)}>
+                    <Pencil /> Edit
+                  </button>
+                  <button className="btn-ghost text-rose-200" disabled={disabled} onClick={() => deleteOwnerRow(row)}>
+                    <Trash2 /> Delete
+                  </button>
+                </div>
+              </article>
+            ))}
+            {derivedOwnerBalances.length === 0 && <p className="mobile-empty">No owner entries.</p>}
+          </div>
+          <div className="table-wrap hidden md:block">
             <table>
               <thead>
                 <tr>
-                  <th>Opening</th>
                   <th>Description</th>
-                  <th>Amount</th>
+                  <th>Opening</th>
+                  <th>Expense</th>
+                  <th>Received</th>
                   <th>Balance</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {ownerBalances.map((row) => (
+                {derivedOwnerBalances.map((row) => (
                   <tr key={row.id}>
-                    <td>{(row.opening ?? 0).toLocaleString()}</td>
                     <td>{row.description ?? row.label ?? ""}</td>
-                    <td>{row.amount.toLocaleString()}</td>
-                    <td>{((row.opening ?? 0) + row.amount).toLocaleString()}</td>
+                    <td>{(row.opening ?? 0).toLocaleString()}</td>
+                    <td>{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</td>
+                    <td>{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</td>
+                    <td>{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</td>
                     <td>
                       <div className="inline-flex items-center gap-2">
                         <button
@@ -807,9 +1415,9 @@ export function DailyEntryForm({
                     </td>
                   </tr>
                 ))}
-                {ownerBalances.length === 0 && (
+                {derivedOwnerBalances.length === 0 && (
                   <tr>
-                    <td colSpan={5}>No owner entries.</td>
+                    <td colSpan={6}>No owner entries.</td>
                   </tr>
                 )}
               </tbody>
@@ -823,12 +1431,15 @@ export function DailyEntryForm({
               <h3>Credit Parties</h3>
               <p>Add party credit/debit entries, then review them in list</p>
             </div>
-            <div className="quick-actions">
-              <button className="btn-ghost" type="button" disabled={disabled || !previousDay} onClick={copyCreditsFromPrevious}>
-                Carry Previous
-              </button>
-            </div>
+            <button
+              className="btn-secondary"
+              disabled={disabled || !previousDayClosed || !previousDay}
+              onClick={verifyCreditOpeningsFromPreviousDay}
+            >
+              Verify Credit Openings
+            </button>
           </div>
+          {creditVerifyMessage && <p className="status">{creditVerifyMessage}</p>}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
             <label>
               Party
@@ -849,7 +1460,7 @@ export function DailyEntryForm({
             </label>
             <label>
               Opening
-              {inputText(creditDraft.opening, (opening) => setCreditDraft((draft) => ({ ...draft, opening })), disabled)}
+              <input value={creditOpeningPreview.toLocaleString()} disabled readOnly />
             </label>
             <label>
               Loan
@@ -865,14 +1476,44 @@ export function DailyEntryForm({
                 disabled={disabled || !creditDraft.partyId}
                 onClick={addCredit}
               >
-                Add Entry
+                {editingCreditId ? "Update Entry" : "Add Entry"}
               </button>
               <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add credit party" onClick={() => setCatalogModal("credit")}>
                 <Plus />
               </button>
             </div>
           </div>
-          <div className="table-wrap">
+          <div className="mobile-card-list md:hidden">
+            {derivedCredits.map((row) => {
+              const balance = row.balance ?? row.opening + (row.loan ?? row.today ?? 0) - row.receive;
+              return (
+                <article className="mobile-list-card" key={row.id}>
+                  <div className="mobile-card-head">
+                    <div className="min-w-0">
+                      <p className="mobile-label">Credit Party</p>
+                      <h3 className="mobile-card-title">{row.partyName}</h3>
+                    </div>
+                    <span className="mobile-pill">{balance.toLocaleString()}</span>
+                  </div>
+                  <dl className="mobile-kv-grid mt-3">
+                    <div><dt>Opening</dt><dd>{row.opening.toLocaleString()}</dd></div>
+                    <div><dt>Loan</dt><dd>{(row.loan ?? row.today ?? 0).toLocaleString()}</dd></div>
+                    <div><dt>Receive</dt><dd>{row.receive.toLocaleString()}</dd></div>
+                  </dl>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button className="btn-ghost" disabled={disabled} onClick={() => editCredit(row)}>
+                      <Pencil /> Edit
+                    </button>
+                    <button className="btn-ghost text-rose-200" disabled={disabled} onClick={() => deleteCredit(row)}>
+                      <Trash2 /> Delete
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+            {derivedCredits.length === 0 && <p className="mobile-empty">No credit entries.</p>}
+          </div>
+          <div className="table-wrap hidden md:block">
             <table>
               <thead>
                 <tr>
@@ -885,8 +1526,8 @@ export function DailyEntryForm({
                 </tr>
               </thead>
               <tbody>
-                {credits.map((row) => {
-                  const balance = row.opening + (row.loan ?? row.today ?? 0) - row.receive;
+                {derivedCredits.map((row) => {
+                  const balance = row.balance ?? row.opening + (row.loan ?? row.today ?? 0) - row.receive;
                   return (
                     <tr key={row.id}>
                       <td>{row.partyName}</td>
@@ -917,7 +1558,7 @@ export function DailyEntryForm({
                     </tr>
                   );
                 })}
-                {credits.length === 0 && (
+                {derivedCredits.length === 0 && (
                   <tr>
                     <td colSpan={6}>No credit entries.</td>
                   </tr>
@@ -928,7 +1569,7 @@ export function DailyEntryForm({
         </section>
       </div>
 
-      <aside className="space-y-3 xl:sticky xl:top-5 xl:self-start">
+      <aside className="hidden space-y-3 xl:sticky xl:top-5 xl:block xl:self-start">
         {[
           ["Opening Balance", preview.openingBalance],
           ["Commission", preview.commissionTotal],
@@ -936,7 +1577,7 @@ export function DailyEntryForm({
           ["Balance", preview.returnBalance],
           ["Credit", preview.creditTotals.balance]
         ].map(([label, value]) => (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/20" key={label}>
+          <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20" key={label}>
             <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
             <p className="mt-2 text-2xl font-semibold text-white">{Number(value).toLocaleString()}</p>
           </div>

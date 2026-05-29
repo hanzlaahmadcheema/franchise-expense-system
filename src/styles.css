@@ -22,15 +22,16 @@
 @layer base {
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
+    overflow-x: hidden;
   }
 
   input,
   select {
-    @apply min-w-0 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-60;
+    @apply w-full min-w-0 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   button {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-semibold leading-none transition disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-center text-sm font-semibold leading-tight transition disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   label {
@@ -38,7 +39,7 @@
   }
 
   table {
-    @apply w-full min-w-[760px] border-separate border-spacing-0 text-sm;
+    @apply w-full min-w-[680px] border-separate border-spacing-0 text-sm;
   }
 
   th {
@@ -52,7 +53,7 @@
 
 @layer components {
   .btn {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-semibold leading-none transition disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-center text-sm font-semibold leading-tight transition disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn svg,
@@ -62,19 +63,23 @@
   }
 
   .btn-primary {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-emerald-500 px-4 text-sm font-semibold leading-none text-slate-950 shadow-sm shadow-emerald-950/20 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-950 shadow-sm shadow-emerald-950/20 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-secondary {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-ghost {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-800 bg-slate-950/50 px-4 text-sm font-semibold leading-none text-slate-300 transition hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-300 transition hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-icon {
+    @apply inline-flex h-8 min-h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 p-0 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-tab {
-    @apply inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-100 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-tab-active {
@@ -132,6 +137,82 @@
     animation: loading-bar 1.15s ease-in-out infinite;
   }
 
+  .mobile-topbar {
+    @apply sticky top-0 z-30 flex min-w-0 items-center justify-between gap-3 border-b border-slate-800 bg-slate-950/95 px-3 py-3 text-slate-100 shadow-xl shadow-black/20 backdrop-blur;
+  }
+
+  .mobile-menu-panel {
+    @apply sticky top-[68px] z-20 mx-3 mt-3 rounded-xl border border-slate-800 bg-slate-900/95 p-4 text-slate-100 shadow-2xl shadow-black/30 backdrop-blur;
+  }
+
+  .mobile-bottom-nav {
+    @apply fixed inset-x-0 bottom-0 z-30 flex gap-1 border-t border-slate-800 bg-slate-950/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 text-slate-300 shadow-2xl shadow-black/40 backdrop-blur;
+  }
+
+  .mobile-bottom-item {
+    @apply flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1 text-[11px] font-semibold text-slate-400;
+  }
+
+  .mobile-bottom-item svg {
+    @apply h-5 w-5;
+  }
+
+  .mobile-bottom-item-active {
+    @apply bg-emerald-400/10 text-emerald-200 ring-1 ring-emerald-400/30;
+  }
+
+  .mobile-entry-actions {
+    @apply sticky bottom-20 z-20 mb-5 flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/95 p-3 shadow-2xl shadow-black/30 backdrop-blur;
+  }
+
+  .mobile-card-list {
+    @apply grid grid-cols-1 gap-3;
+  }
+
+  .mobile-list-card {
+    @apply min-w-0 rounded-xl border border-slate-800 bg-slate-950/55 p-4 shadow-lg shadow-black/10;
+  }
+
+  .mobile-card-head {
+    @apply flex min-w-0 items-start justify-between gap-3;
+  }
+
+  .mobile-card-title {
+    @apply min-w-0 text-base font-semibold leading-snug text-white;
+  }
+
+  .mobile-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500;
+  }
+
+  .mobile-pill {
+    @apply shrink-0 rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-semibold text-slate-200;
+  }
+
+  .mobile-pill-good {
+    @apply border-emerald-400/30 bg-emerald-400/10 text-emerald-200;
+  }
+
+  .mobile-kv-grid {
+    @apply grid grid-cols-2 gap-2 text-sm;
+  }
+
+  .mobile-kv-grid div {
+    @apply rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2;
+  }
+
+  .mobile-kv-grid dt {
+    @apply text-[11px] font-semibold uppercase tracking-wide text-slate-500;
+  }
+
+  .mobile-kv-grid dd {
+    @apply mt-1 break-words font-semibold text-slate-100;
+  }
+
+  .mobile-empty {
+    @apply rounded-xl border border-dashed border-slate-700 bg-slate-950/40 p-4 text-sm text-slate-400;
+  }
+
   .panel {
     @apply mb-5 rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20;
   }
@@ -161,7 +242,7 @@
   }
 
   .file-button {
-    @apply inline-flex h-10 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-4 text-sm font-semibold leading-none text-slate-100 transition hover:border-slate-500 hover:bg-slate-800;
+    @apply inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-100 transition hover:border-slate-500 hover:bg-slate-800;
   }
 
   .metric-row {
@@ -172,6 +253,43 @@
     @apply rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm font-semibold text-slate-200;
   }
 
+  .calendar-shell {
+    @apply w-full max-w-5xl rounded-2xl border border-slate-800 bg-[linear-gradient(180deg,rgba(15,23,42,0.96),rgba(2,6,23,0.92))] p-3 shadow-inner shadow-black/20 sm:p-4;
+  }
+
+  .calendar-weekdays {
+    @apply mb-3 grid grid-cols-7 gap-x-2 text-center text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500;
+  }
+
+  .calendar-grid {
+    @apply grid grid-cols-7 gap-1 sm:gap-x-2 sm:gap-y-3;
+    grid-auto-rows: minmax(2.25rem, 1fr);
+  }
+
+  .calendar-empty {
+    @apply aspect-square h-auto;
+  }
+
+  .calendar-day {
+    @apply aspect-square h-auto w-full max-w-11 justify-self-center rounded-xl border border-slate-800/80 bg-slate-900/80 p-0 text-sm font-semibold text-slate-200 shadow-sm transition hover:border-emerald-400/60 hover:bg-emerald-400/10 hover:text-emerald-100;
+  }
+
+  .calendar-day-active {
+    @apply border-emerald-400 bg-emerald-400/15 text-emerald-100 shadow-lg shadow-emerald-950/20;
+  }
+
+  .calendar-day-disabled {
+    @apply border-slate-900/80 bg-slate-950/70 text-slate-700 hover:border-slate-900/80 hover:bg-slate-950/70 hover:text-slate-700;
+  }
+
+  .toggle-row {
+    @apply flex-row items-center justify-between rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm normal-case tracking-normal text-slate-200;
+  }
+
+  .toggle-row input {
+    @apply h-5 w-5 accent-emerald-400;
+  }
+
   .file-button input {
     @apply hidden;
   }
@@ -179,6 +297,11 @@
   .theme-light .panel,
   .theme-light .card,
   .theme-light .table-wrap,
+  .theme-light .mobile-topbar,
+  .theme-light .mobile-menu-panel,
+  .theme-light .mobile-bottom-nav,
+  .theme-light .mobile-entry-actions,
+  .theme-light .mobile-list-card,
   .theme-light header,
   .theme-light aside {
     @apply border-slate-200 bg-white text-slate-950 shadow-slate-200/70;
@@ -251,13 +374,21 @@
   .theme-light .btn-secondary,
   .theme-light .btn-tab,
   .theme-light .btn-ghost,
+  .theme-light .btn-icon,
   .theme-light .file-button,
-  .theme-light .btn-chip {
+  .theme-light .btn-chip,
+  .theme-light .calendar-shell {
     @apply border-slate-300 bg-white text-slate-800 hover:border-slate-400 hover:bg-slate-100;
   }
 
+  .theme-light .mobile-bottom-item-active,
+  .theme-light .mobile-pill-good {
+    @apply border-emerald-500 bg-emerald-50 text-emerald-800;
+  }
+
   .theme-light .btn-tab-active,
-  .theme-light .btn-chip-active {
+  .theme-light .btn-chip-active,
+  .theme-light .calendar-day-active {
     @apply border-emerald-500 bg-emerald-50 text-emerald-800;
   }
 
@@ -290,9 +421,16 @@
 }
 
 .theme-light header,
+.theme-light .mobile-topbar,
+.theme-light .mobile-menu-panel,
+.theme-light .mobile-bottom-nav,
+.theme-light .mobile-entry-actions,
+.theme-light .mobile-list-card,
+.theme-light .mobile-kv-grid div,
 .theme-light .panel,
 .theme-light .card,
 .theme-light .table-wrap,
+.theme-light .rounded-xl.border.bg-slate-900\/90,
 .theme-light .rounded-xl.border.bg-slate-900\/80,
 .theme-light .rounded-xl.border.bg-slate-950\/70,
 .theme-light .rounded-xl.border.bg-slate-950\/60,
@@ -304,6 +442,23 @@
   box-shadow: 0 16px 36px rgb(15 23 42 / 0.08) !important;
 }
 
+.theme-light .mobile-bottom-item {
+  color: #64748b !important;
+}
+
+.theme-light .mobile-bottom-item-active,
+.theme-light .mobile-pill-good {
+  background-color: #dcfce7 !important;
+  border-color: #10b981 !important;
+  color: #065f46 !important;
+}
+
+.theme-light .mobile-pill {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #334155 !important;
+}
+
 .theme-light .bg-slate-950,
 .theme-light .bg-slate-950\/95,
 .theme-light .bg-slate-950\/70,
@@ -311,6 +466,7 @@
 .theme-light .bg-slate-950\/50,
 .theme-light .bg-slate-950\/40,
 .theme-light .bg-slate-900,
+.theme-light .bg-slate-900\/90,
 .theme-light .bg-slate-900\/80,
 .theme-light .bg-slate-900\/50 {
   background-color: #ffffff !important;
@@ -376,8 +532,10 @@
 .theme-light .btn-secondary,
 .theme-light .btn-tab,
 .theme-light .btn-ghost,
+.theme-light .btn-icon,
 .theme-light .file-button,
-.theme-light .btn-chip {
+.theme-light .btn-chip,
+.theme-light .calendar-shell {
   background-color: #ffffff !important;
   border-color: #cbd5e1 !important;
   color: #0f172a !important;
@@ -386,8 +544,10 @@
 .theme-light .btn-secondary:hover,
 .theme-light .btn-tab:hover,
 .theme-light .btn-ghost:hover,
+.theme-light .btn-icon:hover,
 .theme-light .file-button:hover,
-.theme-light .btn-chip:hover {
+.theme-light .btn-chip:hover,
+.theme-light .calendar-day:hover {
   background-color: #f8fafc !important;
   border-color: #94a3b8 !important;
 }
@@ -399,10 +559,27 @@
 }
 
 .theme-light .btn-tab-active,
-.theme-light .btn-chip-active {
+.theme-light .btn-chip-active,
+.theme-light .calendar-day-active {
   background-color: #dcfce7 !important;
   border-color: #10b981 !important;
   color: #065f46 !important;
+}
+
+.theme-light .calendar-weekdays {
+  color: #94a3b8 !important;
+}
+
+.theme-light .calendar-day {
+  background-color: #ffffff !important;
+  border-color: #dbe3ee !important;
+  color: #0f172a !important;
+}
+
+.theme-light .calendar-day-disabled {
+  background-color: #f8fafc !important;
+  border-color: #e7edf5 !important;
+  color: #cbd5e1 !important;
 }
 
 .theme-light .status {

@@ -13,17 +13,23 @@ import {
   FileSpreadsheet,
   History,
   LayoutDashboard,
+  PackageOpen,
+  ScrollText,
   LoaderCircle,
+  Menu,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  Bell,
   Shield,
   Sun,
   Tags,
   Upload,
-  Users
+  Users,
+  X
 } from "lucide-react";
+import { AuditLogsView } from "./components/AuditLogsView";
 import { DailyEntryForm } from "./components/DailyEntryForm";
 import { HomeDashboard } from "./components/HomeDashboard";
 import type {
@@ -32,47 +38,78 @@ import type {
   DailyLedgerInput,
   MonthComputed,
   MonthRecord,
+  NotificationSettings,
   UserProfile,
   UserRole,
   WorkbookImportPreview
 } from "./types/ledger";
+import type { JazzLoadMonth } from "./modules/jazzLoad/types/jazzLoad.types";
 import { computeMonth } from "./lib/formulaEngine";
 import {
+  exportDailyPdf,
+  exportDailyXlsx,
   exportBackupPackage,
-  exportMonthToExcel,
-  printMonthReport,
+  exportMonthlyPdf,
+  exportMonthlyXlsx,
   readBackupPackage
 } from "./lib/exporters";
 import { parseWorkbookFile } from "./lib/workbookImport";
 import { auth, isFirebaseConfigured } from "./lib/firebase";
+import { applyPwaUpdate } from "./pwa";
+import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
+import { JazzLoadModule } from "./modules/jazzLoad/components/JazzLoadModule";
+import { StockLedgerModule } from "./modules/stock/components/StockLedgerModule";
+import { listJazzLoadBackup, restoreJazzLoadBackup, roleCanJazzLoad, setJazzLoadMonthStatus, subscribeJazzLoadMonths } from "./modules/jazzLoad/services/jazzLoadFirestore";
 import {
   commitWorkbookImport,
+  addRoleChangeAudit,
+  closeMonthDaysExceptToday,
+  defaultOwnerOpeningBalance,
+  deleteAuthorizedEmail,
+  deleteCatalogItem,
+  deleteUserProfile,
   emailKey,
   ensureDefaultCatalogs,
   fetchMonthDays,
   getUserRole,
-  lockDayAndRecalculate,
-  listCatalogItems,
-  listAuthorizedEmails,
   listMonths,
-  listUsers,
+  reopenMonthDaysFor15Minutes,
+  reopenPreviousDayFor15Minutes,
+  recalculateMonth,
   resolveOpeningBalance,
+  resolveOwnerOpeningBalance,
   roleCan,
-  saveDayAndRecalculate,
+  queueClosePreviousDayReopenWindow,
+  queueDayAndSummaryWrite,
+  reopenCurrentDayUntilClose,
+  saveNotificationSettings,
+  sendManualActivityEmail,
   saveMonthRecord,
+  setAuditActorRole,
   setMonthStatus,
+  writeExpenseBackupRestoreAudit,
+  subscribeAuthorizedEmails,
+  subscribeCatalogItems,
+  subscribeMonthDays,
+  subscribeMonthRecord,
+  subscribeMonths,
+  subscribeNotificationSettings,
+  subscribeUsers,
   upsertAuthorizedEmail,
   updateUserProfile,
   upsertCatalogItem
 } from "./lib/firestoreService";
 
-type View = "dashboard" | "records" | "expense" | "users" | "import" | "backup";
+type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
 type ExpenseSection = "daily-entry" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
 
 type BackupPackage = {
   exportedAt: number;
   months: Array<MonthRecord & { days: DailyLedgerInput[] }>;
+  jazzLoad?: Awaited<ReturnType<typeof listJazzLoadBackup>>;
 };
+
+const LOGIN_DISABLED = true;
 
 function emptyDay(dayNo: number): DailyLedgerInput {
   return {
@@ -89,12 +126,22 @@ type SaveDayOptions = {
   silent?: boolean;
 };
 
-function createMonth(id: string, openingBalance: number): MonthRecord {
+type LoadMonthOptions = {
+  skipPendingCheck?: boolean;
+};
+
+type PwaNotice = "offline-ready" | "update-available" | null;
+
+const CONNECTED_STATUS = "Connected to Firestore";
+const FIRESTORE_ERROR_STATUS = "Firestore permission/error";
+
+function createMonth(id: string, openingBalance: number, ownerOpeningBalance: number): MonthRecord {
   const timestamp = Date.now();
   return {
     id,
     label: id,
     openingBalance,
+    ownerOpeningBalance,
     status: "open",
     createdAt: timestamp,
     updatedAt: timestamp
@@ -114,6 +161,22 @@ function currentDateState(date = new Date()) {
     monthId: `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`,
     dayNo: date.getDate()
   };
+}
+
+function isLiveDay(monthId: string, dayNo: number, now: Date) {
+  if (dayNo === 32) return false;
+  const liveDate = currentDateState(now);
+  return monthId === liveDate.monthId && dayNo === liveDate.dayNo;
+}
+
+function isReopenActive(day: DailyLedgerInput | undefined, now: Date) {
+  return Boolean(day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime());
+}
+
+function isDayClosedForCarry(monthId: string, day: DailyLedgerInput | undefined, now: Date) {
+  if (!day) return false;
+  if (isLiveDay(monthId, day.dayNo, now)) return Boolean(day.lockedAt);
+  return !isReopenActive(day, now);
 }
 
 function LoadingIcon({ label = "Loading" }: { label?: string }) {
@@ -168,6 +231,150 @@ function dateLabelFor(monthId: string, dayNo: number) {
   }).format(date);
 }
 
+function dayWithMonthDate(monthId: string, dayNo: number, day?: DailyLedgerInput): DailyLedgerInput {
+  const parts = dateParts(monthId, dayNo);
+  return {
+    ...emptyDay(dayNo),
+    ...day,
+    dayNo,
+    label: day?.label ?? (dayNo === 32 ? "FINAL" : `Day ${dayNo}`),
+    date: day?.date ?? dateLabelFor(monthId, dayNo),
+    entryYear: day?.entryYear ?? parts.entryYear,
+    entryMonth: day?.entryMonth ?? parts.entryMonth,
+    entryDay: day?.entryDay ?? parts.entryDay
+  };
+}
+
+function daysInMonth(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!year || !month) return 31;
+  return new Date(year, month, 0).getDate();
+}
+
+function compareMonthIds(left: string, right: string) {
+  return left.localeCompare(right);
+}
+
+function replaceDay(days: DailyLedgerInput[], day: DailyLedgerInput) {
+  const withoutDay = days.filter((entry) => entry.dayNo !== day.dayNo);
+  return [...withoutDay, day].sort((a, b) => a.dayNo - b.dayNo);
+}
+
+function availableDayNumbers(monthId: string, now: Date) {
+  const liveDate = currentDateState(now);
+  if (compareMonthIds(monthId, liveDate.monthId) > 0) return [];
+  const maxDay = monthId === liveDate.monthId ? liveDate.dayNo : daysInMonth(monthId);
+  return Array.from({ length: maxDay }, (_, index) => index + 1);
+}
+
+function canUseFinalPeriod(monthId: string, now: Date) {
+  return compareMonthIds(monthId, currentDateState(now).monthId) < 0;
+}
+
+function clampSelectedDay(dayNo: number, monthId: string, now: Date) {
+  const availableDays = availableDayNumbers(monthId, now);
+  if (dayNo === 32) return canUseFinalPeriod(monthId, now) ? 32 : (availableDays.at(-1) ?? 1);
+  if (availableDays.length === 0) return 1;
+  if (availableDays.includes(dayNo)) return dayNo;
+  return Math.min(dayNo, availableDays.at(-1) ?? 1);
+}
+
+function calendarCells(monthId: string) {
+  const totalDays = daysInMonth(monthId);
+  const [yearText, monthText] = monthId.split("-");
+  const firstDate = new Date(Number(yearText), Number(monthText) - 1, 1);
+  const leadingEmpty = firstDate.getDay();
+  const cells: Array<{ dayNo: number | null }> = Array.from({ length: leadingEmpty }, () => ({ dayNo: null }));
+  for (let day = 1; day <= totalDays; day += 1) {
+    cells.push({ dayNo: day });
+  }
+  while (cells.length % 7 !== 0) cells.push({ dayNo: null });
+  return cells;
+}
+
+function DayCalendar({
+  monthId,
+  selectedDay,
+  days,
+  onSelect,
+  disabled,
+  now,
+  showFinal = false
+}: {
+  monthId: string;
+  selectedDay: number;
+  days?: DailyLedgerInput[];
+  onSelect: (dayNo: number) => void;
+  disabled?: boolean;
+  now: Date;
+  showFinal?: boolean;
+}) {
+  const availableDays = new Set(availableDayNumbers(monthId, now));
+  const canSelectFinal = showFinal && canUseFinalPeriod(monthId, now);
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  return (
+    <div className={`mb-4 rounded-xl border border-slate-800 bg-slate-950/40 p-3 ${disabled ? "opacity-60" : ""}`}>
+      <div className="mb-2 grid grid-cols-7 gap-2 text-center text-[11px] font-semibold uppercase text-slate-500">
+        {weekdays.map((day) => (
+          <span key={day}>{day}</span>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 gap-2">
+        {calendarCells(monthId).map((cell, index) => {
+          if (cell.dayNo == null) return <span key={`empty-${index}`} className="min-h-16" aria-hidden="true" />;
+          const isAvailable = availableDays.has(cell.dayNo);
+          const isSelected = selectedDay === cell.dayNo;
+          const day = days?.find((entry) => entry.dayNo === cell.dayNo);
+          const isLive = isLiveDay(monthId, cell.dayNo, now);
+          const reopened = isAvailable && isReopenActive(day, now);
+          const isOpen = isAvailable && (isLive ? !day?.lockedAt : reopened);
+          const stateLabel = !isAvailable ? "Future" : reopened ? "Re-open" : isOpen ? "Open" : "Closed";
+          const stateClass = !isAvailable
+            ? "bg-slate-800 text-slate-500"
+            : reopened
+              ? "bg-blue-400/15 text-blue-200"
+              : isOpen
+              ? "bg-emerald-400/15 text-emerald-200"
+              : "bg-rose-400/15 text-rose-200";
+          return (
+            <button
+              key={cell.dayNo}
+              type="button"
+              className={[
+                "min-h-16 flex-col rounded-lg border px-2 py-2 text-xs",
+                isSelected ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : "border-slate-800 bg-slate-900/70 text-slate-200",
+                !isAvailable ? "opacity-40" : ""
+              ].join(" ")}
+              disabled={disabled || !isAvailable}
+              onClick={() => onSelect(cell.dayNo!)}
+              title={`${dateLabelFor(monthId, cell.dayNo)} - ${stateLabel}`}
+            >
+              <span className="text-sm font-semibold">{cell.dayNo}</span>
+              <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}>{stateLabel}</span>
+              {isSelected && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
+            </button>
+          );
+        })}
+      </div>
+      {showFinal && (
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            className={selectedDay === 32 ? "btn-chip btn-chip-active" : "btn-chip"}
+            disabled={disabled || !canSelectFinal}
+            onClick={() => onSelect(32)}
+          >
+            FINAL
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function liveClockText(now: Date) {
   return new Intl.DateTimeFormat("en", {
     weekday: "long",
@@ -201,16 +408,227 @@ function userSimpleId(user: { uid: string } | null) {
   return String(total % 10000).padStart(4, "0");
 }
 
+function CatalogItemEditor({
+  item,
+  canEdit,
+  onSave,
+  onDelete
+}: {
+  item: CatalogItem;
+  canEdit: boolean;
+  onSave: (item: CatalogItem) => Promise<void>;
+  onDelete: (itemId: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState({
+    name: item.name,
+    active: item.active,
+    sortOrder: item.sortOrder
+  });
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const lastSavedRef = useRef(JSON.stringify({ name: item.name, active: item.active, sortOrder: item.sortOrder }));
+
+  useEffect(() => {
+    const nextDraft = { name: item.name, active: item.active, sortOrder: item.sortOrder };
+    setDraft(nextDraft);
+    lastSavedRef.current = JSON.stringify(nextDraft);
+    setSaveState("saved");
+  }, [item.active, item.id, item.name, item.sortOrder]);
+
+  useEffect(() => {
+    if (!canEdit) return;
+    const cleanName = draft.name.trim();
+    const nextItem = {
+      ...item,
+      name: cleanName || item.name,
+      active: draft.active,
+      sortOrder: Number.isFinite(draft.sortOrder) ? draft.sortOrder : item.sortOrder
+    };
+    const signature = JSON.stringify({
+      name: nextItem.name,
+      active: nextItem.active,
+      sortOrder: nextItem.sortOrder
+    });
+    if (!cleanName || signature === lastSavedRef.current) return;
+    setSaveState("saving");
+    const timer = window.setTimeout(() => {
+      void onSave(nextItem)
+        .then(() => {
+          lastSavedRef.current = signature;
+          setSaveState("saved");
+        })
+        .catch(() => setSaveState("error"));
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [canEdit, draft.active, draft.name, draft.sortOrder, item, onSave]);
+
+  return (
+    <tr>
+      <td>{item.id}</td>
+      <td>
+        <input
+          value={draft.name}
+          disabled={!canEdit}
+          onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+        />
+      </td>
+      <td>
+        <input
+          type="number"
+          value={draft.sortOrder}
+          disabled={!canEdit}
+          onChange={(event) => setDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))}
+        />
+      </td>
+      <td>
+        <button
+          className="btn-secondary"
+          disabled={!canEdit}
+          onClick={() => setDraft((current) => ({ ...current, active: !current.active }))}
+        >
+          {draft.active ? "Active" : "Inactive"}
+        </button>
+      </td>
+      {canEdit && (
+        <td className="flex flex-wrap items-center gap-2">
+          <span className={`text-xs ${saveState === "error" ? "text-red-300" : "text-slate-400"}`}>
+            {saveState === "saving" ? "Saving..." : saveState === "error" ? "Save failed" : "Saved"}
+          </span>
+          <button
+            className="btn-secondary"
+            onClick={async () => {
+              if (!window.confirm(`Delete ${item.name}?`)) return;
+              await onDelete(item.id);
+            }}
+          >
+            Delete
+          </button>
+        </td>
+      )}
+    </tr>
+  );
+}
+
+function CatalogItemCard({
+  item,
+  canEdit,
+  onSave,
+  onDelete
+}: {
+  item: CatalogItem;
+  canEdit: boolean;
+  onSave: (item: CatalogItem) => Promise<void>;
+  onDelete: (itemId: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState({
+    name: item.name,
+    active: item.active,
+    sortOrder: item.sortOrder
+  });
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const lastSavedRef = useRef(JSON.stringify({ name: item.name, active: item.active, sortOrder: item.sortOrder }));
+
+  useEffect(() => {
+    const nextDraft = { name: item.name, active: item.active, sortOrder: item.sortOrder };
+    setDraft(nextDraft);
+    lastSavedRef.current = JSON.stringify(nextDraft);
+    setSaveState("saved");
+  }, [item.active, item.id, item.name, item.sortOrder]);
+
+  useEffect(() => {
+    if (!canEdit) return;
+    const cleanName = draft.name.trim();
+    const nextItem = {
+      ...item,
+      name: cleanName || item.name,
+      active: draft.active,
+      sortOrder: Number.isFinite(draft.sortOrder) ? draft.sortOrder : item.sortOrder
+    };
+    const signature = JSON.stringify({
+      name: nextItem.name,
+      active: nextItem.active,
+      sortOrder: nextItem.sortOrder
+    });
+    if (!cleanName || signature === lastSavedRef.current) return;
+    setSaveState("saving");
+    const timer = window.setTimeout(() => {
+      void onSave(nextItem)
+        .then(() => {
+          lastSavedRef.current = signature;
+          setSaveState("saved");
+        })
+        .catch(() => setSaveState("error"));
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [canEdit, draft.active, draft.name, draft.sortOrder, item, onSave]);
+
+  return (
+    <article className="mobile-list-card">
+      <div className="mobile-card-head">
+        <div>
+          <p className="mobile-label">ID</p>
+          <h3 className="mobile-card-title">{item.id}</h3>
+        </div>
+        <span className={draft.active ? "mobile-pill mobile-pill-good" : "mobile-pill"}>{draft.active ? "Active" : "Inactive"}</span>
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-3">
+        <label>
+          Name
+          <input
+            value={draft.name}
+            disabled={!canEdit}
+            onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+          />
+        </label>
+        <label>
+          Order
+          <input
+            type="number"
+            value={draft.sortOrder}
+            disabled={!canEdit}
+            onChange={(event) => setDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))}
+          />
+        </label>
+      </div>
+      {canEdit && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            className="btn-secondary flex-1"
+            onClick={() => setDraft((current) => ({ ...current, active: !current.active }))}
+          >
+            {draft.active ? "Mark Inactive" : "Mark Active"}
+          </button>
+          <button
+            className="btn-ghost flex-1 text-rose-200"
+            onClick={async () => {
+              if (!window.confirm(`Delete ${item.name}?`)) return;
+              await onDelete(item.id);
+            }}
+          >
+            Delete
+          </button>
+          <span className={`w-full text-xs ${saveState === "error" ? "text-red-300" : "text-slate-400"}`}>
+            {saveState === "saving" ? "Saving..." : saveState === "error" ? "Save failed" : "Saved"}
+          </span>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function CatalogManager({
   title,
   items,
   canEdit,
-  onSave
+  lockedMessage,
+  onSave,
+  onDelete
 }: {
   title: string;
   items: CatalogItem[];
   canEdit: boolean;
+  lockedMessage?: string;
   onSave: (item: CatalogItem) => Promise<void>;
+  onDelete: (itemId: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   return (
@@ -221,6 +639,7 @@ function CatalogManager({
           <p>Create IDs once, then use dropdowns during daily entry.</p>
         </div>
       </div>
+      {!canEdit && lockedMessage && <p className="warning">{lockedMessage}</p>}
       {canEdit && (
         <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
           <label>
@@ -240,33 +659,51 @@ function CatalogManager({
           </button>
         </div>
       )}
-      <div className="table-wrap">
+      <div className="mobile-card-list md:hidden">
+        {canEdit ? (
+          <>
+            {items.map((item) => (
+              <CatalogItemCard
+                key={item.id}
+                item={item}
+                canEdit={canEdit}
+                onSave={onSave}
+                onDelete={onDelete}
+              />
+            ))}
+            {items.length === 0 && <p className="mobile-empty">No catalog items yet.</p>}
+          </>
+        ) : (
+          <p className="mobile-empty">{lockedMessage ?? "Only owner can manage this section."}</p>
+        )}
+      </div>
+      <div className="table-wrap hidden md:block">
         <table>
           <thead>
             <tr>
               <th>ID</th>
               <th>Name</th>
-              <th>Status</th>
               <th>Order</th>
+              <th>Status</th>
               {canEdit && <th>Action</th>}
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => (
-              <tr key={item.id}>
-                <td>{item.id}</td>
-                <td>{item.name}</td>
-                <td>{item.active ? "Active" : "Inactive"}</td>
-                <td>{item.sortOrder}</td>
-                {canEdit && (
-                  <td>
-                    <button className="btn-secondary" onClick={() => onSave({ ...item, active: !item.active })}>
-                      {item.active ? "Disable" : "Enable"}
-                    </button>
-                  </td>
-                )}
+            {canEdit ? (
+              items.map((item) => (
+                <CatalogItemEditor
+                  key={item.id}
+                  item={item}
+                  canEdit={canEdit}
+                  onSave={onSave}
+                  onDelete={onDelete}
+                />
+              ))
+            ) : (
+              <tr>
+                <td colSpan={lockedMessage ? 5 : 4}>{lockedMessage ?? "Only owner can manage this section."}</td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
       </div>
@@ -277,21 +714,79 @@ function CatalogManager({
 function UserManager({
   users,
   authorizedEmails,
+  notificationSettings,
   currentUid,
+  currentEmail,
   canEdit,
   onUpdate,
-  onAuthorizeEmail
+  onDeleteUser,
+  onAuthorizeEmail,
+  onDeleteAuthorizedEmail,
+  onSaveNotifications
 }: {
   users: UserProfile[];
   authorizedEmails: AuthorizedEmail[];
+  notificationSettings: NotificationSettings | null;
   currentUid?: string;
+  currentEmail?: string | null;
   canEdit: boolean;
   onUpdate: (uid: string, updates: Pick<UserProfile, "role" | "active">) => Promise<void>;
+  onDeleteUser: (profile: UserProfile) => Promise<void>;
   onAuthorizeEmail: (email: string, role: UserRole, active?: boolean) => Promise<void>;
+  onDeleteAuthorizedEmail: (entry: AuthorizedEmail) => Promise<void>;
+  onSaveNotifications: (settings: NotificationSettings) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
+  const ownerRecipients = authorizedEmails.filter((entry) => entry.active && entry.role === "owner");
+  const currentEmailKey = currentEmail ? emailKey(currentEmail) : "";
+  const toggleRows: Array<[keyof NotificationSettings, string]> = [
+    ["enabled", "Enable email notifications"],
+    ["sendOnDayClose", "Day close"],
+    ["sendOnMonthClose", "Month close"],
+    ["sendOnImport", "Workbook import"],
+    ["sendOnRecalculate", "Manual recalculation"],
+    ["sendOnRoleChange", "Role or email authorization changes"]
+  ];
   return (
     <section className="space-y-5">
+      <section className="panel">
+        <div className="panel-title">
+          <div>
+            <h2>Owner Email Notifications</h2>
+            <p>Emails are sent to active authorized owners only.</p>
+          </div>
+          <Bell />
+        </div>
+        <div className="mb-5 rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+          <p className="text-xs font-semibold uppercase text-slate-500">Current Recipients</p>
+          <p className="mt-2 text-sm text-slate-300">
+            {ownerRecipients.length > 0 ? ownerRecipients.map((entry) => entry.email).join(", ") : "No active owner emails configured."}
+          </p>
+        </div>
+        {notificationSettings ? (
+          <div className="grid gap-3 md:grid-cols-2">
+            {toggleRows.map(([key, label]) => (
+              <label className="toggle-row" key={String(key)}>
+                <span>{label}</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(notificationSettings[key])}
+                  disabled={!canEdit}
+                  onChange={(event) =>
+                    onSaveNotifications({
+                      ...notificationSettings,
+                      [key]: event.target.checked
+                    })
+                  }
+                />
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-400">Loading notification settings...</p>
+        )}
+      </section>
+
       <section className="panel">
         <div className="panel-title">
           <div>
@@ -326,40 +821,110 @@ function UserManager({
             </div>
           </div>
         )}
-        <div className="table-wrap">
+        <div className="mobile-card-list md:hidden">
+          {authorizedEmails.map((entry) => {
+            const isCurrentEmail = entry.id === currentEmailKey;
+            const isLastActiveOwner = entry.active && entry.role === "owner" && ownerRecipients.length <= 1;
+            return (
+              <article className="mobile-list-card" key={entry.id}>
+                <div className="mobile-card-head">
+                  <div className="min-w-0">
+                    <p className="mobile-label">Email</p>
+                    <h3 className="mobile-card-title break-words">{entry.email}{isCurrentEmail ? " (you)" : ""}</h3>
+                  </div>
+                  <span className={entry.active ? "mobile-pill mobile-pill-good" : "mobile-pill"}>{entry.active ? "Active" : "Inactive"}</span>
+                </div>
+                <label className="mt-3">
+                  Role
+                  <select
+                    value={entry.role}
+                    disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                    onChange={(event) => onAuthorizeEmail(entry.email, event.target.value as UserRole, entry.active)}
+                  >
+                    <option value="owner">Owner</option>
+                    <option value="admin">Admin</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+                </label>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    className="btn-secondary"
+                    disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                    onClick={() => onAuthorizeEmail(entry.email, entry.role, !entry.active)}
+                  >
+                    {entry.active ? "Deactivate" : "Activate"}
+                  </button>
+                  <button
+                    className="btn-ghost text-rose-200"
+                    disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                    onClick={async () => {
+                      if (!window.confirm(`Delete authorized email ${entry.email}? This account will not be able to sign in again.`)) return;
+                      await onDeleteAuthorizedEmail(entry);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          {authorizedEmails.length === 0 && <p className="mobile-empty">No authorized emails yet.</p>}
+        </div>
+        <div className="table-wrap hidden md:block">
           <table>
             <thead>
               <tr>
                 <th>Email</th>
                 <th>Role</th>
                 <th>Active</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {authorizedEmails.map((entry) => (
-                <tr key={entry.id}>
-                  <td>{entry.email}</td>
-                  <td>
-                    <select
-                      value={entry.role}
-                      disabled={!canEdit}
-                      onChange={(event) => onAuthorizeEmail(entry.email, event.target.value as UserRole, entry.active)}
-                    >
-                      <option value="owner">Owner</option>
-                      <option value="admin">Admin</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                  </td>
-                  <td>
-                    <button className="btn-secondary" disabled={!canEdit} onClick={() => onAuthorizeEmail(entry.email, entry.role, !entry.active)}>
-                      {entry.active ? "Active" : "Inactive"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {authorizedEmails.map((entry) => {
+                const isCurrentEmail = entry.id === currentEmailKey;
+                const isLastActiveOwner = entry.active && entry.role === "owner" && ownerRecipients.length <= 1;
+                return (
+                  <tr key={entry.id}>
+                    <td>{entry.email}{isCurrentEmail ? " (you)" : ""}</td>
+                    <td>
+                      <select
+                        value={entry.role}
+                        disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                        onChange={(event) => onAuthorizeEmail(entry.email, event.target.value as UserRole, entry.active)}
+                      >
+                        <option value="owner">Owner</option>
+                        <option value="admin">Admin</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                    </td>
+                    <td>
+                      <button
+                        className="btn-secondary"
+                        disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                        onClick={() => onAuthorizeEmail(entry.email, entry.role, !entry.active)}
+                      >
+                        {entry.active ? "Active" : "Inactive"}
+                      </button>
+                    </td>
+                    <td>
+                      <button
+                        className="btn-secondary"
+                        disabled={!canEdit || isCurrentEmail || isLastActiveOwner}
+                        onClick={async () => {
+                          if (!window.confirm(`Delete authorized email ${entry.email}? This account will not be able to sign in again.`)) return;
+                          await onDeleteAuthorizedEmail(entry);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
               {authorizedEmails.length === 0 && (
                 <tr>
-                  <td colSpan={3}>No authorized emails yet.</td>
+                  <td colSpan={4}>No authorized emails yet.</td>
                 </tr>
               )}
             </tbody>
@@ -374,7 +939,56 @@ function UserManager({
             <p>Users appear here after signing in with Google.</p>
           </div>
         </div>
-        <div className="table-wrap">
+        <div className="mobile-card-list md:hidden">
+          {users.map((profile) => {
+            const isCurrentUser = profile.uid === currentUid;
+            return (
+              <article className="mobile-list-card" key={profile.uid}>
+                <div className="mobile-card-head">
+                  <div className="min-w-0">
+                    <p className="mobile-label">User</p>
+                    <h3 className="mobile-card-title">{userDisplayName(profile)} · ID {userSimpleId(profile)}{isCurrentUser ? " (you)" : ""}</h3>
+                    <p className="mt-1 break-words text-sm text-slate-400">{profile.email || "No email"}</p>
+                  </div>
+                  <span className={profile.active ? "mobile-pill mobile-pill-good" : "mobile-pill"}>{profile.active ? "Active" : "Inactive"}</span>
+                </div>
+                <label className="mt-3">
+                  Role
+                  <select
+                    value={profile.role}
+                    disabled={!canEdit || isCurrentUser}
+                    onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
+                  >
+                    <option value="owner">Owner</option>
+                    <option value="admin">Admin</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+                </label>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    className="btn-secondary"
+                    disabled={!canEdit || isCurrentUser}
+                    onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
+                  >
+                    {profile.active ? "Deactivate" : "Activate"}
+                  </button>
+                  <button
+                    className="btn-ghost text-rose-200"
+                    disabled={!canEdit || isCurrentUser}
+                    onClick={async () => {
+                      if (!window.confirm(`Delete signed-in user ${profile.email || profile.uid}? Their authorized email entry is not deleted automatically.`)) return;
+                      await onDeleteUser(profile);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          {users.length === 0 && <p className="mobile-empty">No signed-in users yet.</p>}
+        </div>
+        <div className="table-wrap hidden md:block">
           <table>
             <thead>
               <tr>
@@ -382,38 +996,54 @@ function UserManager({
                 <th>Email</th>
                 <th>Role</th>
                 <th>Active</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {users.map((profile) => (
-                <tr key={profile.uid}>
-                  <td>{profile.uid === currentUid ? `${userDisplayName(profile)} · ID ${userSimpleId(profile)} (you)` : `${userDisplayName(profile)} · ID ${userSimpleId(profile)}`}</td>
-                  <td>{profile.email || "No email"}</td>
-                  <td>
-                    <select
-                      value={profile.role}
-                      disabled={!canEdit || profile.uid === currentUid}
-                      onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
-                    >
-                      <option value="owner">Owner</option>
-                      <option value="admin">Admin</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                  </td>
-                  <td>
-                    <button
-                      className="btn-secondary"
-                      disabled={!canEdit || profile.uid === currentUid}
-                      onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
-                    >
-                      {profile.active ? "Active" : "Inactive"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {users.map((profile) => {
+                const isCurrentUser = profile.uid === currentUid;
+                return (
+                  <tr key={profile.uid}>
+                    <td>{isCurrentUser ? `${userDisplayName(profile)} · ID ${userSimpleId(profile)} (you)` : `${userDisplayName(profile)} · ID ${userSimpleId(profile)}`}</td>
+                    <td>{profile.email || "No email"}</td>
+                    <td>
+                      <select
+                        value={profile.role}
+                        disabled={!canEdit || isCurrentUser}
+                        onChange={(event) => onUpdate(profile.uid, { role: event.target.value as UserRole, active: profile.active })}
+                      >
+                        <option value="owner">Owner</option>
+                        <option value="admin">Admin</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                    </td>
+                    <td>
+                      <button
+                        className="btn-secondary"
+                        disabled={!canEdit || isCurrentUser}
+                        onClick={() => onUpdate(profile.uid, { role: profile.role, active: !profile.active })}
+                      >
+                        {profile.active ? "Active" : "Inactive"}
+                      </button>
+                    </td>
+                    <td>
+                      <button
+                        className="btn-secondary"
+                        disabled={!canEdit || isCurrentUser}
+                        onClick={async () => {
+                          if (!window.confirm(`Delete signed-in user ${profile.email || profile.uid}? Their authorized email entry is not deleted automatically.`)) return;
+                          await onDeleteUser(profile);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
               {users.length === 0 && (
                 <tr>
-                  <td colSpan={4}>No signed-in users yet.</td>
+                  <td colSpan={5}>No signed-in users yet.</td>
                 </tr>
               )}
             </tbody>
@@ -434,7 +1064,8 @@ function RecordsView({
   days,
   computed,
   loading,
-  onDaySelect
+  onDaySelect,
+  now
 }: {
   monthId: string;
   selectedDay: number;
@@ -442,20 +1073,21 @@ function RecordsView({
   computed: MonthComputed | null;
   loading: boolean;
   onDaySelect: (dayNo: number) => void;
+  now: Date;
 }) {
   const [recordMode, setRecordMode] = useState<"month" | "day">("month");
   const dayInput = days.find((day) => day.dayNo === selectedDay);
   const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
   const monthRows = computed?.homeSummary.dayRows ?? [];
   const ownerMonthRows = computed?.days.map((day) => {
-    const opening = day.ownerBalances.reduce((total, row) => total + (row.opening ?? 0), 0);
-    const debt = day.ownerBalances.reduce((total, row) => total + Math.abs(Math.min(row.amount, 0)), 0);
-    const credit = day.ownerBalances.reduce((total, row) => total + Math.max(row.amount, 0), 0);
+    const opening = day.ownerBalances[0]?.opening ?? day.ownerBalanceTotal ?? 0;
+    const expense = day.ownerBalances.reduce((total, row) => total + (row.expense ?? Math.max(row.amount, 0)), 0);
+    const received = day.ownerBalances.reduce((total, row) => total + (row.received ?? Math.max(-row.amount, 0)), 0);
     return [
       day.label ?? `Day ${day.dayNo}`,
       currency(opening),
-      currency(debt),
-      currency(credit),
+      currency(expense),
+      currency(received),
       currency(day.ownerBalanceTotal)
     ];
   }) ?? [];
@@ -514,15 +1146,17 @@ function RecordsView({
             Active Month
             <input value={formatMonth(monthId)} disabled readOnly />
           </label>
-          <label className={recordMode === "day" ? "" : "opacity-50"}>
-            Date / Period
-            <select value={selectedDay} disabled={loading || recordMode === "month"} onChange={(event) => onDaySelect(Number(event.target.value))}>
-              {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
-              ))}
-              <option value={32}>FINAL</option>
-            </select>
-          </label>
+        </div>
+        <div className={recordMode === "day" ? "" : "pointer-events-none opacity-50"}>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Date / Period</p>
+          <DayCalendar
+            monthId={monthId}
+            selectedDay={selectedDay}
+            onSelect={onDaySelect}
+            disabled={loading || recordMode === "month"}
+            now={now}
+            showFinal
+          />
         </div>
         {loading && (
           <p className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-300">
@@ -575,7 +1209,7 @@ function RecordsView({
             />
             <RecordTable
               title="Franchise Owner"
-              headers={["Day", "Opening", "Debt", "Credit", "Balance"]}
+              headers={["Day", "Opening", "Expense", "Received", "Balance"]}
               rows={ownerMonthRows}
             />
           </section>
@@ -651,15 +1285,16 @@ function RecordsView({
             />
             <RecordTable
               title="Franchise Owner"
-              headers={["Opening", "Description", "Amount", "Balance"]}
+              headers={["Description", "Opening", "Expense", "Received", "Balance"]}
               rows={[
                 ...dayComputed.ownerBalances.map((row) => [
-                  currency(row.opening ?? 0),
                   row.description ?? row.label ?? "-",
-                  currency(row.amount),
+                  currency(row.opening ?? 0),
+                  currency(row.expense ?? Math.max(row.amount, 0)),
+                  currency(row.received ?? Math.max(-row.amount, 0)),
                   currency(row.balance ?? 0)
                 ]),
-                ["-", "Total", "-", currency(dayComputed.ownerBalanceTotal)]
+                ["Total", "-", "-", "-", currency(dayComputed.ownerBalanceTotal)]
               ]}
             />
           </section>
@@ -683,7 +1318,28 @@ function RecordTable({ title, headers, rows }: { title: string; headers: string[
           <p>{rows.length} saved rows</p>
         </div>
       </div>
-      <div className="table-wrap">
+      <div className="mobile-card-list md:hidden">
+        {rows.map((row, index) => (
+          <article className="mobile-list-card" key={`${title}-mobile-${index}`}>
+            <div className="mobile-card-head">
+              <div>
+                <p className="mobile-label">{headers[0] ?? "Row"}</p>
+                <h3 className="mobile-card-title">{row[0] ?? "-"}</h3>
+              </div>
+            </div>
+            <dl className="mobile-kv-grid mt-3">
+              {row.slice(1).map((cell, cellIndex) => (
+                <div key={`${title}-mobile-${index}-${cellIndex}`}>
+                  <dt>{headers[cellIndex + 1] ?? `Value ${cellIndex + 1}`}</dt>
+                  <dd>{cell}</dd>
+                </div>
+              ))}
+            </dl>
+          </article>
+        ))}
+        {rows.length === 0 && <p className="mobile-empty">No saved rows.</p>}
+      </div>
+      <div className="table-wrap hidden md:block">
         <table>
           <thead>
             <tr>
@@ -722,11 +1378,11 @@ function FirebaseMissing() {
 function AuthPanel({
   message,
   busy,
-  onSubmit
+  onGoogleSubmit
 }: {
   message: string;
   busy: boolean;
-  onSubmit: () => Promise<void>;
+  onGoogleSubmit: () => Promise<void>;
 }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">
@@ -734,13 +1390,19 @@ function AuthPanel({
         <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
         <p className="mt-4 text-sm text-slate-400">
-          Sign in with a Google account that the owner has authorized.
+          Sign in with an authorized Google account.
         </p>
-        <button className="btn-primary mt-5 !w-full" disabled={busy} onClick={() => void onSubmit()}>
-          {busy && <LoadingIcon label="Signing in" />}
+        <button className="btn-primary mt-5 !w-full" disabled={busy} onClick={() => void onGoogleSubmit()}>
+          {busy && <LoadingIcon label="Signing in with Google" />}
           Continue with Google
         </button>
         {message && <p className="mt-4 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">{message}</p>}
+        {busy && (
+          <div className="mt-5 flex items-center justify-center gap-2 text-sm text-slate-400">
+            <LoadingIcon label="Checking access" />
+            Checking access...
+          </div>
+        )}
       </section>
     </main>
   );
@@ -755,8 +1417,10 @@ function App() {
   const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
   const [monthId, setMonthId] = useState(initialDate.monthId);
   const [openingBalance, setOpeningBalance] = useState(0);
+  const [ownerOpeningBalance, setOwnerOpeningBalance] = useState(0);
   const [selectedDay, setSelectedDay] = useState(initialDate.dayNo);
   const [months, setMonths] = useState<MonthRecord[]>([]);
+  const [jazzLoadMonths, setJazzLoadMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
@@ -765,19 +1429,68 @@ function App() {
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("Working...");
+  const [monthEmailing, setMonthEmailing] = useState(false);
+  const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
+  const [bulkClosingDays, setBulkClosingDays] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
   const [expenseCategories, setExpenseCategories] = useState<CatalogItem[]>([]);
   const [commissionCategories, setCommissionCategories] = useState<CatalogItem[]>([]);
   const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [authorizedEmails, setAuthorizedEmails] = useState<AuthorizedEmail[]>([]);
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const [authReady, setAuthReady] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
+  const [pwaNotice, setPwaNotice] = useState<PwaNotice>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const syncedLiveDateRef = useRef(false);
+  const creatingMonthsRef = useRef(new Set<string>());
+  const pendingWritesRef = useRef(false);
+  const syncErrorRef = useRef(false);
+  const queuedWriteCountRef = useRef(0);
+
+  function confirmLeavePendingChanges() {
+    return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
+  }
+
+  function updateSyncState(hasPendingWrites = pendingWritesRef.current) {
+    pendingWritesRef.current = hasPendingWrites;
+    setSyncState(nextSyncState({ online: navigator.onLine, hasPendingWrites, hasError: syncErrorRef.current }));
+  }
+
+  function applySnapshotMetadata(metadata: { hasPendingWrites: boolean }) {
+    syncErrorRef.current = false;
+    if (authStatus === FIRESTORE_ERROR_STATUS) setAuthStatus(CONNECTED_STATUS);
+    updateSyncState(metadata.hasPendingWrites || queuedWriteCountRef.current > 0);
+  }
+
+  function handleFirestoreError(message: string) {
+    syncErrorRef.current = true;
+    setSyncState("error");
+    setAuthStatus(FIRESTORE_ERROR_STATUS);
+    setStatus(message);
+  }
+
+  function handleQueuedWrite(promise: Promise<unknown>, failureMessage: string) {
+    queuedWriteCountRef.current += 1;
+    updateSyncState(true);
+    promise
+      .then(() => {
+        queuedWriteCountRef.current = Math.max(queuedWriteCountRef.current - 1, 0);
+        updateSyncState(queuedWriteCountRef.current > 0);
+      })
+      .catch((err) => {
+        queuedWriteCountRef.current = Math.max(queuedWriteCountRef.current - 1, 0);
+        updateSyncState(queuedWriteCountRef.current > 0);
+        setStatus(err instanceof Error ? err.message : failureMessage);
+      });
+  }
 
   useEffect(() => {
     const firebaseAuth = auth;
@@ -794,7 +1507,7 @@ function App() {
         await signOut(firebaseAuth);
         setUser(null);
         setRole(null);
-        setAuthStatus("Google sign-in required.");
+        setAuthStatus("Google or email sign-in required.");
         setAuthReady(true);
         return;
       }
@@ -802,14 +1515,13 @@ function App() {
         const nextRole = await getUserRole(nextUser.uid, nextUser.email);
         setUser(nextUser);
         setRole(nextRole);
-        setAuthStatus(`Connected to Firestore · ${roleLabel(nextRole)}`);
+        setAuthStatus(CONNECTED_STATUS);
         setAuthMessage("");
       } catch (err) {
         setUser(null);
         setRole(null);
         setAuthMessage(err instanceof Error ? err.message : "This email is not authorized.");
-        setAuthStatus("Google account not authorized.");
-        await signOut(firebaseAuth);
+        setAuthStatus(FIRESTORE_ERROR_STATUS);
       } finally {
         setAuthReady(true);
       }
@@ -824,6 +1536,32 @@ function App() {
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setAuditActorRole(role);
+  }, [role]);
+
+  useEffect(() => {
+    const handleConnectivityChange = () => updateSyncState();
+    window.addEventListener("online", handleConnectivityChange);
+    window.addEventListener("offline", handleConnectivityChange);
+    handleConnectivityChange();
+    return () => {
+      window.removeEventListener("online", handleConnectivityChange);
+      window.removeEventListener("offline", handleConnectivityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleOfflineReady = () => setPwaNotice("offline-ready");
+    const handleUpdateAvailable = () => setPwaNotice("update-available");
+    window.addEventListener("pwa-offline-ready", handleOfflineReady);
+    window.addEventListener("pwa-update-available", handleUpdateAvailable);
+    return () => {
+      window.removeEventListener("pwa-offline-ready", handleOfflineReady);
+      window.removeEventListener("pwa-update-available", handleUpdateAvailable);
+    };
   }, []);
 
   useEffect(() => {
@@ -866,75 +1604,153 @@ function App() {
     return records;
   }
 
-  async function refreshCatalogs() {
-    if (roleCan(role, "catalogs")) await ensureDefaultCatalogs();
-    const [expenses, commissions, parties, profiles, authorized] = await Promise.all([
-      listCatalogItems("expenseCategories"),
-      listCatalogItems("commissionCategories"),
-      listCatalogItems("creditParties"),
-      roleCan(role, "users") ? listUsers().catch(() => []) : Promise.resolve([]),
-      roleCan(role, "users") ? listAuthorizedEmails().catch(() => []) : Promise.resolve([])
-    ]);
-    setExpenseCategories(expenses);
-    setCommissionCategories(commissions);
-    setCreditParties(parties);
-    setUsers(profiles);
-    setAuthorizedEmails(authorized);
-  }
-
-  async function loadMonth(nextMonthId = monthId) {
+  async function loadMonth(nextMonthId = monthId, options: LoadMonthOptions = {}) {
+    if (!options.skipPendingCheck && hasPendingDayChanges && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on the current day because changes are still pending save.");
+      return;
+    }
     const liveDateOnLoad = currentDateState();
-    setLoadingMessage(`Loading ${formatMonth(nextMonthId)} records...`);
-    setLoading(true);
     setStatus("");
-    try {
-      const records = await refreshMonthList();
-      const existing = records.find((month) => month.id === nextMonthId);
-      if (!existing) {
-        if (!roleCan(role, "daily")) {
-          setStatus("This month does not exist yet. Owner or admin access is required to create it.");
-          return;
-        }
-        const resolvedOpening = await resolveOpeningBalance(nextMonthId);
-        const created = createMonth(nextMonthId, resolvedOpening);
-        const nextComputed = await saveMonthRecord(created, []);
-        setMonthId(created.id);
-        if (!syncedLiveDateRef.current && created.id === liveDateOnLoad.monthId) {
-          setSelectedDay(liveDateOnLoad.dayNo);
-          syncedLiveDateRef.current = true;
-        }
-        setOpeningBalance(created.openingBalance);
-        setMonthStatusState(created.status);
-        setDays([]);
-        setComputed(nextComputed);
-        setStatus(`Created Firestore month ${created.id}.`);
-        await refreshMonthList();
-        return;
-      }
-      const loadedDays = await fetchMonthDays(existing.id);
-      setMonthId(existing.id);
-      if (!syncedLiveDateRef.current && existing.id === liveDateOnLoad.monthId) {
-        setSelectedDay(liveDateOnLoad.dayNo);
-        syncedLiveDateRef.current = true;
-      }
-      setOpeningBalance(existing.openingBalance);
-      setMonthStatusState(existing.status);
-      setDays(loadedDays);
-      setComputed(computeMonth(loadedDays, existing.openingBalance, existing.id));
-      setStatus("");
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not load Firestore month.");
-    } finally {
-      setLoading(false);
+    setMonthId(nextMonthId);
+    if (!syncedLiveDateRef.current && nextMonthId === liveDateOnLoad.monthId) {
+      setSelectedDay(liveDateOnLoad.dayNo);
+      syncedLiveDateRef.current = true;
     }
   }
 
   useEffect(() => {
-    if (user && role) {
-      void refreshCatalogs();
-      void loadMonth(monthId);
-    }
+    if (!user || !role) return;
+    const unsubscribe = subscribeMonths(
+      (records, metadata) => {
+        setMonths(records);
+        applySnapshotMetadata(metadata);
+      },
+      (err) => handleFirestoreError(err.message)
+    );
+    return unsubscribe;
   }, [user, role]);
+
+  useEffect(() => {
+    if (!user || !role) return;
+    const unsubscribe = subscribeJazzLoadMonths(
+      (records, metadata) => {
+        setJazzLoadMonths(records);
+        applySnapshotMetadata(metadata);
+      },
+      (err) => handleFirestoreError(err.message)
+    );
+    return unsubscribe;
+  }, [user, role]);
+
+  useEffect(() => {
+    if (!user || !role) return;
+    if (roleCan(role, "catalogs")) void ensureDefaultCatalogs().catch((err) => setStatus(err instanceof Error ? err.message : "Could not seed catalogs."));
+
+    const unsubscribers = [
+      subscribeCatalogItems("expenseCategories", (items, metadata) => {
+        setExpenseCategories(items);
+        applySnapshotMetadata(metadata);
+      }, (err) => handleFirestoreError(err.message)),
+      subscribeCatalogItems("commissionCategories", (items, metadata) => {
+        setCommissionCategories(items);
+        applySnapshotMetadata(metadata);
+      }, (err) => handleFirestoreError(err.message)),
+      subscribeCatalogItems("creditParties", (items, metadata) => {
+        setCreditParties(items);
+        applySnapshotMetadata(metadata);
+      }, (err) => handleFirestoreError(err.message))
+    ];
+
+    if (roleCan(role, "users")) {
+      unsubscribers.push(
+        subscribeUsers((profiles, metadata) => {
+          setUsers(profiles);
+          applySnapshotMetadata(metadata);
+        }, (err) => handleFirestoreError(err.message)),
+        subscribeAuthorizedEmails((emails, metadata) => {
+          setAuthorizedEmails(emails);
+          applySnapshotMetadata(metadata);
+        }, (err) => handleFirestoreError(err.message)),
+        subscribeNotificationSettings((settings, metadata) => {
+          setNotificationSettings(settings);
+          applySnapshotMetadata(metadata);
+        }, (err) => handleFirestoreError(err.message))
+      );
+    } else {
+      setUsers([]);
+      setAuthorizedEmails([]);
+      setNotificationSettings(null);
+    }
+
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [user, role]);
+
+  useEffect(() => {
+    if (!user || !role) return;
+    const liveDateOnLoad = currentDateState();
+    const unsubscribers = [
+      subscribeMonthRecord(
+        monthId,
+        (record, metadata) => {
+          applySnapshotMetadata(metadata);
+          if (!record) {
+            if (!roleCan(role, "daily")) {
+              setStatus("This month does not exist yet. Owner or admin access is required to create it.");
+              setDays([]);
+              setComputed(null);
+              return;
+            }
+            if (creatingMonthsRef.current.has(monthId)) return;
+            creatingMonthsRef.current.add(monthId);
+            void Promise.all([resolveOpeningBalance(monthId), resolveOwnerOpeningBalance(monthId)])
+              .then(([resolvedOpening, resolvedOwnerOpening]) => {
+                const created = createMonth(monthId, resolvedOpening, resolvedOwnerOpening);
+                setOpeningBalance(created.openingBalance);
+                setOwnerOpeningBalance(created.ownerOpeningBalance ?? resolvedOwnerOpening);
+                setMonthStatusState(created.status);
+                setDays([]);
+                setComputed(computeMonth([], created.openingBalance, created.id, created.ownerOpeningBalance ?? resolvedOwnerOpening));
+                handleQueuedWrite(saveMonthRecord(created, []), `Could not create ${formatMonth(monthId)}.`);
+                setStatus(`Created ${formatMonth(monthId)} locally. Firestore will sync when online.`);
+              })
+              .catch((err) => setStatus(err instanceof Error ? err.message : "Could not create Firestore month."))
+              .finally(() => creatingMonthsRef.current.delete(monthId));
+            return;
+          }
+          setOpeningBalance(record.openingBalance);
+          if (record.ownerOpeningBalance != null) {
+            setOwnerOpeningBalance(record.ownerOpeningBalance);
+          } else {
+            setOwnerOpeningBalance(defaultOwnerOpeningBalance);
+            void resolveOwnerOpeningBalance(record.id)
+              .then((resolvedOwnerOpening) => {
+                if (record.id === monthId) setOwnerOpeningBalance(resolvedOwnerOpening);
+              })
+              .catch(() => {});
+          }
+          setMonthStatusState(record.status);
+          if (!syncedLiveDateRef.current && record.id === liveDateOnLoad.monthId) {
+            setSelectedDay(liveDateOnLoad.dayNo);
+            syncedLiveDateRef.current = true;
+          }
+        },
+        (err) => handleFirestoreError(err.message)
+      ),
+      subscribeMonthDays(
+        monthId,
+        (nextDays, metadata) => {
+          setDays(nextDays);
+          applySnapshotMetadata(metadata);
+        },
+        (err) => handleFirestoreError(err.message)
+      )
+    ];
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [monthId, role, user]);
+
+  useEffect(() => {
+    setComputed(computeMonth(days, openingBalance, monthId, ownerOpeningBalance));
+  }, [days, monthId, openingBalance, ownerOpeningBalance]);
 
   const selectedDayInput = useMemo(
     () => days.find((day) => day.dayNo === selectedDay) ?? emptyDay(selectedDay),
@@ -951,29 +1767,55 @@ function App() {
     return selectedDay === 1 ? openingBalance : previous?.returnBalance ?? openingBalance;
   }, [computed?.days, openingBalance, selectedDay]);
 
+  useEffect(() => {
+    const nextDay = clampSelectedDay(selectedDay, monthId, now);
+    if (nextDay !== selectedDay) setSelectedDay(nextDay);
+  }, [monthId, now, selectedDay]);
+
+  const isSelectedLiveDay = isLiveDay(monthId, selectedDay, now);
+  const selectedDayReopenActive = isReopenActive(selectedDayInput, now);
+
+  useEffect(() => {
+    if (isSelectedLiveDay || !selectedDayInput.reopenedUntilAt) return;
+    if (selectedDayInput.reopenedUntilAt > now.getTime()) return;
+    const nextDay = {
+      ...selectedDayInput,
+      reopenedUntilAt: undefined,
+      reopenedAt: undefined,
+      reopenedBy: undefined,
+      reopenedByRole: undefined
+    };
+    setDays((currentDays) => replaceDay(currentDays, nextDay));
+    handleQueuedWrite(queueClosePreviousDayReopenWindow(monthId, selectedDay), "Could not close the reopen window.");
+  }, [isSelectedLiveDay, monthId, now, openingBalance, selectedDay, selectedDayInput.reopenedUntilAt]);
+
+  function currentMonthRecord(): MonthRecord {
+    return (
+      months.find((month) => month.id === monthId) ??
+      createMonth(monthId, openingBalance, ownerOpeningBalance)
+    );
+  }
+
   async function saveDay(day: DailyLedgerInput, options: SaveDayOptions = {}) {
     if (!roleCan(role, "daily")) {
-      setStatus("Your role can view this month but cannot edit daily entries.");
-      return;
+      const message = "Your role can view this month but cannot edit daily entries.";
+      setStatus(message);
+      throw new Error(message);
     }
-    if (!options.silent) {
-      setLoadingMessage(`Saving ${day.label ?? `Day ${day.dayNo}`}...`);
-      setLoading(true);
+    if (role === "admin" && !isSelectedLiveDay) {
+      const message = "Admins can only edit the current running day.";
+      setStatus(message);
+      throw new Error(message);
     }
-    try {
-      const nextComputed = await saveDayAndRecalculate(monthId, openingBalance, day);
-      const nextDays = await fetchMonthDays(monthId);
-      setDays(nextDays);
-      setComputed(nextComputed);
-      if (!options.silent) {
-        await refreshMonthList();
-        setStatus(`Saved day ${day.label ?? day.dayNo} to Firestore.`);
-      }
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not save day.");
-    } finally {
-      if (!options.silent) setLoading(false);
-    }
+    const nextDays = replaceDay(days, day);
+    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    setDays(nextDays);
+    setComputed(nextComputed);
+    handleQueuedWrite(
+      queueDayAndSummaryWrite(currentMonthRecord(), day, nextComputed),
+      "Could not queue day save."
+    );
+    if (!options.silent) setStatus(`Saved ${day.label ?? `Day ${day.dayNo}`} locally. Firestore will sync automatically.`);
   }
 
   async function closeDay(day: DailyLedgerInput) {
@@ -981,26 +1823,211 @@ function App() {
       setStatus("Your role can view this month but cannot close days.");
       return;
     }
-    setLoadingMessage(`Closing ${day.label ?? `Day ${day.dayNo}`}...`);
-    setLoading(true);
+    if (role === "admin" && !isSelectedLiveDay) {
+      setStatus("Admins can only close the current running day.");
+      return;
+    }
+    const lockedDay = {
+      ...day,
+      lockedAt: day.lockedAt ?? Date.now(),
+      lockedBy: day.lockedBy ?? user?.uid,
+      lockedByRole: day.lockedByRole ?? role ?? undefined,
+      reopenedUntilAt: undefined,
+      reopenedAt: undefined,
+      reopenedBy: undefined,
+      reopenedByRole: undefined
+    };
+    const nextDays = replaceDay(days, lockedDay);
+    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    setDays(nextDays);
+    setComputed(nextComputed);
+    handleQueuedWrite(
+      queueDayAndSummaryWrite(currentMonthRecord(), lockedDay, nextComputed, "lock-day"),
+      "Could not queue day close."
+    );
+    setStatus(`Closed ${day.label ?? `Day ${day.dayNo}`} locally. Firestore will sync automatically.`);
+  }
+
+  async function sendDailyEmail(day: DailyLedgerInput) {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Email reports are restricted to owner or admin access.");
+      throw new Error("Email reports are restricted to owner or admin access.");
+    }
+    setStatus(`Sending email report for ${day.label ?? `Day ${day.dayNo}`}...`);
+    await sendManualActivityEmail(monthId, day.dayNo);
+    setStatus(`Email report sent for ${day.label ?? `Day ${day.dayNo}`}.`);
+  }
+
+  async function sendMonthEmail() {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Email reports are restricted to owner or admin access.");
+      return;
+    }
+    setMonthEmailing(true);
+    setStatus(`Sending email report for ${formatMonth(monthId)}...`);
     try {
-      const nextComputed = await lockDayAndRecalculate(monthId, openingBalance, day, role);
-      const nextDays = await fetchMonthDays(monthId);
-      setDays(nextDays);
-      setComputed(nextComputed);
-      await refreshMonthList();
-      setStatus(`Closed day ${day.label ?? day.dayNo}. Admin users can view it but cannot edit it.`);
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not close day.");
+      await sendManualActivityEmail(monthId);
+      setStatus(`Email report sent for ${formatMonth(monthId)}.`);
     } finally {
-      setLoading(false);
+      setMonthEmailing(false);
+    }
+  }
+
+  async function reopenDay(dayNo: number, reopenUntilAt?: number) {
+    if (!roleCan(role, "daily")) {
+      setStatus("Your role can view this month but cannot reopen days.");
+      return;
+    }
+    const isLiveReopen = isLiveDay(monthId, dayNo, now);
+    if (role === "admin" && !isLiveReopen) {
+      setStatus("Only owner can reopen previous days or correction periods.");
+      return;
+    }
+    const day = days.find((entry) => entry.dayNo === dayNo) ?? emptyDay(dayNo);
+    const reopenedDay = isLiveReopen
+      ? {
+          ...day,
+          lockedAt: undefined,
+          lockedBy: undefined,
+          lockedByRole: undefined,
+          reopenedUntilAt: undefined,
+          reopenedAt: Date.now(),
+          reopenedBy: user?.uid,
+          reopenedByRole: role ?? undefined
+        }
+      : {
+          ...day,
+          reopenedUntilAt: reopenUntilAt ?? Date.now() + 15 * 60 * 1000,
+          reopenedAt: Date.now(),
+          reopenedBy: user?.uid,
+          reopenedByRole: role ?? undefined
+        };
+    setDays((currentDays) => replaceDay(currentDays, reopenedDay));
+    handleQueuedWrite(
+      isLiveReopen
+        ? reopenCurrentDayUntilClose(monthId, dayNo, role)
+        : reopenPreviousDayFor15Minutes(monthId, dayNo, role, reopenUntilAt),
+      "Could not queue day reopen."
+    );
+    setStatus(
+      isLiveReopen
+        ? `Day ${dayNo} reopened locally until you close it again. Firestore will sync automatically.`
+        : `Day ${dayNo} reopened locally until ${new Date((reopenUntilAt ?? Date.now() + 15 * 60 * 1000)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Firestore will sync automatically.`
+    );
+  }
+
+  async function reopenMonthDays(scope: "selected" | "all") {
+    if (role !== "owner") {
+      setStatus("Only owner can reopen selected or all days for a month.");
+      return;
+    }
+    if (isClosed) {
+      setStatus("Reopen the month before reopening its days.");
+      return;
+    }
+    if (scope === "selected" && selectedDay === 32) {
+      setStatus("The final correction period cannot be reopened with this action.");
+      return;
+    }
+    if (hasPendingDayChanges && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on the current day because changes are still pending save.");
+      return;
+    }
+    if (scope === "selected" && isLiveDay(monthId, selectedDay, now)) {
+      await reopenDay(selectedDay);
+      return;
+    }
+
+    const dayNumbers = scope === "selected"
+      ? [selectedDay]
+      : availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now));
+    const reopenUntilAt = Date.now() + 15 * 60 * 1000;
+    const nextReopenedDays = dayNumbers.map((dayNo) => {
+      const existing = days.find((entry) => entry.dayNo === dayNo);
+      return {
+        ...dayWithMonthDate(monthId, dayNo, existing),
+        reopenedUntilAt: reopenUntilAt,
+        reopenedAt: Date.now(),
+        reopenedBy: user?.uid,
+        reopenedByRole: role
+      };
+    });
+
+    if (nextReopenedDays.length === 0) {
+      setStatus("No closed previous days are available to reopen for this month.");
+      return;
+    }
+
+    setBulkReopening(scope);
+    setDays((currentDays) => nextReopenedDays.reduce((nextDays, day) => replaceDay(nextDays, day), currentDays));
+    try {
+      await handleQueuedWrite(
+        reopenMonthDaysFor15Minutes(monthId, nextReopenedDays, role, reopenUntilAt),
+        "Could not queue month day reopen."
+      );
+      const dayText = scope === "selected" ? `Day ${selectedDay}` : `${nextReopenedDays.length} days`;
+      setStatus(`${dayText} reopened locally until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Firestore will sync automatically.`);
+    } finally {
+      setBulkReopening(null);
+    }
+  }
+
+  function closeAllDaysExceptToday() {
+    if (role !== "owner") {
+      setStatus("Only owner can close all days for a month.");
+      return;
+    }
+    if (isClosed) {
+      setStatus("Reopen the month before closing its days.");
+      return;
+    }
+    if (hasPendingDayChanges && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on the current day because changes are still pending save.");
+      return;
+    }
+    const liveDate = currentDateState(now);
+    const dayNumbers = availableDayNumbers(monthId, now).filter((dayNo) => !(monthId === liveDate.monthId && dayNo === liveDate.dayNo));
+    const timestamp = Date.now();
+    const nextClosedDays = dayNumbers.flatMap((dayNo) => {
+        const existing = days.find((entry) => entry.dayNo === dayNo);
+        if (existing?.lockedAt && !isReopenActive(existing, now)) return [];
+        const day: DailyLedgerInput = {
+          ...dayWithMonthDate(monthId, dayNo, existing),
+          lockedAt: existing?.lockedAt ?? timestamp,
+          lockedBy: existing?.lockedBy ?? user?.uid,
+          lockedByRole: existing?.lockedByRole ?? role ?? undefined,
+          reopenedUntilAt: undefined,
+          reopenedAt: undefined,
+          reopenedBy: undefined,
+          reopenedByRole: undefined
+        };
+        return [day];
+      });
+
+    if (nextClosedDays.length === 0) {
+      setStatus("No open previous days are available to close for this month.");
+      return;
+    }
+    const nextDays = nextClosedDays.reduce((updatedDays, day) => replaceDay(updatedDays, day), days);
+    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    setBulkClosingDays(true);
+    setDays(nextDays);
+    setComputed(nextComputed);
+    try {
+      handleQueuedWrite(
+        closeMonthDaysExceptToday(currentMonthRecord(), nextClosedDays, nextComputed, role),
+        "Could not queue close-all-days action."
+      );
+      setStatus(`Closed ${nextClosedDays.length} day${nextClosedDays.length === 1 ? "" : "s"} except today locally. Firestore will sync automatically.`);
+    } finally {
+      setBulkClosingDays(false);
     }
   }
 
   async function handleWorkbook(file: File | null) {
     if (!file) return;
-    if (!roleCan(role, "importBackup")) {
-      setStatus("Workbook import is restricted to owner or admin access.");
+    if (!canUseExcelImport) {
+      setStatus("Only owner can import Excel workbooks.");
       return;
     }
     setLoadingMessage(`Parsing ${file.name}...`);
@@ -1052,13 +2079,17 @@ function App() {
     setLoadingMessage(`Recalculating ${formatMonth(monthId)}...`);
     setLoading(true);
     try {
-      const nextComputed = await saveMonthRecord(
-        months.find((month) => month.id === monthId) ?? createMonth(monthId, openingBalance),
+      await saveMonthRecord(
+        months.find((month) => month.id === monthId) ?? createMonth(monthId, openingBalance, ownerOpeningBalance),
         days
       );
+      await recalculateMonth(monthId);
+      const nextDays = await fetchMonthDays(monthId);
+      const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+      setDays(nextDays);
       setComputed(nextComputed);
       await refreshMonthList();
-      setStatus("Recalculated and saved Firestore summary.");
+      setStatus("Master refresh complete. Day openings now follow the previous closing balance.");
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not recalculate.");
     } finally {
@@ -1086,6 +2117,30 @@ function App() {
     }
   }
 
+  async function toggleJazzLoadClosed() {
+    if (!roleCanJazzLoad(role, "monthControls")) {
+      setStatus("Closing and reopening Jazz Load months is restricted to owner access.");
+      return;
+    }
+    const jazzLoadMonth = jazzLoadMonths.find((record) => record.id === monthId);
+    if (!jazzLoadMonth) {
+      setStatus("Jazz Load month is not loaded yet.");
+      return;
+    }
+    const nextStatus = jazzLoadMonth.status === "open" ? "closed" : "open";
+    setLoadingMessage(`${nextStatus === "closed" ? "Closing" : "Reopening"} Jazz Load ${formatMonth(monthId)}...`);
+    setLoading(true);
+    try {
+      await setJazzLoadMonthStatus(jazzLoadMonth, nextStatus, user, role);
+      await refreshMonthList();
+      setStatus(`Jazz Load month ${nextStatus === "closed" ? "closed" : "reopened"} in Firestore.`);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Could not update Jazz Load month status.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function exportBackup() {
     if (!roleCan(role, "importBackup")) {
       setStatus("Backup export is restricted to owner or admin access.");
@@ -1099,8 +2154,9 @@ function App() {
       for (const month of records) {
         backedUpMonths.push({ ...month, days: await fetchMonthDays(month.id) });
       }
+      const jazzLoad = await listJazzLoadBackup();
       exportBackupPackage(
-        { exportedAt: Date.now(), months: backedUpMonths } satisfies BackupPackage,
+        { exportedAt: Date.now(), months: backedUpMonths, jazzLoad } satisfies BackupPackage,
         `franchise-backup-${new Date().toISOString().slice(0, 10)}.json`
       );
       setStatus("Backup package exported.");
@@ -1123,10 +2179,14 @@ function App() {
       const backup = (await readBackupPackage(file)) as BackupPackage;
       for (const month of backup.months ?? []) {
         const { days: backupDays, ...record } = month;
-        await saveMonthRecord(record, backupDays ?? []);
+        await saveMonthRecord(record, backupDays ?? [], { suppressPerDayAudit: true });
+      }
+      await writeExpenseBackupRestoreAudit((backup.months ?? []).length);
+      if (backup.jazzLoad) {
+        await restoreJazzLoadBackup(backup.jazzLoad, user, role);
       }
       await refreshMonthList();
-      setStatus(`Imported ${(backup.months ?? []).length} months from backup package.`);
+      setStatus(`Imported ${(backup.months ?? []).length} months and Jazz Load data from backup package.`);
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not import backup package.");
     } finally {
@@ -1134,30 +2194,64 @@ function App() {
     }
   }
 
+  const lockedExpenseSections: ExpenseSection[] = ["expense-categories", "credit-parties", "commission-categories"];
+
+  useEffect(() => {
+    if (role === "admin" && lockedExpenseSections.includes(expenseSection)) {
+      setExpenseSection("daily-entry");
+    }
+  }, [expenseSection, role]);
+
   if (!isFirebaseConfigured) return <FirebaseMissing />;
   if (!authReady || !user || !role) {
     return (
       <AuthPanel
         message={authMessage || authStatus}
-        busy={authBusy}
-        onSubmit={handleGoogleAuth}
+        busy={authBusy || !authReady}
+        onGoogleSubmit={handleGoogleAuth}
       />
     );
   }
 
   const isClosed = monthStatus === "closed";
-  const selectedDayLocked = Boolean(selectedDayInput.lockedAt);
+  const selectedDayLocked = isSelectedLiveDay
+    ? Boolean(selectedDayInput.lockedAt)
+    : !selectedDayReopenActive;
   const canEditDaily = roleCan(role, "daily") && !isClosed;
   const liveDate = currentDateState(now);
-  const isSelectedLiveDay = monthId === liveDate.monthId && selectedDay === liveDate.dayNo;
-  const canEditSelectedDay =
-    canEditDaily && (role === "owner" || (role === "admin" && isSelectedLiveDay && !selectedDayLocked));
-  const canCloseSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || role === "admin");
+  const canEditSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || (role === "admin" && isSelectedLiveDay));
+  const canCloseSelectedDay =
+    canEditDaily &&
+    (role === "owner" || (role === "admin" && isSelectedLiveDay)) &&
+    ((isSelectedLiveDay && !selectedDayLocked) || (!isSelectedLiveDay && selectedDayReopenActive));
+  const canReopenSelectedDay =
+    canEditDaily &&
+    selectedDayLocked &&
+    (role === "owner" || (role === "admin" && isSelectedLiveDay)) &&
+    !selectedDayReopenActive;
+  const selectedDayReopenLabel = isSelectedLiveDay ? "Reopen Until Close" : "Reopen Until";
+  const selectedDayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
+  const ownerBulkReopenDayCount = availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now)).length;
+  const canOwnerBulkReopenSelected =
+    role === "owner" &&
+    canEditDaily &&
+    selectedDay !== 32 &&
+    !selectedDayReopenActive &&
+    (!isSelectedLiveDay || selectedDayLocked);
+  const canOwnerBulkReopenAll = role === "owner" && canEditDaily && ownerBulkReopenDayCount > 0;
+  const canOwnerCloseAllExceptToday = role === "owner" && canEditDaily && ownerBulkReopenDayCount > 0;
   const canManageCatalogs = roleCan(role, "catalogs");
   const canManageUsers = roleCan(role, "users");
   const canUseOwnerControls = roleCan(role, "ownerControls");
   const canSelectDailyDate = role === "owner" || role === "admin";
-  const canUseImportBackup = roleCan(role, "importBackup");
+  const canUseBackup = roleCan(role, "importBackup");
+  const canUseExcelImport = role === "owner";
+  const jazzLoadMonth = jazzLoadMonths.find((record) => record.id === monthId);
+  const currentMonthStatus = view === "jazz-load" ? (jazzLoadMonth?.status ?? "new") : monthStatus;
+  const canToggleCurrentMonth =
+    view === "jazz-load" ? roleCanJazzLoad(role, "monthControls") : roleCan(role, "ownerControls");
+  const handleMonthToggle = view === "jazz-load" ? toggleJazzLoadClosed : toggleClosed;
+  const monthToggleLabel = currentMonthStatus === "closed" ? "Reopen Month" : "Close Month";
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
@@ -1176,37 +2270,184 @@ function App() {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
     { id: "records", label: "Previous Records", icon: History, show: true },
     { id: "expense", label: "Expense", icon: Tags, show: true },
+    { id: "jazz-load", label: "Jazz Load", icon: FileSpreadsheet, show: true },
+    { id: "stock-ledger", label: "Stock Ledger", icon: PackageOpen, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
-    { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseImportBackup },
-    { id: "backup", label: "Backup", icon: FileDown, show: canUseImportBackup }
+    { id: "audit-logs", label: "Audit Logs", icon: ScrollText, show: role === "owner" },
+    { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseExcelImport },
+    { id: "backup", label: "Backup", icon: FileDown, show: canUseBackup }
   ];
+  const syncLabel = syncStatusLabel(syncState);
+  const showOfflineOwnerWarning = syncState === "offline";
+  const currentViewLabel = navItems.find((item) => item.id === view)?.label ?? "Dashboard";
+  const mobilePrimaryNav = navItems.filter((item) => item.show).filter((item) => ["dashboard", "expense", "jazz-load", "stock-ledger"].includes(item.id)).slice(0, 4);
+
+  function navigateTo(nextView: View) {
+    if (hasPendingDayChanges && nextView !== view && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on the current screen because changes are still pending save.");
+      return;
+    }
+    setView(nextView);
+    setMobileMenuOpen(false);
+  }
 
   async function saveCatalog(
     catalog: "expenseCategories" | "creditParties" | "commissionCategories",
     item: CatalogItem
   ) {
-    await upsertCatalogItem(catalog, item);
-    await refreshCatalogs();
-    setStatus(`${item.name} saved.`);
+    handleQueuedWrite(upsertCatalogItem(catalog, { ...item, active: true }), `Could not queue ${item.name}.`);
+    setStatus(`${item.name} saved locally. Firestore will sync automatically.`);
+  }
+
+  async function removeCatalogItem(
+    catalog: "expenseCategories" | "creditParties" | "commissionCategories",
+    itemId: string
+  ) {
+    handleQueuedWrite(deleteCatalogItem(catalog, itemId), `Could not queue ${itemId} delete.`);
+    setStatus(`${itemId} deleted locally. Firestore will sync automatically.`);
   }
 
   async function saveUserRole(uid: string, updates: Pick<UserProfile, "role" | "active">) {
-    await updateUserProfile(uid, updates);
-    setUsers(await listUsers());
-    setStatus("User access updated.");
+    handleQueuedWrite(
+      Promise.all([
+        updateUserProfile(uid, updates),
+        addRoleChangeAudit(monthId, `Updated user ${uid} to ${updates.role} (${updates.active ? "active" : "inactive"})`)
+      ]),
+      "Could not queue user access update."
+    );
+    setStatus("User access saved locally. Firestore will sync automatically.");
+  }
+
+  async function removeUserProfile(profile: UserProfile) {
+    if (profile.uid === user?.uid) {
+      setStatus("You cannot delete your own signed-in user profile.");
+      return;
+    }
+    handleQueuedWrite(
+      Promise.all([
+        deleteUserProfile(profile.uid),
+        addRoleChangeAudit(monthId, `Deleted user profile ${profile.email || profile.uid}`)
+      ]),
+      "Could not queue user delete."
+    );
+    setStatus(`${profile.email || profile.uid} user profile deleted locally. Firestore will sync automatically.`);
   }
 
   async function saveAuthorizedEmail(email: string, nextRole: UserRole, active = true) {
-    await upsertAuthorizedEmail(email, nextRole, active);
-    setAuthorizedEmails(await listAuthorizedEmails());
-    setStatus(`${emailKey(email)} authorization saved.`);
+    handleQueuedWrite(
+      Promise.all([
+        upsertAuthorizedEmail(email, nextRole, active),
+        addRoleChangeAudit(monthId, `Authorized email ${emailKey(email)} as ${nextRole} (${active ? "active" : "inactive"})`)
+      ]),
+      "Could not queue email authorization."
+    );
+    setStatus(`${emailKey(email)} authorization saved locally. Firestore will sync automatically.`);
+  }
+
+  async function removeAuthorizedEmail(entry: AuthorizedEmail) {
+    if (entry.id === emailKey(user?.email ?? "")) {
+      setStatus("You cannot delete your own authorized email.");
+      return;
+    }
+    const activeOwnerCount = authorizedEmails.filter((emailEntry) => emailEntry.active && emailEntry.role === "owner").length;
+    if (entry.active && entry.role === "owner" && activeOwnerCount <= 1) {
+      setStatus("Keep at least one active owner email before deleting this owner.");
+      return;
+    }
+    handleQueuedWrite(
+      Promise.all([
+        deleteAuthorizedEmail(entry.email),
+        addRoleChangeAudit(monthId, `Deleted authorized email ${emailKey(entry.email)}`)
+      ]),
+      "Could not queue authorized email delete."
+    );
+    setStatus(`${emailKey(entry.email)} authorization deleted locally. Firestore will sync automatically.`);
+  }
+
+  async function saveNotifications(settings: NotificationSettings) {
+    handleQueuedWrite(saveNotificationSettings(settings), "Could not queue notification settings.");
+    setNotificationSettings(settings);
+    setStatus("Notification settings saved locally. Firestore will sync automatically.");
+  }
+
+  function runReportExport(action: () => void) {
+    try {
+      action();
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Could not export report.");
+    }
   }
 
   return (
     <main className={`min-h-screen ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
-      <div className={`grid min-h-screen ${shellGrid}`}>
-        <aside className="border-b border-slate-800 bg-slate-950/95 p-4 text-slate-100 lg:border-b-0 lg:border-r">
+      <header className="mobile-topbar lg:hidden">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-300">{currentViewLabel}</p>
+          <h1 className="truncate text-base font-semibold text-white">{formatMonth(monthId)} · {currentMonthStatus}</h1>
+          <p className="truncate text-xs text-slate-400">{syncLabel}</p>
+        </div>
+        <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setMobileMenuOpen((open) => !open)} title="Open menu">
+          {mobileMenuOpen ? <X /> : <Menu />}
+        </button>
+      </header>
+      {mobileMenuOpen && (
+        <section className="mobile-menu-panel lg:hidden">
+          <div className="grid grid-cols-1 gap-3">
+            <label>
+              Active Month
+              <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
+                {monthChoices.map(([id, status]) => (
+                  <option key={id} value={id}>
+                    {formatMonth(id)} · {status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Opening Balance
+              <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+            </label>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button className="btn-primary" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
+              {loading && <LoadingIcon label="Loading month" />}
+              Load
+            </button>
+            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
+              {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
+              Recalc
+            </button>
+            <button className="btn-secondary" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
+              {loading && <LoadingIcon label="Updating month status" />}
+              {monthToggleLabel}
+            </button>
+            <button className="btn-secondary" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+              {theme === "dark" ? <Sun /> : <Moon />}
+              Theme
+            </button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {navItems.filter((item) => item.show && !mobilePrimaryNav.some((primary) => primary.id === item.id)).map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.id} className={view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => navigateTo(item.id)}>
+                  <Icon />
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+            <p className="text-sm font-semibold text-white">{displayName}</p>
+            <p className="mt-1 text-xs text-slate-400">ID {displayId} · {accessLabel}</p>
+            <p className="mt-2 flex items-center gap-2 text-xs text-slate-400"><Cloud /> {authStatus}</p>
+            <button className="btn-secondary mt-3 !w-full" onClick={() => auth && signOut(auth)}>Sign Out</button>
+          </div>
+        </section>
+      )}
+      <div className={`min-h-screen lg:grid ${shellGrid}`}>
+        <aside className="hidden min-w-0 border-b border-slate-800 bg-slate-950/95 p-3 text-slate-100 sm:p-4 lg:block lg:border-b-0 lg:border-r">
           <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-start justify-between" : "flex-col items-center"}`}>
             {sidebarOpen && (
               <div className="min-w-0">
@@ -1227,14 +2468,14 @@ function App() {
               </button>
             </div>
           </div>
-          <nav className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
+          <nav className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
             {navItems.filter((item) => item.show).map((item) => {
               const Icon = item.icon;
               return (
                 <button
                   key={item.id}
                   className={`${view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} ${sidebarOpen ? "!h-12 justify-start" : "!h-14 !w-14 !px-0 justify-center [&_svg]:!h-6 [&_svg]:!w-6"}`}
-                  onClick={() => setView(item.id)}
+                  onClick={() => navigateTo(item.id)}
                   title={item.label}
                 >
                   <Icon />
@@ -1255,7 +2496,7 @@ function App() {
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-slate-500">Month Status</span>
-                    <span className="font-medium capitalize text-slate-100">{monthStatus}</span>
+                    <span className="font-medium capitalize text-slate-100">{currentMonthStatus}</span>
                   </div>
                 </div>
               </div>
@@ -1276,7 +2517,7 @@ function App() {
                   <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
                 </label>
                 <div className="mt-4 flex flex-col gap-2">
-                  <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => loadMonth(monthId)}>
+                  <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
                     {loading && <LoadingIcon label="Loading month" />}
                     Load
                   </button>
@@ -1284,12 +2525,12 @@ function App() {
                     {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
                     Recalculate
                   </button>
-                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canUseOwnerControls} onClick={toggleClosed}>
+                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
                     {loading && <LoadingIcon label="Updating month status" />}
-                    {isClosed ? "Reopen Month" : "Close Month"}
+                    {monthToggleLabel}
                   </button>
                 </div>
-                {months.length > 0 && (
+                {/* {months.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2">
                     {months.slice(0, 8).map((month) => (
                       <button className={month.id === monthId ? "btn-chip btn-chip-active !h-10 !w-full !justify-start" : "btn-chip !h-10 !w-full !justify-start"} key={month.id} onClick={() => loadMonth(month.id)}>
@@ -1297,40 +2538,72 @@ function App() {
                       </button>
                     ))}
                   </div>
-                )}
+                )} */}
               </div>
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
                 <p className="text-xs font-semibold uppercase text-slate-500">User</p>
                 <p className="mt-2 text-sm font-semibold text-white">{displayName}</p>
                 <p className="mt-1 text-sm text-slate-400">ID {displayId} · {accessLabel}</p>
                 <p className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
-                <p className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Shield /> Connected</p>
+                <p className="mt-3 flex items-center gap-2 text-sm text-slate-400">
+                  <Shield /> {syncLabel}
+                </p>
                 <button className="btn-secondary mt-4 !w-full" onClick={() => auth && signOut(auth)}>Sign Out</button>
               </div>
             </>
           )}
         </aside>
 
-        <div className="min-w-0 px-4 py-5 sm:px-6 lg:px-8">
+        <div className="min-w-0 px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8">
           {status && <p className="status">{status}</p>}
+          {pwaNotice === "offline-ready" && (
+            <div className="status flex flex-wrap items-center justify-between gap-3">
+              <span>Offline reload is ready on this device.</span>
+              <button className="btn-secondary !h-9" onClick={() => setPwaNotice(null)}>Later</button>
+            </div>
+          )}
+          {pwaNotice === "update-available" && (
+            <div className="warning flex flex-wrap items-center justify-between gap-3">
+              <span>New version available. Update when no entry is being edited.</span>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-primary !h-9" onClick={() => void applyPwaUpdate()}>Update now</button>
+                <button className="btn-secondary !h-9" onClick={() => setPwaNotice(null)}>Later</button>
+              </div>
+            </div>
+          )}
+          {showOfflineOwnerWarning && <p className="warning">Owner will see updates after this machine reconnects.</p>}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
           {selectedDayLocked && (
             <p className="warning">
-              Day {selectedDay} is closed. Owner access can edit closed days; admin can view and manage status.
+              {isSelectedLiveDay
+                ? `Day ${selectedDay} is closed.`
+                : `Day ${selectedDay} is closed. Reopen it to edit for 15 minutes.`}
             </p>
           )}
 
           {view === "dashboard" && (
             <>
               <HomeDashboard month={computed} />
-              <div className="mt-5 flex flex-wrap gap-2">
-                <button className="btn-primary" disabled={!computed} onClick={() => computed && exportMonthToExcel(computed)}>
+              <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                <button className="btn-primary w-full sm:w-auto" disabled={!computed} onClick={() => computed && runReportExport(() => exportMonthlyXlsx(computed))}>
                   <FileSpreadsheet />
-                  Export Excel
+                  Export Monthly Excel
                 </button>
-                <button className="btn-secondary" disabled={!computed} onClick={printMonthReport}>
-                  Print / PDF
+                <button className="btn-secondary w-full sm:w-auto" disabled={!computed} onClick={() => computed && runReportExport(() => exportMonthlyPdf(computed))}>
+                  <FileDown />
+                  Export Monthly PDF
                 </button>
+                {canUseOwnerControls && (
+                  <button
+                    className="btn-secondary w-full sm:w-auto"
+                    disabled
+                    title="Email sending is disabled until Firebase Functions deployment is available."
+                    onClick={() => void sendMonthEmail()}
+                  >
+                    {monthEmailing && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                    {monthEmailing ? "Sending Email..." : "Send Email"}
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -1343,23 +2616,38 @@ function App() {
               computed={computed}
               loading={loading}
               onDaySelect={setSelectedDay}
+              now={now}
             />
           )}
 
           {view === "expense" && (
             <section>
               <nav className="mb-5 flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2 text-slate-100 shadow-xl shadow-black/20">
-                {[
-                  ["daily-entry", "Daily Entry"],
-                  ["expense-dashboard", "Dashboard"],
-                  ["expense-categories", "Expense Categories"],
-                  ["credit-parties", "Credit Parties"],
-                  ["commission-categories", "Commission Categories"]
-                ].map(([id, label]) => (
+                {(
+                  [
+                    { id: "daily-entry", label: "Daily Entry", locked: false },
+                    { id: "expense-dashboard", label: "Dashboard", locked: false },
+                    { id: "expense-categories", label: "Expense Categories", locked: !canManageCatalogs },
+                    { id: "credit-parties", label: "Credit Parties", locked: !canManageCatalogs },
+                    { id: "commission-categories", label: "Commission/Application Categories", locked: !canManageCatalogs }
+                  ] as Array<{ id: ExpenseSection; label: string; locked: boolean }>
+                ).map(({ id, label, locked }) => (
                   <button
-                    className={expenseSection === id ? "btn-tab btn-tab-active" : "btn-tab"}
+                    className={`${expenseSection === id ? "btn-tab btn-tab-active" : "btn-tab"} ${locked ? "cursor-not-allowed opacity-60" : ""}`}
+                    disabled={locked}
                     key={id}
-                    onClick={() => setExpenseSection(id as ExpenseSection)}
+                    title={locked ? "Only owner can manage this section." : label}
+                    onClick={() => {
+                      if (locked) {
+                        setStatus("Only owner can manage this section.");
+                        return;
+                      }
+                      if (hasPendingDayChanges && id !== expenseSection && !confirmLeavePendingChanges()) {
+                        setStatus("Stayed on Daily Entry because changes are still pending save.");
+                        return;
+                      }
+                      setExpenseSection(id);
+                    }}
                   >
                     {label}
                   </button>
@@ -1369,15 +2657,85 @@ function App() {
               {expenseSection === "daily-entry" && (
                 <>
                   <section className="mb-4 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
-                    <label>
-                      Day / Period · {formatMonth(monthId)}
-                      <select value={selectedDay} disabled={!canSelectDailyDate} onChange={(event) => setSelectedDay(Number(event.target.value))}>
-                        {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
-                          <option key={day} value={day}>{dateLabelFor(monthId, day)}</option>
-                        ))}
-                        <option value={32}>FINAL</option>
-                      </select>
-                    </label>
+                    <div className="mb-3 flex items-end justify-between gap-4">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-300">Day / Period</p>
+                        <h3 className="mt-1 text-lg font-semibold text-white">{formatMonth(monthId)}</h3>
+                        <p className="mt-1 text-sm text-slate-400">{dateLabel}</p>
+                      </div>
+                    </div>
+                    <DayCalendar
+                      monthId={monthId}
+                      selectedDay={selectedDay}
+                      days={days}
+                      now={now}
+                      disabled={!canSelectDailyDate}
+                      showFinal
+                      onSelect={(nextDay) => {
+                        if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
+                          setStatus("Stayed on the current day because changes are still pending save.");
+                          return;
+                        }
+                        setSelectedDay(nextDay);
+                      }}
+                    />
+                    <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                      <button
+                        className="btn-secondary w-full sm:w-auto"
+                        disabled={!computed || !selectedDayComputed}
+                        onClick={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
+                      >
+                        <FileSpreadsheet />
+                        Export Daily Excel
+                      </button>
+                      <button
+                        className="btn-secondary w-full sm:w-auto"
+                        disabled={!computed || !selectedDayComputed}
+                        onClick={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
+                      >
+                        <FileDown />
+                        Export Daily PDF
+                      </button>
+                      {roleCan(role, "ownerControls") && (
+                        <button
+                          className="btn-secondary w-full sm:w-auto"
+                          disabled={loading || !user}
+                          onClick={recalc}
+                          title="Refresh month calculations so each day opening follows the previous day closing"
+                        >
+                          {loading ? <LoadingIcon label="Refreshing calculations" /> : <RefreshCw />}
+                          Master Refresh Calculations
+                        </button>
+                      )}
+                      {role === "owner" && (
+                        <>
+                          <button
+                            className="btn-secondary w-full sm:w-auto"
+                            disabled={loading || bulkReopening !== null || !user || !canOwnerBulkReopenSelected}
+                            onClick={() => void reopenMonthDays("selected")}
+                          >
+                            {bulkReopening === "selected" && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                            {bulkReopening === "selected" ? "Reopening..." : "Reopen Selected Day"}
+                          </button>
+                          <button
+                            className="btn-secondary w-full sm:w-auto"
+                            disabled={loading || bulkReopening !== null || !user || !canOwnerBulkReopenAll}
+                            onClick={() => void reopenMonthDays("all")}
+                          >
+                            {bulkReopening === "all" && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                            {bulkReopening === "all" ? "Reopening..." : "Reopen All Days"}
+                          </button>
+                          <button
+                            className="btn-secondary w-full sm:w-auto"
+                            disabled={loading || bulkClosingDays || !user || !canOwnerCloseAllExceptToday}
+                            onClick={closeAllDaysExceptToday}
+                          >
+                            {bulkClosingDays && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                            {bulkClosingDays ? "Closing..." : "Close All"}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </section>
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
@@ -1386,6 +2744,8 @@ function App() {
                     entryMonth={selectedDateParts.entryMonth}
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
+                    ownerOpeningBalance={ownerOpeningBalance}
+                    previousOwnerClosingBalance={computed?.days.find((day) => day.dayNo === selectedDay - 1)?.ownerBalanceTotal ?? ownerOpeningBalance}
                     dateLabel={dateLabel}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
@@ -1395,34 +2755,103 @@ function App() {
                     disabled={!canEditSelectedDay || !user}
                     locked={selectedDayLocked}
                     canClose={canCloseSelectedDay && !loading && Boolean(user)}
+                    canReopen={canReopenSelectedDay && !loading && Boolean(user)}
+                    reopenLabel={selectedDayReopenLabel}
+                    reopenExpiresAt={selectedDayInput.reopenedUntilAt}
+                    reopenRequiresTime={!isSelectedLiveDay}
+                    onReopenDay={(reopenUntilAt) => reopenDay(selectedDay, reopenUntilAt)}
+                    previousDayClosed={isDayClosedForCarry(monthId, previousDayInput, now)}
                     canCreateCatalogs={canManageCatalogs}
                     onSave={saveDay}
                     onCloseDay={closeDay}
+                    onSendEmail={sendDailyEmail}
+                    canSendEmail={false}
                     onCreateCatalog={saveCatalog}
+                    onPendingStateChange={setHasPendingDayChanges}
                   />
                 </>
               )}
               {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} />}
               {expenseSection === "expense-categories" && (
-                <CatalogManager title="Expense Categories" items={expenseCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("expenseCategories", item)} />
+                <CatalogManager
+                  title="Expense Categories"
+                  items={expenseCategories}
+                  canEdit={canManageCatalogs}
+                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                  onSave={(item) => saveCatalog("expenseCategories", item)}
+                  onDelete={(itemId) => removeCatalogItem("expenseCategories", itemId)}
+                />
               )}
               {expenseSection === "credit-parties" && (
-                <CatalogManager title="Credit Parties" items={creditParties} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("creditParties", item)} />
+                <CatalogManager
+                  title="Credit Parties"
+                  items={creditParties}
+                  canEdit={canManageCatalogs}
+                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                  onSave={(item) => saveCatalog("creditParties", item)}
+                  onDelete={(itemId) => removeCatalogItem("creditParties", itemId)}
+                />
               )}
               {expenseSection === "commission-categories" && (
-                <CatalogManager title="Commission Categories" items={commissionCategories} canEdit={canManageCatalogs} onSave={(item) => saveCatalog("commissionCategories", item)} />
+                <CatalogManager
+                  title="Commission/Application Categories"
+                  items={commissionCategories}
+                  canEdit={canManageCatalogs}
+                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                  onSave={(item) => saveCatalog("commissionCategories", item)}
+                  onDelete={(itemId) => removeCatalogItem("commissionCategories", itemId)}
+                />
               )}
             </section>
           )}
+
+          {view === "jazz-load" && (
+            <JazzLoadModule
+              user={user}
+              role={role}
+              monthId={monthId}
+              syncState={syncState}
+              syncLabel={syncLabel}
+              loading={loading}
+              onSnapshotMetadata={applySnapshotMetadata}
+              onFirestoreError={handleFirestoreError}
+              onQueueWrite={handleQueuedWrite}
+              onStatus={setStatus}
+              onExportBackup={exportBackup}
+              onImportBackup={importBackup}
+            />
+          )}
+
+          {view === "stock-ledger" && (
+            <StockLedgerModule
+              user={user}
+              role={role}
+              monthId={monthId}
+              syncState={syncState}
+              syncLabel={syncLabel}
+              loading={loading}
+              onSnapshotMetadata={applySnapshotMetadata}
+              onFirestoreError={handleFirestoreError}
+              onQueueWrite={handleQueuedWrite}
+              onStatus={setStatus}
+            />
+          )}
+
+          {view === "audit-logs" && role === "owner" && <AuditLogsView months={months} />}
 
           {view === "users" && (
             <UserManager
               users={users}
               authorizedEmails={authorizedEmails}
+              notificationSettings={notificationSettings}
               currentUid={user?.uid}
+              currentEmail={user?.email}
               canEdit={canManageUsers}
               onUpdate={saveUserRole}
+              onDeleteUser={removeUserProfile}
               onAuthorizeEmail={saveAuthorizedEmail}
+              onDeleteAuthorizedEmail={removeAuthorizedEmail}
+              onSaveNotifications={saveNotifications}
             />
           )}
 
@@ -1434,114 +2863,143 @@ function App() {
                   <p>Owner/admin backup export and restore.</p>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button className="btn-secondary" disabled={loading || !user || !canUseImportBackup} onClick={exportBackup}>
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                <button className="btn-secondary w-full sm:w-auto" disabled={loading || !user || !canUseBackup} onClick={exportBackup}>
                   {loading ? <LoadingIcon label="Exporting backup" /> : <FileDown />}
                   Export Backup
                 </button>
-                <label className={`file-button ${loading || !canUseImportBackup ? "pointer-events-none opacity-50" : ""}`}>
+                <label className={`file-button w-full sm:w-auto ${loading || !canUseBackup ? "pointer-events-none opacity-50" : ""}`}>
                   {loading ? <LoadingIcon label="Importing backup" /> : <Upload />}
                   Import Backup
-                  <input disabled={loading || !canUseImportBackup} type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
+                  <input disabled={loading || !canUseBackup} type="file" accept=".json" onChange={(event) => importBackup(event.target.files?.[0] ?? null)} />
                 </label>
               </div>
+              {syncState === "offline" && (
+                <p className="warning mt-4">Some records may not be available offline. Reconnect before final backup.</p>
+              )}
             </section>
           )}
 
           {view === "import" && (
-            <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20">
-          <div className="panel-title">
-            <div>
-              <h2>Excel Import</h2>
-              <p>Select month and import type, then upload the workbook.</p>
-            </div>
-          </div>
-          <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr] md:items-end">
-            <label>
-              Import Month
-              <input
-                type="month"
-                value={importMonthId}
-                onChange={(event) => {
-                  setImportMonthId(event.target.value);
-                  setImportPreview(null);
-                }}
-              />
-            </label>
-            <label>
-              Import Type
-              <select
-                value={importType}
-                onChange={(event) => {
-                  setImportType(event.target.value as WorkbookImportPreview["importType"]);
-                  setImportPreview(null);
-                }}
-              >
-                <option value="full">Full Workbook</option>
-                <option value="expense">Expense Only</option>
-              </select>
-            </label>
-            <label>
-              Workbook
-              <input
-                disabled={loading}
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={(event) => handleWorkbook(event.target.files?.[0] ?? null)}
-              />
-            </label>
-          </div>
-          {loading && (
-            <p className="mb-4 flex items-center gap-2 text-sm font-medium text-slate-300">
-              <LoadingIcon label="Processing import" />
-              Processing...
-            </p>
-          )}
-          {importPreview && (
-            <>
-              <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
-                {[
-                  ["Month", formatMonth(importPreview.monthId)],
-                  ["Type", importPreview.importType === "full" ? "Full Workbook" : "Expense Only"],
-                  ["File", importPreview.fileName],
-                  ["Periods", importPreview.days.length.toString()],
-                  ["Issue", importPreview.computed.homeSummary.monthlyIssueTotal.toLocaleString()],
-                  ["Expense", importPreview.computed.homeSummary.monthlyExpenseTotal.toLocaleString()]
-                ].map(([label, value]) => (
-                  <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" key={label}>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
-                    <p className="mt-2 overflow-hidden text-ellipsis text-lg font-semibold text-white">{value}</p>
+            canUseExcelImport ? (
+              <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 text-slate-100 shadow-xl shadow-black/20">
+                <div className="panel-title">
+                  <div>
+                    <h2>Excel Import</h2>
+                    <p>Select month and import type, then upload the workbook.</p>
                   </div>
-                ))}
-              </div>
-              {importPreview.workbookTotals && (
-                <p className="status">
-                  Workbook Home totals: issue {importPreview.workbookTotals.monthlyIssueTotal.toLocaleString()},
-                  expense {importPreview.workbookTotals.monthlyExpenseTotal.toLocaleString()}
-                </p>
-              )}
-              {importPreview.warnings.length > 0 && (
-                <ul className="warnings">
-                  {importPreview.warnings.map((warning, index) => (
-                    <li key={`${warning.message}-${index}`}>
-                      {warning.level}: {warning.sheetName ? `${warning.sheetName} - ` : ""}
-                      {warning.message}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <HomeDashboard month={importPreview.computed} />
-              <button className="btn-primary" disabled={loading || !user} onClick={commitImport}>
-                {loading && <LoadingIcon label="Saving import" />}
-                Save {importPreview.importType === "expense" ? "Expense Only" : "Full Workbook"} Import to Firestore
-              </button>
-            </>
-          )}
-            </section>
+                </div>
+                <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr] md:items-end">
+                  <label>
+                    Import Month
+                    <input
+                      type="month"
+                      value={importMonthId}
+                      onChange={(event) => {
+                        setImportMonthId(event.target.value);
+                        setImportPreview(null);
+                      }}
+                    />
+                  </label>
+                  <label>
+                    Import Type
+                    <select
+                      value={importType}
+                      onChange={(event) => {
+                        setImportType(event.target.value as WorkbookImportPreview["importType"]);
+                        setImportPreview(null);
+                      }}
+                    >
+                      <option value="full">Full Workbook</option>
+                      <option value="expense">Expense Only</option>
+                    </select>
+                  </label>
+                  <label>
+                    Workbook
+                    <input
+                      disabled={loading}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={(event) => handleWorkbook(event.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                </div>
+                {loading && (
+                  <p className="mb-4 flex items-center gap-2 text-sm font-medium text-slate-300">
+                    <LoadingIcon label="Processing import" />
+                    Processing...
+                  </p>
+                )}
+                {importPreview && (
+                  <>
+                    <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+                      {[
+                        ["Month", formatMonth(importPreview.monthId)],
+                        ["Type", importPreview.importType === "full" ? "Full Workbook" : "Expense Only"],
+                        ["File", importPreview.fileName],
+                        ["Periods", importPreview.days.length.toString()],
+                        ["Issue", importPreview.computed.homeSummary.monthlyIssueTotal.toLocaleString()],
+                        ["Expense", importPreview.computed.homeSummary.monthlyExpenseTotal.toLocaleString()]
+                      ].map(([label, value]) => (
+                        <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4" key={label}>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+                          <p className="mt-2 overflow-hidden text-ellipsis text-lg font-semibold text-white">{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {importPreview.workbookTotals && (
+                      <p className="status">
+                        Workbook Home totals: issue {importPreview.workbookTotals.monthlyIssueTotal.toLocaleString()},
+                        expense {importPreview.workbookTotals.monthlyExpenseTotal.toLocaleString()}
+                      </p>
+                    )}
+                    {importPreview.warnings.length > 0 && (
+                      <ul className="warnings">
+                        {importPreview.warnings.map((warning, index) => (
+                          <li key={`${warning.message}-${index}`}>
+                            {warning.level}: {warning.sheetName ? `${warning.sheetName} - ` : ""}
+                            {warning.message}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <HomeDashboard month={importPreview.computed} />
+                    <button className="btn-primary w-full sm:w-auto" disabled={loading || !user} onClick={commitImport}>
+                      {loading && <LoadingIcon label="Saving import" />}
+                      Save {importPreview.importType === "expense" ? "Expense Only" : "Full Workbook"} Import to Firestore
+                    </button>
+                  </>
+                )}
+              </section>
+            ) : (
+              <section className="panel">
+                <h2>Excel Import</h2>
+                <p className="warning mt-4">Only owner can import Excel workbooks.</p>
+              </section>
+            )
           )}
 
         </div>
       </div>
+      <nav className="mobile-bottom-nav lg:hidden" aria-label="Primary mobile navigation">
+        {mobilePrimaryNav.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              className={view === item.id ? "mobile-bottom-item mobile-bottom-item-active" : "mobile-bottom-item"}
+              onClick={() => navigateTo(item.id)}
+            >
+              <Icon />
+              <span>{item.id === "expense" ? "Entry" : item.id === "jazz-load" ? "Jazz" : item.label.replace("Previous ", "")}</span>
+            </button>
+          );
+        })}
+        <button className={mobileMenuOpen ? "mobile-bottom-item mobile-bottom-item-active" : "mobile-bottom-item"} onClick={() => setMobileMenuOpen((open) => !open)}>
+          <Menu />
+          <span>More</span>
+        </button>
+      </nav>
     </main>
   );
 }
