@@ -17,14 +17,12 @@ import {
   calculateCurrentStock
 } from "../services/stockCalculations";
 import {
-  closeStockDay,
   ensureStockMonth,
   ensureStockOpeningSeed,
   listStockBackup,
-  reopenStockDayFor15Minutes,
   roleCanStock,
   saveStockDay,
-  setStockMonthStatus,
+  updateStockDaysStatusBatch,
   subscribeStockAccounts,
   subscribeStockDays,
   subscribeStockMonths,
@@ -103,7 +101,7 @@ function isReopenActive(day: StockDayRecord | undefined, now = new Date()) {
 function canEditStockDay(role: UserRole | null, month: StockMonth | undefined, monthId: string, day: StockDayRecord | undefined, dayNo: number, now = new Date()) {
   if (!roleCanStock(role, "daily")) return false;
   if (month?.status === "closed") return false;
-  if (role === "admin") return isLiveDay(monthId, dayNo, now) && day?.status !== "closed";
+  if (role === "admin") return isLiveDay(monthId, dayNo, now) && (day?.status !== "closed" || isReopenActive(day, now));
   if (isLiveDay(monthId, dayNo, now)) return day?.status !== "closed";
   return isReopenActive(day, now);
 }
@@ -592,6 +590,7 @@ export function StockLedgerModule({
   const canManageSettings = roleCanStock(role, "settings");
   const canEdit = canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
   const canMonthControls = roleCanStock(role, "monthControls");
+  const canReopenSelectedDay = role === "owner" || (role === "admin" && isLiveDay(monthId, selectedDay, now));
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -798,23 +797,47 @@ export function StockLedgerModule({
   async function closeSelectedDay() {
     if (!selectedDayRecord) return;
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-    const nextDay = { ...selectedDayRecord, status: "closed" as const, closedAt: Date.now(), closedBy: user.uid };
+    const timestamp = Date.now();
+    const nextDay = {
+      ...selectedDayRecord,
+      status: "closed" as const,
+      closedAt: selectedDayRecord.closedAt ?? timestamp,
+      closedBy: selectedDayRecord.closedBy ?? user.uid,
+      reopenedAt: undefined,
+      reopenedBy: undefined,
+      reopenedUntilAt: undefined,
+      updatedBy: user.uid,
+      updatedAt: timestamp
+    };
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(closeStockDay(workingMonth, nextDay, days, user, role), "Could not queue stock day close.");
+    onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "close-days"), "Could not queue stock day close.");
     onStatus(`Closed stock day ${selectedDay}.`);
   }
 
   async function reopenSelectedDay() {
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
+    const timestamp = Date.now();
+    const reopenUntilAt = timestamp + 15 * 60 * 1000;
     const day = selectedDayRecord ?? buildStockDayRecord({
       month: workingMonth,
       dayNo: selectedDay,
       date: dayDate(monthId, selectedDay),
       entries: [],
-      createdBy: user.uid
+      createdBy: user.uid,
+      timestamp
     });
-    onQueueWrite(reopenStockDayFor15Minutes(workingMonth, day, days, user, role), "Could not queue stock day reopen.");
-    onStatus(`Reopened stock day ${selectedDay} for 15 minutes.`);
+    const nextDay = {
+      ...day,
+      status: "closed" as const,
+      reopenedAt: timestamp,
+      reopenedBy: user.uid,
+      reopenedUntilAt: reopenUntilAt,
+      updatedBy: user.uid,
+      updatedAt: timestamp
+    };
+    setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+    onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "reopen-days", reopenUntilAt), "Could not queue stock day reopen.");
+    onStatus(`Reopened stock day ${selectedDay} until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
   }
 
   async function closeAllStock() {
@@ -851,12 +874,12 @@ export function StockLedgerModule({
       (updatedDays, closedDay) => [...updatedDays.filter((day) => day.dayNo !== closedDay.dayNo), closedDay].sort((a, b) => a.dayNo - b.dayNo),
       days
     );
-    const closePromise = (async () => {
-      for (const closedDay of nextClosedDays) {
-        await closeStockDay(workingMonth, closedDay, nextDays, user, role);
-      }
-    })();
     setDays(nextDays);
+    const closePromise = updateStockDaysStatusBatch(workingMonth, nextClosedDays, days, user, role, "close-days")
+      .then((result) => {
+        setDays(result.days);
+        setSummary(result.summary);
+      });
     onQueueWrite(closePromise, "Could not close all previous stock ledger days.");
     onStatus(`Closed ${nextClosedDays.length} Stock Ledger day${nextClosedDays.length === 1 ? "" : "s"} except today.`);
   }
@@ -889,15 +912,13 @@ export function StockLedgerModule({
       (updatedDays, reopenedDay) => [...updatedDays.filter((day) => day.dayNo !== reopenedDay.dayNo), reopenedDay].sort((a, b) => a.dayNo - b.dayNo),
       days
     );
-    const reopenPromise = (async () => {
-      const openMonth = workingMonth.status === "closed"
-        ? await setStockMonthStatus(workingMonth, "open", user, role)
-        : workingMonth;
-      for (const reopenedDay of nextReopenedDays) {
-        await reopenStockDayFor15Minutes(openMonth, reopenedDay, nextDays, user, role, reopenUntilAt);
-      }
-    })();
     setDays(nextDays);
+    const reopenPromise = updateStockDaysStatusBatch(workingMonth, nextReopenedDays, days, user, role, "reopen-days", reopenUntilAt)
+      .then((result) => {
+        setMonths((current) => [result.month, ...current.filter((item) => item.id !== result.month.id)].sort((a, b) => b.id.localeCompare(a.id)));
+        setDays(result.days);
+        setSummary(result.summary);
+      });
     onQueueWrite(reopenPromise, "Could not reopen all stock ledger days.");
     onStatus(`Reopened ${nextReopenedDays.length} Stock Ledger days until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
   }
@@ -1062,7 +1083,7 @@ export function StockLedgerModule({
           </button>
           <button
             className="btn-secondary w-full sm:w-auto"
-            disabled={isLiveDay(monthId, selectedDay, now) || monthBootstrapPending}
+            disabled={!canReopenSelectedDay || month?.status === "closed" || monthBootstrapPending}
             onClick={() => void reopenSelectedDay()}
           >
             Reopen Selected Day

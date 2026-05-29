@@ -111,6 +111,12 @@ service cloud.firestore {
         (!("reopenedUntilAt" in request.resource.data) || request.resource.data.reopenedUntilAt == null);
     }
 
+    function isLiveStockDayData(data) {
+      return data.entryYear == request.time.year() &&
+        data.entryMonth == request.time.month() &&
+        data.entryDay == request.time.day();
+    }
+
     function canCloseEditableDay(monthId, dayId) {
       return get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
         (isOwner() || isAdmin()) &&
@@ -320,6 +326,7 @@ service cloud.firestore {
           get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
         allow update: if (isOwner() || (isAdmin() && (
             resource.data.status == "open" ||
+            isLiveStockDayData(request.resource.data) ||
             ("reopenedUntilAt" in resource.data && resource.data.reopenedUntilAt != null && resource.data.reopenedUntilAt > request.time.toMillis())
           ))) &&
           get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";

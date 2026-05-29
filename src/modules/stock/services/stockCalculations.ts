@@ -299,10 +299,14 @@ export function buildStockDayRecord(input: {
   timestamp?: number;
 }): StockDayRecord {
   const timestamp = input.timestamp ?? Date.now();
+  const [yearText, monthText] = input.month.id.split("-");
   return {
     id: String(input.dayNo),
     monthId: input.month.id,
     dayNo: input.dayNo,
+    entryYear: Number(yearText) || undefined,
+    entryMonth: Number(monthText) || undefined,
+    entryDay: input.dayNo,
     date: input.date,
     status: input.previous?.status ?? "open",
     entries: [...input.entries].sort((a, b) => a.accountName.localeCompare(b.accountName)),

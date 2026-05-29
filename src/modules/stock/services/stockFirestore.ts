@@ -105,6 +105,15 @@ function dayRef(monthId: string, dayNo: number) {
   return doc(monthRef(monthId), "days", String(dayNo));
 }
 
+function stockDayDateFields(monthId: string, dayNo: number) {
+  const [yearText, monthText] = monthId.split("-");
+  return {
+    entryYear: Number(yearText) || undefined,
+    entryMonth: Number(monthText) || undefined,
+    entryDay: dayNo
+  };
+}
+
 function openingRef() {
   return doc(requireDb(), "stockSettings", "opening", "items", "main");
 }
@@ -153,6 +162,9 @@ function mapDayData(data: Partial<StockDayRecord>, id: string): StockDayRecord {
     monthId: data.monthId ?? "",
     dayNo: Number(data.dayNo ?? id),
     date: data.date ?? "",
+    entryYear: data.entryYear,
+    entryMonth: data.entryMonth,
+    entryDay: data.entryDay,
     status: data.status ?? "open",
     entries,
     stockOut: entries,
@@ -482,6 +494,7 @@ export async function saveStockDay(
   };
   const nextDay: StockDayRecord = {
     ...day,
+    ...stockDayDateFields(month.id, day.dayNo),
     summary: day.summary,
     updatedBy: currentActor.userId,
     updatedAt: timestamp
@@ -594,6 +607,88 @@ export function reopenStockDayFor15Minutes(
     role,
     "reopen-day"
   );
+}
+
+export async function updateStockDaysStatusBatch(
+  month: StockMonth,
+  nextDays: StockDayRecord[],
+  allDays: StockDayRecord[],
+  user: User | null,
+  role: UserRole | null,
+  action: "close-days" | "reopen-days",
+  reopenUntilAt?: number
+) {
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  const mergedDays = nextDays.reduce(
+    (days, nextDay) => [...days.filter((day) => day.dayNo !== nextDay.dayNo), nextDay].sort((a, b) => a.dayNo - b.dayNo),
+    allDays
+  );
+  const summary = calculateMonthlySummary(month.id, mergedDays);
+  const nextMonth: StockMonth = {
+    ...month,
+    status: action === "reopen-days" ? "open" : month.status,
+    totalQty: summary.totalQty,
+    totalAmount: summary.totalAmount,
+    totalPaymentReceived: summary.totalPaymentReceived,
+    totalDueBalance: summary.totalDueBalance,
+    updatedBy: currentActor.userId,
+    updatedAt: timestamp
+  };
+  const batch = writeBatch(requireDb());
+  const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+
+  batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
+  nextDays.forEach((day) => {
+    const nextDay = {
+      ...day,
+      ...stockDayDateFields(month.id, day.dayNo),
+      updatedBy: currentActor.userId,
+      updatedAt: timestamp
+    };
+    batch.set(dayRef(month.id, day.dayNo), {
+      ...cleanForFirestore({ ...nextDay, stockOut: nextDay.entries }),
+      closedAt: nextDay.closedAt ?? deleteField(),
+      closedBy: nextDay.closedBy ?? deleteField(),
+      reopenedAt: nextDay.reopenedAt ?? deleteField(),
+      reopenedBy: nextDay.reopenedBy ?? deleteField(),
+      reopenedUntilAt: nextDay.reopenedUntilAt ?? deleteField()
+    }, { merge: true });
+  });
+  batch.set(monthlySummaryRef(month.id), cleanForFirestore(summary), { merge: true });
+  batch.set(auditRef(month.id, auditId), cleanForFirestore({
+    id: auditId,
+    action,
+    ...currentActor,
+    targetType: "month",
+    targetId: month.id,
+    after: {
+      dayCount: nextDays.length,
+      reopenUntilAt
+    },
+    createdAt: timestamp
+  } satisfies StockAuditEvent));
+  stageUnifiedAudit(
+    batch,
+    {
+      id: auditId,
+      createdAt: timestamp,
+      module: "stock",
+      action,
+      summary: action === "reopen-days"
+        ? `Reopened ${nextDays.length} stock days`
+        : `Closed ${nextDays.length} stock days`,
+      monthId: month.id,
+      actorUid: currentActor.userId,
+      actorEmail: currentActor.userEmail,
+      targetType: "month",
+      targetId: month.id,
+      sourcePath: `stockMonths/${month.id}/audit/${auditId}`
+    },
+    currentActor.userRole ?? "viewer"
+  );
+  await batch.commit();
+  return { month: nextMonth, days: mergedDays, summary };
 }
 
 export function closeStockDay(

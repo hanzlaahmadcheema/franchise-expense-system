@@ -105,6 +105,9 @@ export type StockDayRecord = {
   date: string;
   monthId: string;
   dayNo: number;
+  entryYear?: number;
+  entryMonth?: number;
+  entryDay?: number;
   status: StockDayStatus;
   entries: StockDailyAccountEntry[];
   stockOut?: StockDailyAccountEntry[];
