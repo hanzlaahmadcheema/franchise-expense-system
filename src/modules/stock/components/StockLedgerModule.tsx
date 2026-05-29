@@ -819,8 +819,46 @@ export function StockLedgerModule({
 
   async function closeAllStock() {
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-    onQueueWrite(setStockMonthStatus(workingMonth, "closed", user, role), "Could not close all stock ledger sections.");
-    onStatus("Closed all Stock Ledger sections for this month.");
+    const timestamp = Date.now();
+    const live = currentDateState(now);
+    const targetDayNos = availableDays(monthId, now).filter((dayNo) => !(monthId === live.monthId && dayNo === live.dayNo));
+    if (targetDayNos.length === 0) {
+      onStatus("No previous Stock Ledger days are available to close.");
+      return;
+    }
+    const nextClosedDays = targetDayNos.map((dayNo) => {
+      const existing = days.find((day) => day.dayNo === dayNo) ?? buildStockDayRecord({
+        month: workingMonth,
+        dayNo,
+        date: dayDate(monthId, dayNo),
+        entries: [],
+        createdBy: user.uid,
+        timestamp
+      });
+      return {
+        ...existing,
+        status: "closed" as const,
+        closedAt: existing.closedAt ?? timestamp,
+        closedBy: existing.closedBy ?? user.uid,
+        reopenedAt: undefined,
+        reopenedBy: undefined,
+        reopenedUntilAt: undefined,
+        updatedBy: user.uid,
+        updatedAt: timestamp
+      };
+    });
+    const nextDays = nextClosedDays.reduce(
+      (updatedDays, closedDay) => [...updatedDays.filter((day) => day.dayNo !== closedDay.dayNo), closedDay].sort((a, b) => a.dayNo - b.dayNo),
+      days
+    );
+    const closePromise = (async () => {
+      for (const closedDay of nextClosedDays) {
+        await closeStockDay(workingMonth, closedDay, nextDays, user, role);
+      }
+    })();
+    setDays(nextDays);
+    onQueueWrite(closePromise, "Could not close all previous stock ledger days.");
+    onStatus(`Closed ${nextClosedDays.length} Stock Ledger day${nextClosedDays.length === 1 ? "" : "s"} except today.`);
   }
 
   async function reopenAllStock() {
@@ -1041,7 +1079,7 @@ export function StockLedgerModule({
             disabled={!canMonthControls || month?.status === "closed" || monthBootstrapPending}
             onClick={() => void closeAllStock()}
           >
-            Close All
+            Close All Except Today
           </button>
         </div>
       </section>
