@@ -825,8 +825,43 @@ export function StockLedgerModule({
 
   async function reopenAllStock() {
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-    onQueueWrite(setStockMonthStatus(workingMonth, "open", user, role), "Could not reopen all stock ledger sections.");
-    onStatus("Reopened all Stock Ledger sections for this month.");
+    const timestamp = Date.now();
+    const reopenUntilAt = timestamp + 15 * 60 * 1000;
+    const targetDayNos = availableDays(monthId, now);
+    const nextReopenedDays = targetDayNos.map((dayNo) => {
+      const existing = days.find((day) => day.dayNo === dayNo) ?? buildStockDayRecord({
+        month: workingMonth,
+        dayNo,
+        date: dayDate(monthId, dayNo),
+        entries: [],
+        createdBy: user.uid,
+        timestamp
+      });
+      return {
+        ...existing,
+        status: "closed" as const,
+        reopenedAt: timestamp,
+        reopenedBy: user.uid,
+        reopenedUntilAt: reopenUntilAt,
+        updatedBy: user.uid,
+        updatedAt: timestamp
+      };
+    });
+    const nextDays = nextReopenedDays.reduce(
+      (updatedDays, reopenedDay) => [...updatedDays.filter((day) => day.dayNo !== reopenedDay.dayNo), reopenedDay].sort((a, b) => a.dayNo - b.dayNo),
+      days
+    );
+    const reopenPromise = (async () => {
+      const openMonth = workingMonth.status === "closed"
+        ? await setStockMonthStatus(workingMonth, "open", user, role)
+        : workingMonth;
+      for (const reopenedDay of nextReopenedDays) {
+        await reopenStockDayFor15Minutes(openMonth, reopenedDay, nextDays, user, role, reopenUntilAt);
+      }
+    })();
+    setDays(nextDays);
+    onQueueWrite(reopenPromise, "Could not reopen all stock ledger days.");
+    onStatus(`Reopened ${nextReopenedDays.length} Stock Ledger days until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
   }
 
   async function masterRefreshStockCalculations() {
@@ -996,7 +1031,7 @@ export function StockLedgerModule({
           </button>
           <button
             className="btn-secondary w-full sm:w-auto"
-            disabled={!canMonthControls || month?.status !== "closed" || monthBootstrapPending}
+            disabled={!canMonthControls || monthBootstrapPending || availableDays(monthId, now).length === 0}
             onClick={() => void reopenAllStock()}
           >
             Reopen All
