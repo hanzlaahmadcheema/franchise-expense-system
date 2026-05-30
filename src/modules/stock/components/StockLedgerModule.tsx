@@ -629,6 +629,19 @@ export function StockLedgerModule({
         }];
       });
   }, [days, monthId, selectedAccountId]);
+  const selectedAccountDayTotals = useMemo(() => {
+    return selectedAccountDayRows.reduce((totals, row) => ({
+      totalQty: roundMoney(totals.totalQty + row.totalQty),
+      totalAmount: roundMoney(totals.totalAmount + row.totalAmount),
+      totalPaymentReceived: roundMoney(totals.totalPaymentReceived + row.totalPaymentReceived),
+      totalDueBalance: roundMoney(totals.totalDueBalance + row.totalDueBalance)
+    }), {
+      totalQty: 0,
+      totalAmount: 0,
+      totalPaymentReceived: 0,
+      totalDueBalance: 0
+    });
+  }, [selectedAccountDayRows]);
 
   const jazzPayableLedger = useMemo(() => {
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
@@ -1757,6 +1770,17 @@ export function StockLedgerModule({
                       </tr>
                     );
                   })}
+                  {selectedAccountDayRows.length > 0 && (
+                    <tr className="border-t border-slate-700/80 bg-slate-950/50 font-semibold">
+                      <td className="text-slate-100">Total</td>
+                      <td className="text-slate-100">{formatMoney(selectedAccountDayTotals.totalQty)}</td>
+                      <td className="font-mono text-slate-100">{formatMoney(selectedAccountDayTotals.totalAmount)}</td>
+                      <td className="text-slate-500">—</td>
+                      <td className="text-emerald-400">{formatMoney(selectedAccountDayTotals.totalPaymentReceived)}</td>
+                      <td className="font-bold text-slate-100">{formatMoney(selectedAccountDayTotals.totalDueBalance)}</td>
+                      <td className="text-slate-400" colSpan={2}>—</td>
+                    </tr>
+                  )}
                   {metrics.dayRows.length === 0 && (
                     <tr>
                       <td colSpan={8} className="text-center text-slate-500 py-4 italic">
