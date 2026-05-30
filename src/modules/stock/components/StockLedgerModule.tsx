@@ -22,6 +22,7 @@ import {
   ensureStockOpeningSeed,
   listStockBackup,
   roleCanStock,
+  recalculateStockMonth,
   saveStockDay,
   updateStockDaysStatusBatch,
   subscribeStockAccounts,
@@ -986,8 +987,8 @@ export function StockLedgerModule({
   }
 
   async function masterRefreshStockCalculations() {
-    if (!roleCanStock(role, "daily")) {
-      onStatus("Only owner or admin can refresh Stock Ledger calculations.");
+    if (!canMonthControls) {
+      onStatus("Only the owner can run Stock Ledger master calculations.");
       return;
     }
     if (days.length === 0) {
@@ -995,8 +996,7 @@ export function StockLedgerModule({
       return;
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-    const refreshDay = selectedDayRecord ?? days[0];
-    onQueueWrite(saveStockDay(workingMonth, refreshDay, days, user, role), "Could not refresh Stock Ledger calculations.");
+    onQueueWrite(recalculateStockMonth(workingMonth, days, user, role), "Could not refresh Stock Ledger calculations.");
     onStatus("Stock Ledger master refresh queued.");
   }
 
@@ -1151,7 +1151,7 @@ export function StockLedgerModule({
           </button>
           <button
             className="btn-secondary w-full sm:w-auto"
-            disabled={days.length === 0 || month?.status === "closed" || monthBootstrapPending}
+            disabled={!canMonthControls || days.length === 0 || month?.status === "closed" || monthBootstrapPending}
             onClick={() => void masterRefreshStockCalculations()}
           >
             Master Refresh Calculations

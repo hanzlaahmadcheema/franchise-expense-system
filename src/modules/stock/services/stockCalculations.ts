@@ -98,8 +98,8 @@ export function validateStockDraft(
   for (const [productId, quantity] of Object.entries(draft.productQuantities)) {
     if (quantity < 0) errors.push(`Quantity cannot be negative for product ${productId}.`);
   }
-  for (const [productId, amount] of Object.entries(draft.productPayments)) {
-    if (amount < 0) errors.push(`Payment cannot be negative for product ${productId}.`);
+  if (draft.paymentReceived != null && draft.paymentReceived < 0) {
+    errors.push("Payment received cannot be negative.");
   }
 
   return { valid: errors.length === 0, errors };
@@ -126,30 +126,30 @@ export function buildStockEntry(
     const quantity = roundMoney(input.draft.productQuantities[product.id] ?? 0);
     const rateSnapshot = roundMoney(product.rate);
     const amount = calculateProductAmount(quantity, rateSnapshot);
-    const paymentTrackingEnabled = productPaymentTrackingEnabled(product);
-    const paymentReceived = paymentTrackingEnabled
-      ? roundMoney(input.draft.productPayments[product.id] ?? 0)
-      : 0;
     return {
       productId: product.id,
       productName: product.name,
       rate: rateSnapshot,
       quantity,
       amount,
-      paymentTrackingEnabled,
-      paymentReceived,
-      dueBalance: paymentTrackingEnabled ? calculateProductDueBalance(amount, paymentReceived) : 0,
+      paymentTrackingEnabled: false,
+      paymentReceived: 0,
+      dueBalance: 0,
       displayOrder: product.displayOrder
     };
   });
+
   const totals = calculateStockEntryTotals(products);
-  const totalPaymentReceived = calculateEntryPaymentReceived(products, input.previous?.payments ?? []);
+
+  const totalPaymentReceived = input.draft.paymentReceived != null
+    ? roundMoney(input.draft.paymentReceived)
+    : input.draft.productPayments
+      ? sum(Object.values(input.draft.productPayments))
+      : calculateEntryPaymentReceived(products, input.previous?.payments ?? []);
+
   const carryForwardBalance = roundMoney(input.carryForwardBalance);
-  const dueBalance = calculateDueBalance({
-    carryForwardBalance,
-    totalAmount: totals.totalAmount,
-    totalPaymentReceived
-  });
+
+  const dueBalance = roundMoney(carryForwardBalance + totals.totalAmount - totalPaymentReceived);
 
   return {
     id: input.id,
@@ -181,7 +181,6 @@ export function calculateMonthlySummary(monthId: string, days: StockDayRecord[])
   const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
   const productMap = new Map<string, StockMonthlySummary["productTotals"][number]>();
   const accountMap = new Map<string, StockMonthlySummary["accountTotals"][number]>();
-  const paymentMap = new Map<string, StockMonthlySummary["paymentTotals"][number]>();
 
   for (const day of sortedDays) {
     for (const entry of day.entries) {
@@ -214,44 +213,30 @@ export function calculateMonthlySummary(monthId: string, days: StockDayRecord[])
         current.quantity = roundMoney(current.quantity + product.quantity);
         current.amount = roundMoney(current.amount + product.amount);
         productMap.set(productKey, current);
-
-        if (product.paymentTrackingEnabled) {
-          const paymentKey = product.productId || normalizeKey(product.productName);
-          const paymentRow = paymentMap.get(paymentKey) ?? {
-            productId: product.productId,
-            productName: product.productName,
-            amount: 0
-          };
-          paymentRow.amount = roundMoney(paymentRow.amount + (product.paymentReceived ?? 0));
-          paymentMap.set(paymentKey, paymentRow);
-        }
-      }
-
-      if (paymentMap.size === 0 && entry.payments.length > 0) {
-        for (const payment of entry.payments) {
-          const paymentKey = payment.categoryId || normalizeKey(payment.categoryName);
-          const current = paymentMap.get(paymentKey) ?? {
-            productId: payment.categoryId,
-            productName: payment.categoryName,
-            amount: 0
-          };
-          current.amount = roundMoney(current.amount + payment.amount);
-          paymentMap.set(paymentKey, current);
-        }
       }
     }
   }
 
+  const totalRecoveryPayments = sum(sortedDays.map((day) => day.summary.totalPaymentReceived));
+  const paymentTotals = [
+    {
+      productId: "account-recovery",
+      productName: "Account Recovery Payments",
+      amount: totalRecoveryPayments
+    }
+  ];
+
   const enteredDays = new Set(sortedDays.map((day) => day.dayNo));
+
   return {
     monthId,
     totalQty: sum(sortedDays.map((day) => day.summary.totalQty)),
     totalAmount: sum(sortedDays.map((day) => day.summary.totalAmount)),
-    totalPaymentReceived: sum(sortedDays.map((day) => day.summary.totalPaymentReceived)),
+    totalPaymentReceived: totalRecoveryPayments,
     totalDueBalance: sum([...accountMap.values()].map((account) => account.dueBalance)),
     productTotals: [...productMap.values()].sort((a, b) => a.productName.localeCompare(b.productName)),
     accountTotals: [...accountMap.values()].sort((a, b) => b.dueBalance - a.dueBalance),
-    paymentTotals: [...paymentMap.values()].sort((a, b) => a.productName.localeCompare(b.productName)),
+    paymentTotals,
     dayRows: sortedDays.map((day) => ({
       dayNo: day.dayNo,
       date: day.date,
@@ -265,6 +250,53 @@ export function calculateMonthlySummary(monthId: string, days: StockDayRecord[])
     missingDays: Array.from({ length: daysInMonth(monthId) }, (_, index) => index + 1).filter((dayNo) => !enteredDays.has(dayNo)),
     updatedAt: Date.now()
   };
+}
+
+function buildStockCarryForwardSeed(
+  accounts: StockAccountProfile[],
+  previousSummary?: StockMonthlySummary | null
+) {
+  const seed = new Map<string, number>();
+  for (const account of accounts) {
+    seed.set(account.id, roundMoney(account.openingBalance ?? 0));
+  }
+  for (const account of previousSummary?.accountTotals ?? []) {
+    seed.set(account.accountId, roundMoney(account.dueBalance));
+  }
+  return seed;
+}
+
+export function recalculateStockMonthEntries(
+  days: StockDayRecord[],
+  accounts: StockAccountProfile[],
+  previousSummary?: StockMonthlySummary | null
+) {
+  const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
+  const seedByAccount = buildStockCarryForwardSeed(accounts, previousSummary);
+  const runningByAccount = new Map(seedByAccount);
+
+  return sortedDays.map((day) => {
+    const nextEntries = [...day.entries]
+      .sort((a, b) => a.accountName.localeCompare(b.accountName))
+      .map((entry) => {
+        const carryForwardBalance = roundMoney(runningByAccount.get(entry.accountId) ?? seedByAccount.get(entry.accountId) ?? 0);
+        const dueBalance = roundMoney(carryForwardBalance + entry.totalAmount - entry.totalPaymentReceived);
+        const nextEntry = {
+          ...entry,
+          carryForwardBalance,
+          dueBalance
+        };
+        runningByAccount.set(entry.accountId, dueBalance);
+        return nextEntry;
+      });
+
+    return {
+      ...day,
+      entries: nextEntries,
+      stockOut: nextEntries,
+      summary: calculateDailySummary(nextEntries)
+    };
+  });
 }
 
 export function productsSorted(products: StockProduct[]) {

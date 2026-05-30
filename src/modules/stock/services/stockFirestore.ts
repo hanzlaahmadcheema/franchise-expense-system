@@ -19,7 +19,8 @@ import type { UserRole } from "../../../types/ledger";
 import {
   calculateCurrentStock,
   calculateJazzCompanyBalance,
-  calculateMonthlySummary
+  calculateMonthlySummary,
+  recalculateStockMonthEntries
 } from "./stockCalculations";
 import { normalizeKey, previousMonthId } from "../utils/stockFormatters";
 import type {
@@ -92,6 +93,7 @@ function productCollection() {
 function accountCollection() {
   return collection(requireDb(), "stockSettings", "accounts", "items");
 }
+
 
 function settingsAuditCollection() {
   return collection(requireDb(), "stockSettings", "audit", "items");
@@ -265,6 +267,7 @@ export function subscribeStockAccounts(
     onError
   );
 }
+
 
 export function subscribeStockOpeningBalances(
   onNext: (balances: StockOpeningBalances | null, metadata: FirestoreSnapshotMeta) => void,
@@ -582,6 +585,115 @@ export async function saveStockDay(
   );
   await batch.commit();
   return { month: nextMonth, day: nextDay, summary };
+}
+
+export async function recalculateStockMonth(
+  month: StockMonth,
+  days: StockDayRecord[],
+  user: User | null,
+  role: UserRole | null
+) {
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  const openingSnap = await getDoc(openingRef());
+  const openingBalances = openingSnap.exists()
+    ? (openingSnap.data() as StockOpeningBalances)
+    : { openingStock: {}, jazzOpeningPayable: 0 };
+  const previousSummarySnap = await getDoc(monthlySummaryRef(previousMonthId(month.id)));
+  const previousSummary = previousSummarySnap.exists()
+    ? (previousSummarySnap.data() as StockMonthlySummary)
+    : null;
+  const monthOpeningStock = previousSummary?.closingStock ?? openingBalances.openingStock;
+  const monthOpeningJazzPayable = previousSummary?.closingJazzPayable ?? openingBalances.jazzOpeningPayable;
+  const [productsSnap, accountsSnap] = await Promise.all([
+    getDocs(query(productCollection(), orderBy("displayOrder", "asc"))),
+    getDocs(query(accountCollection(), orderBy("displayOrder", "asc")))
+  ]);
+  const products = productsSnap.docs.map((item) => item.data() as StockProduct);
+  const accounts = accountsSnap.docs.map((item) => item.data() as StockAccountProfile);
+  const recalculatedDays = recalculateStockMonthEntries(days, accounts, previousSummary);
+  const baseSummary = calculateMonthlySummary(month.id, recalculatedDays);
+  const allStockInRecords = recalculatedDays.flatMap((item) => item.stockIn ?? []);
+  const productBalances = calculateCurrentStock(products, monthOpeningStock, allStockInRecords, recalculatedDays);
+  const jazzCompanyBalance = calculateJazzCompanyBalance(monthOpeningJazzPayable, allStockInRecords);
+  const closingStock = Object.fromEntries(productBalances.map((balance) => [balance.productId, balance.currentStock]));
+  const summary: StockMonthlySummary = {
+    ...baseSummary,
+    openingStock: monthOpeningStock,
+    closingStock,
+    openingJazzPayable: monthOpeningJazzPayable,
+    closingJazzPayable: jazzCompanyBalance.currentPayable
+  };
+  const nextMonth: StockMonth = {
+    ...month,
+    totalQty: summary.totalQty,
+    totalAmount: summary.totalAmount,
+    totalPaymentReceived: summary.totalPaymentReceived,
+    totalDueBalance: summary.totalDueBalance,
+    updatedBy: currentActor.userId,
+    updatedAt: timestamp
+  };
+  const batch = writeBatch(requireDb());
+  const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+  batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
+  recalculatedDays.forEach((day) => {
+    batch.set(dayRef(month.id, day.dayNo), {
+      ...cleanForFirestore({
+        ...day,
+        ...stockDayDateFields(month.id, day.dayNo),
+        stockOut: day.entries,
+        updatedBy: currentActor.userId,
+        updatedAt: timestamp
+      }),
+      closedAt: day.closedAt ?? deleteField(),
+      closedBy: day.closedBy ?? deleteField(),
+      reopenedAt: day.reopenedAt ?? deleteField(),
+      reopenedBy: day.reopenedBy ?? deleteField(),
+      reopenedUntilAt: day.reopenedUntilAt ?? deleteField()
+    }, { merge: true });
+  });
+  batch.set(monthlySummaryRef(month.id), cleanForFirestore(summary), { merge: true });
+  batch.set(auditRef(month.id, auditId), cleanForFirestore({
+    id: auditId,
+    action: "recalculate-month",
+    ...currentActor,
+    targetType: "month",
+    targetId: month.id,
+    after: {
+      dayCount: recalculatedDays.length
+    },
+    createdAt: timestamp
+  } satisfies StockAuditEvent));
+  stageUnifiedAudit(
+    batch,
+    {
+      id: auditId,
+      createdAt: timestamp,
+      module: "stock",
+      action: "recalculate-month",
+      summary: `Recalculated stock month ${month.id}`,
+      monthId: month.id,
+      actorUid: currentActor.userId,
+      actorEmail: currentActor.userEmail,
+      targetType: "month",
+      targetId: month.id,
+      sourcePath: `stockMonths/${month.id}/audit/${auditId}`
+    },
+    currentActor.userRole ?? "viewer"
+  );
+  productBalances.forEach((balance) => {
+    batch.set(productBalanceRef(balance.productId), cleanForFirestore(balance satisfies StockProductBalance), { merge: true });
+  });
+  summary.accountTotals.forEach((account) => {
+    batch.set(accountBalanceRef(account.accountId), cleanForFirestore({ ...account, updatedAt: timestamp }), { merge: true });
+  });
+  batch.set(
+    jazzCompanyBalanceRef(),
+    cleanForFirestore({ ...jazzCompanyBalance, updatedAt: timestamp } satisfies StockJazzCompanyBalance),
+    { merge: true }
+  );
+  await batch.commit();
+  return { month: nextMonth, days: recalculatedDays, summary };
 }
 
 export function reopenStockDayFor15Minutes(

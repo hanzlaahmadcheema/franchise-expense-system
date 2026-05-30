@@ -6,7 +6,8 @@ import {
   calculateProductDueBalance,
   calculateJazzPayableLedger,
   calculateJazzCompanyBalance,
-  calculateCurrentStock
+  calculateCurrentStock,
+  recalculateStockMonthEntries
 } from "./stockCalculations";
 import type { StockAccountProfile, StockDayRecord, StockProduct } from "../types/stock.types";
 
@@ -51,7 +52,7 @@ describe("stock calculations", () => {
       draft: {
         accountId: account.id,
         productQuantities: { sim: 3 },
-        productPayments: { sim: 200 }
+        paymentReceived: 200
       },
       products: [product],
       carryForwardBalance: 50,
@@ -64,8 +65,8 @@ describe("stock calculations", () => {
       rate: 120,
       quantity: 3,
       amount: 360,
-      paymentReceived: 200,
-      dueBalance: 160
+      paymentReceived: 0,
+      dueBalance: 0
     });
     expect(entry.totalAmount).toBe(360);
     expect(entry.totalPaymentReceived).toBe(200);
@@ -82,7 +83,7 @@ describe("stock calculations", () => {
       draft: {
         accountId: account.id,
         productQuantities: { sim: 2 },
-        productPayments: { sim: 0 }
+        paymentReceived: 0
       },
       products: [{ ...product, rate: 120 }],
       carryForwardBalance: 0,
@@ -99,7 +100,7 @@ describe("stock calculations", () => {
       draft: {
         accountId: account.id,
         productQuantities: { sim: 2 },
-        productPayments: { sim: 0 }
+        paymentReceived: 0
       },
       products: [{ ...product, rate: 999 }],
       carryForwardBalance: 0,
@@ -122,7 +123,7 @@ describe("stock calculations", () => {
       draft: {
         accountId: account.id,
         productQuantities: { device: 1, sim: 1 },
-        productPayments: { device: 50, sim: 100 }
+        paymentReceived: 100
       },
       products: [product, productNoPayment],
       carryForwardBalance: 0,
@@ -148,7 +149,7 @@ describe("stock calculations", () => {
       draft: {
         accountId: account.id,
         productQuantities: { sim: 2 },
-        productPayments: { sim: 100 }
+        paymentReceived: 100
       },
       products: [product],
       carryForwardBalance: 0,
@@ -177,9 +178,93 @@ describe("stock calculations", () => {
     const summary = calculateMonthlySummary("2026-05", [day]);
     expect(summary.totalQty).toBe(2);
     expect(summary.productTotals[0]).toMatchObject({ productName: "SIM", quantity: 2, amount: 240 });
-    expect(summary.paymentTotals[0]).toMatchObject({ productName: "SIM", amount: 100 });
+    expect(summary.paymentTotals[0]).toMatchObject({ productName: "Account Recovery Payments", amount: 100 });
     expect(summary.accountTotals[0]).toMatchObject({ accountName: "CCR A", dueBalance: 140 });
     expect(summary.missingDays).toContain(2);
+  });
+
+  it("rebuilds the next day carry-forward from the previous day closing balance", () => {
+    const carryAccount: StockAccountProfile = {
+      ...account,
+      openingBalance: 25
+    };
+    const day1Entry = buildStockEntry({
+      id: carryAccount.id,
+      date: "May 1, 2026",
+      monthId: "2026-05",
+      dayNo: 1,
+      account: carryAccount,
+      draft: {
+        accountId: carryAccount.id,
+        productQuantities: { sim: 2 },
+        paymentReceived: 0
+      },
+      products: [product],
+      carryForwardBalance: 25,
+      createdBy: "u1",
+      timestamp: 10
+    });
+    const day2Entry = buildStockEntry({
+      id: carryAccount.id,
+      date: "May 2, 2026",
+      monthId: "2026-05",
+      dayNo: 2,
+      account: carryAccount,
+      draft: {
+        accountId: carryAccount.id,
+        productQuantities: { sim: 1 },
+        paymentReceived: 0
+      },
+      products: [product],
+      carryForwardBalance: 0,
+      createdBy: "u1",
+      timestamp: 20
+    });
+
+    const days: StockDayRecord[] = [
+      {
+        id: "1",
+        date: "May 1, 2026",
+        monthId: "2026-05",
+        dayNo: 1,
+        status: "open",
+        entries: [day1Entry],
+        summary: {
+          accountCount: 1,
+          totalQty: day1Entry.totalQty,
+          totalAmount: day1Entry.totalAmount,
+          totalPaymentReceived: day1Entry.totalPaymentReceived,
+          totalDueBalance: day1Entry.dueBalance
+        },
+        createdBy: "u1",
+        createdAt: 10,
+        updatedAt: 10
+      },
+      {
+        id: "2",
+        date: "May 2, 2026",
+        monthId: "2026-05",
+        dayNo: 2,
+        status: "open",
+        entries: [day2Entry],
+        summary: {
+          accountCount: 1,
+          totalQty: day2Entry.totalQty,
+          totalAmount: day2Entry.totalAmount,
+          totalPaymentReceived: day2Entry.totalPaymentReceived,
+          totalDueBalance: day2Entry.dueBalance
+        },
+        createdBy: "u1",
+        createdAt: 20,
+        updatedAt: 20
+      }
+    ];
+
+    const recalculated = recalculateStockMonthEntries(days, [carryAccount]);
+    expect(recalculated[0].entries[0].carryForwardBalance).toBe(25);
+    expect(recalculated[0].entries[0].dueBalance).toBe(265);
+    expect(recalculated[1].entries[0].carryForwardBalance).toBe(265);
+    expect(recalculated[1].entries[0].dueBalance).toBe(385);
   });
 
   describe("Jazz Stock In & Current Balance calculations", () => {
