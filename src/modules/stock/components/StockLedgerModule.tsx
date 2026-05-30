@@ -609,6 +609,26 @@ export function StockLedgerModule({
   const currentInventoryAmount = useMemo(() => {
     return roundMoney(currentStockBalances.reduce((total, row) => total + (row.currentStock * (productRateById[row.productId] ?? 0)), 0));
   }, [currentStockBalances, productRateById]);
+  const selectedAccountDayRows = useMemo(() => {
+    if (!selectedAccountId) return [];
+    return [...days]
+      .filter((day) => day.dayNo >= 1 && day.dayNo <= daysInMonth(monthId))
+      .sort((a, b) => a.dayNo - b.dayNo)
+      .flatMap((day) => {
+        const entry = day.entries.find((item) => item.accountId === selectedAccountId);
+        if (!entry) return [];
+        return [{
+          dayNo: day.dayNo,
+          date: day.date,
+          totalQty: entry.totalQty,
+          totalAmount: entry.totalAmount,
+          totalPaymentReceived: entry.totalPaymentReceived,
+          totalDueBalance: entry.dueBalance,
+          carryForwardBalance: entry.carryForwardBalance,
+          status: day.status
+        }];
+      });
+  }, [days, monthId, selectedAccountId]);
 
   const jazzPayableLedger = useMemo(() => {
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
@@ -988,7 +1008,7 @@ export function StockLedgerModule({
 
   async function masterRefreshStockCalculations() {
     if (!canMonthControls) {
-      onStatus("Only the owner can run Stock Ledger master calculations.");
+      onStatus("Only the owner or admin can run Stock Ledger master calculations.");
       return;
     }
     if (days.length === 0) {
@@ -1678,8 +1698,12 @@ export function StockLedgerModule({
           <section className="panel mt-6">
             <div className="panel-title">
               <div>
-                <h2>{monthLabel(monthId)} Day-by-Day Summary</h2>
-                <p>Overall day-by-day rollup across all CCR/DO/DSO accounts in this month.</p>
+                <h2>{selectedAccount ? `${selectedAccount.name} Day-by-Day Summary` : `${monthLabel(monthId)} Day-by-Day Summary`}</h2>
+                <p>
+                  {selectedAccount
+                    ? "Selected person day-by-day rollup for the active stock out entry."
+                    : "Select a CCR/DO/DSO account to view the day-by-day rollup for that person."}
+                </p>
               </div>
               <BarChart3 className="text-blue-500" />
             </div>
@@ -1698,22 +1722,18 @@ export function StockLedgerModule({
                   </tr>
                 </thead>
                 <tbody>
-                  {metrics.dayRows.map((row) => {
+                  {selectedAccountDayRows.map((row) => {
                     const fullDay = days.find((d) => d.dayNo === row.dayNo);
                     const isReopened = row.status === "closed" && fullDay && isReopenActive(fullDay, now);
                     const statusLabel = isReopened ? "Re-open" : row.status === "closed" ? "Closed" : "Open";
-                    const carryForward = roundMoney(row.totalDueBalance - row.totalAmount + row.totalPaymentReceived);
                     return (
                       <tr key={row.dayNo}>
                         <td className="font-semibold text-slate-200">
                           Day {row.dayNo} <span className="text-xs text-slate-500 font-normal">({row.date})</span>
-                          <span className="block text-[10px] text-indigo-400 font-normal mt-0.5">
-                            {row.accountCount} {row.accountCount === 1 ? "account" : "accounts"} allotted
-                          </span>
                         </td>
                         <td>{formatMoney(row.totalQty)}</td>
                         <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
-                        <td className="text-slate-400">{formatMoney(carryForward)}</td>
+                        <td className="text-slate-400">{formatMoney(row.carryForwardBalance)}</td>
                         <td className="text-emerald-400 font-semibold">{formatMoney(row.totalPaymentReceived)}</td>
                         <td className="font-bold text-slate-100">{formatMoney(row.totalDueBalance)}</td>
                         <td>
@@ -3062,13 +3082,20 @@ export function StockLedgerModule({
                                   {isLow && <AlertTriangle className="h-3 w-3" />}
                                   <span>{isLow ? "Low Stock" : "Healthy"}</span>
                                 </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {selectedAccountDayRows.length === 0 && (
+                    <tr>
+                      <td className="py-6 text-center text-slate-500" colSpan={8}>
+                        No day-by-day stock out entries found for the selected person.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
               )}
 
               {/* 3. Account/Person-wise Report */}
