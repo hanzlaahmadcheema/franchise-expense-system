@@ -1786,7 +1786,7 @@ export function StockLedgerModule({
           )}
 
           {/* Whole Selected Month day-by-day overall summary */}
-          <section className="panel mt-6">
+          {/* <section className="panel mt-6">
             <div className="panel-title">
               <div>
                 <h2>{selectedAccount ? `${selectedAccount.name} Day-by-Day Summary` : `${monthLabel(monthId)} Day-by-Day Summary`}</h2>
@@ -1869,12 +1869,12 @@ export function StockLedgerModule({
                 </tbody>
               </table>
             </div>
-          </section>
+          </section> */}
 
           <section className="panel mt-6">
             <div className="panel-title">
               <div>
-                <h2>{selectedAccount?.name ? `${selectedAccount.name} Master Summary` : "Selected Dealer Master Summary"}</h2>
+                <h2>Dealer Master Summary</h2>
                 <p>Month summary for the selected dealer only.</p>
               </div>
               <FileSpreadsheet className="text-emerald-500" />
