@@ -678,6 +678,57 @@ export function StockLedgerModule({
       productTotals: activeProductTotals
     };
   }, [activeProducts, days, monthId, selectedAccount, selectedAccountId]);
+  const selectedDealerMasterDayRows = useMemo(() => {
+    if (!selectedAccountId || !selectedAccount) return [];
+    return [...days]
+      .filter((day) => day.dayNo >= 1 && day.dayNo <= daysInMonth(monthId))
+      .sort((a, b) => a.dayNo - b.dayNo)
+      .flatMap((day) => {
+        const entry = day.entries.find((item) => item.accountId === selectedAccountId);
+        if (!entry) return [];
+        const productTotals = Object.fromEntries(activeProducts.map((product) => [product.id, 0]));
+        for (const line of entry.products) {
+          if (productTotals[line.productId] !== undefined) {
+            productTotals[line.productId] = roundMoney(productTotals[line.productId] + line.quantity);
+          }
+        }
+        return [{
+          dayNo: day.dayNo,
+          date: day.date,
+          opening: entry.carryForwardBalance,
+          productTotals,
+          totalQty: entry.totalQty,
+          totalAmount: entry.totalAmount,
+          totalPaymentReceived: entry.totalPaymentReceived,
+          currentDue: entry.dueBalance,
+          closing: entry.dueBalance
+        }];
+      });
+  }, [activeProducts, days, monthId, selectedAccount, selectedAccountId]);
+  const selectedDealerMasterDayTotals = useMemo(() => {
+    return selectedDealerMasterDayRows.reduce((totals, row) => {
+      for (const [productId, qty] of Object.entries(row.productTotals)) {
+        totals.productTotals[productId] = roundMoney((totals.productTotals[productId] ?? 0) + qty);
+      }
+      return {
+        opening: roundMoney(totals.opening + row.opening),
+        totalQty: roundMoney(totals.totalQty + row.totalQty),
+        totalAmount: roundMoney(totals.totalAmount + row.totalAmount),
+        totalPaymentReceived: roundMoney(totals.totalPaymentReceived + row.totalPaymentReceived),
+        currentDue: roundMoney(totals.currentDue + row.currentDue),
+        closing: roundMoney(totals.closing + row.closing),
+        productTotals: totals.productTotals
+      };
+    }, {
+      opening: 0,
+      totalQty: 0,
+      totalAmount: 0,
+      totalPaymentReceived: 0,
+      currentDue: 0,
+      closing: 0,
+      productTotals: Object.fromEntries(activeProducts.map((product) => [product.id, 0]))
+    });
+  }, [activeProducts, selectedDealerMasterDayRows]);
 
   const jazzPayableLedger = useMemo(() => {
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
@@ -1879,15 +1930,14 @@ export function StockLedgerModule({
               </div>
               <FileSpreadsheet className="text-emerald-500" />
             </div>
-            {!selectedDealerMasterSummary ? (
+            {selectedDealerMasterDayRows.length === 0 ? (
               <p className="warning mt-4">Select a CCR/DO/DSO account to view the dealer master summary.</p>
             ) : (
               <div className="table-wrap">
                 <table className="!text-xs">
                   <thead>
                     <tr>
-                      <th>Dealer / Account Name</th>
-                      <th>Account Type</th>
+                      <th>Date</th>
                       <th>Opening Balance</th>
                       {activeProducts.map((p) => (
                         <th key={p.id} className="text-center font-mono">{p.name}</th>
@@ -1900,33 +1950,33 @@ export function StockLedgerModule({
                     </tr>
                   </thead>
                   <tbody>
-                    <tr>
-                      <td className="font-semibold text-slate-200">{selectedAccount?.name ?? "—"}</td>
-                      <td className="uppercase font-bold text-[10px] text-slate-400">{selectedAccount?.type ?? "—"}</td>
-                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.opening)}</td>
-                      {activeProducts.map((p) => (
-                        <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
-                          {formatMoney(selectedDealerMasterSummary.productTotals[p.id] ?? 0)}
-                        </td>
-                      ))}
-                      <td className="font-semibold text-slate-300">{formatMoney(selectedDealerMasterSummary.totalQty)}</td>
-                      <td className="font-mono text-slate-300">{formatMoney(selectedDealerMasterSummary.totalAmount)}</td>
-                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.totalPayments)}</td>
-                      <td className="text-slate-300 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.currentDue)}</td>
-                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterSummary.closing)}</td>
-                    </tr>
+                    {selectedDealerMasterDayRows.map((row) => (
+                      <tr key={row.dayNo}>
+                        <td className="font-semibold text-slate-200">Day {row.dayNo} <span className="text-xs text-slate-500 font-normal">({row.date})</span></td>
+                        <td className="font-mono text-slate-100">{formatMoney(row.opening)}</td>
+                        {activeProducts.map((p) => (
+                          <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
+                            {formatMoney(row.productTotals[p.id] ?? 0)}
+                          </td>
+                        ))}
+                        <td className="font-semibold text-slate-300">{formatMoney(row.totalQty)}</td>
+                        <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
+                        <td className="text-emerald-400 font-semibold font-mono">{formatMoney(row.totalPaymentReceived)}</td>
+                        <td className="text-slate-300 font-semibold font-mono">{formatMoney(row.currentDue)}</td>
+                        <td className="text-rose-400 font-bold font-mono">{formatMoney(row.closing)}</td>
+                      </tr>
+                    ))}
                     <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
                       <td className="text-slate-100">Total</td>
                       <td className="text-slate-500">—</td>
-                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.opening)}</td>
                       {activeProducts.map((p) => (
-                        <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.productTotals[p.id] ?? 0)}</td>
+                        <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.productTotals[p.id] ?? 0)}</td>
                       ))}
-                      <td className="text-slate-100">{formatMoney(selectedDealerMasterSummary.totalQty)}</td>
-                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.totalAmount)}</td>
-                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.totalPayments)}</td>
-                      <td className="text-slate-100">{formatMoney(selectedDealerMasterSummary.currentDue)}</td>
-                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterSummary.closing)}</td>
+                      <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalQty)}</td>
+                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalAmount)}</td>
+                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterDayTotals.totalPaymentReceived)}</td>
+                      <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.currentDue)}</td>
+                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterDayTotals.closing)}</td>
                     </tr>
                   </tbody>
                 </table>
