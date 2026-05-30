@@ -1213,13 +1213,217 @@ export function StockLedgerModule({
         </div>
       </section>
 
+
+
+          {/* Selected Date Summary & Stock Flow Dashboard */}
+          {/* <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border-slate-800">
+            <div className="panel-title border-b border-slate-800 pb-3">
+              <div>
+                <h2>Selected Date Summary & Stock Flow</h2>
+                <p>Quick summaries, stock-in, allotments, and stock closing flow for {dayDate(monthId, selectedDay)}.</p>
+              </div>
+              <BarChart3 className="text-emerald-500" />
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Stock Issued</span>
+                <p className="mt-1 text-lg font-extrabold text-slate-100">{formatMoney(selectedDayRecord?.summary.totalQty ?? 0)}</p>
+                <p className="text-[10px] text-slate-500 mt-1">Units allotted today</p>
+              </div>
+              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Amount</span>
+                <p className="mt-1 text-lg font-extrabold text-emerald-400">{formatMoney(selectedDayRecord?.summary.totalAmount ?? 0)}</p>
+                <p className="text-[10px] text-slate-500 mt-1">Total value issued</p>
+              </div>
+              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Payments Recovered</span>
+                <p className="mt-1 text-lg font-extrabold text-blue-400">{formatMoney(selectedDayRecord?.summary.totalPaymentReceived ?? 0)}</p>
+                <p className="text-[10px] text-slate-500 mt-1">Total collected today</p>
+              </div>
+              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Stock In (Jazz)</span>
+                <p className="mt-1 text-lg font-extrabold text-indigo-400">
+                  {formatMoney(
+                    (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => sum + r.totalQty, 0)
+                  )}
+                </p>
+                <p className="text-[10px] text-slate-500 mt-1">Units received from Jazz</p>
+              </div>
+              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
+                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Net Dues Change</span>
+                <p className="mt-1 text-lg font-extrabold text-rose-400">
+                  {formatMoney(
+                    roundMoney(
+                      (selectedDayRecord?.summary.totalAmount ?? 0) -
+                        (selectedDayRecord?.summary.totalPaymentReceived ?? 0)
+                    )
+                  )}
+                </p>
+                <p className="text-[10px] text-slate-500 mt-1">Difference today</p>
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <h3 className="text-sm font-semibold text-slate-100 mb-2 flex items-center gap-1.5">
+                <RefreshCw className="h-4 w-4 text-emerald-400 animate-spin-slow" />
+                <span>Day Inventory Closing Flow & Impact</span>
+              </h3>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th>Opening Stock (A)</th>
+                      <th>Stock Received (B)</th>
+                      <th>Stock Out / Allotted (C)</th>
+                      <th>Closing Stock (A + B - C)</th>
+                      <th>Rate Snapshot</th>
+                      <th>Closing Value (Rs.)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {products.map((p) => {
+                      const todayOpening = (() => {
+                        const openingVal = monthOpeningStock[p.id] ?? 0;
+                        let cumulativeStockIn = 0;
+                        let cumulativeStockOut = 0;
+
+                        for (const day of days) {
+                          if (day.dayNo < selectedDay) {
+                            // Stock In
+                            const stockInRecs = day.stockIn ?? [];
+                            for (const record of stockInRecs) {
+                              const prodLine = record.products.find((line) => line.productId === p.id);
+                              if (prodLine) cumulativeStockIn += prodLine.quantity;
+                            }
+                            // Stock Out
+                            for (const entry of day.entries) {
+                              const prodLine = entry.products.find((line) => line.productId === p.id);
+                              if (prodLine) cumulativeStockOut += prodLine.quantity;
+                            }
+                          }
+                        }
+                        return roundMoney(openingVal + cumulativeStockIn - cumulativeStockOut);
+                      })();
+
+                      const stockInToday = (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => {
+                        const prodLine = r.products.find((line) => line.productId === p.id);
+                        return sum + (prodLine?.quantity ?? 0);
+                      }, 0);
+
+                      const stockOutToday = (selectedDayRecord?.entries ?? []).reduce((sum, entry) => {
+                        const prodLine = entry.products.find((line) => line.productId === p.id);
+                        return sum + (prodLine?.quantity ?? 0);
+                      }, 0);
+
+                      const closingToday = roundMoney(todayOpening + stockInToday - stockOutToday);
+
+                      return (
+                        <tr key={p.id}>
+                          <td className="font-semibold text-slate-200">{p.name}</td>
+                          <td>{formatMoney(todayOpening)}</td>
+                          <td className="text-indigo-400 font-semibold">{formatMoney(stockInToday)}</td>
+                          <td className="text-rose-400 font-semibold">{formatMoney(stockOutToday)}</td>
+                          <td className="font-bold text-slate-100">{formatMoney(closingToday)}</td>
+                          <td>{formatMoney(p.rate)}</td>
+                          <td className="font-mono text-emerald-400">{formatMoney(roundMoney(closingToday * p.rate))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
+                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <ArrowDownRight className="h-3.5 w-3.5 text-indigo-400" />
+                    <span>Stock In Received Today (Jazz)</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.stockIn ?? []).length} shipments</span>
+                </h4>
+                <div className="table-wrap max-h-60 overflow-y-auto">
+                  <table className="!text-xs">
+                    <thead>
+                      <tr>
+                        <th>Mode</th>
+                        <th>Total Amount</th>
+                        <th>Paid</th>
+                        <th>Payable</th>
+                        <th>Reference</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(selectedDayRecord?.stockIn ?? []).map((r) => (
+                        <tr key={r.id}>
+                          <td className="capitalize font-semibold text-slate-300">{r.stockInMode}</td>
+                          <td className="font-mono">{formatMoney(r.totalAmount)}</td>
+                          <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
+                          <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
+                          <td className="text-slate-400 truncate max-w-[120px]" title={r.notes}>{r.notes || "—"}</td>
+                        </tr>
+                      ))}
+                      {(selectedDayRecord?.stockIn ?? []).length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No Jazz shipments received today.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
+                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <ArrowUpRight className="h-3.5 w-3.5 text-rose-400" />
+                    <span>Stock Out Issued Today (Accounts)</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.entries ?? []).length} accounts allotted</span>
+                </h4>
+                <div className="table-wrap max-h-60 overflow-y-auto">
+                  <table className="!text-xs">
+                    <thead>
+                      <tr>
+                        <th>Account</th>
+                        <th>Qty</th>
+                        <th>Issued Value</th>
+                        <th>Payment</th>
+                        <th>Due</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(selectedDayRecord?.entries ?? []).map((e) => (
+                        <tr key={e.id}>
+                          <td className="font-semibold text-slate-300">{e.accountName}</td>
+                          <td>{formatMoney(e.totalQty)}</td>
+                          <td className="font-mono">{formatMoney(e.totalAmount)}</td>
+                          <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
+                          <td className="font-bold text-slate-200">{formatMoney(e.dueBalance)}</td>
+                        </tr>
+                      ))}
+                      {(selectedDayRecord?.entries ?? []).length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No customer allotments entered today.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div> 
+          </section> */}
+          
       {activeSectionVisible && section === "daily" && (
         <>
-          <section className="panel">
-            <div className="panel-title">
+          <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950/70 border-slate-800 shadow-xl">
+            <div className="panel-title border-b border-slate-800/60 pb-4">
               <div>
                 <h2>Daily Stock Entry</h2>
-                <p className="flex flex-wrap items-center gap-1.5 text-slate-400 text-sm">
+                <p className="flex flex-wrap items-center gap-1.5 text-slate-400 text-sm mt-1">
                   <span>{monthLabel(monthId)}</span>
                   <span className="text-slate-700">·</span>
                   <span>{dayDate(monthId, selectedDay)}</span>
@@ -1239,35 +1443,57 @@ export function StockLedgerModule({
                   )}
                 </p>
               </div>
-              <CalendarDays />
+              <CalendarDays className="text-emerald-500 h-5 w-5" />
             </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <span className="btn-chip">Auto-save off</span>
-              <button className="btn-secondary" disabled={!selectedDayRecord || selectedDayRecord.status === "closed" || monthBootstrapPending} onClick={() => void closeSelectedDay()}>Close Day</button>
-              <button className="btn-primary" disabled={!canEdit || loading || monthBootstrapPending} onClick={() => void saveEntry()}><Save />Save Now</button>
-            </div>
-          </section>
 
-
-
-
-
-          <section className="panel">
-            <div className="panel-title">
-              <div>
-                <h2>CCR/DO Account</h2>
-                <p>Select an account before entering stock quantities.</p>
+            <div className="mt-5 grid grid-cols-1 md:grid-cols-12 gap-5 items-end">
+              {/* Account Dropdown Section */}
+              <div className="md:col-span-8">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
+                  Select CCR/DO Account
+                </label>
+                <select 
+                  value={selectedAccountId} 
+                  disabled={!canEdit || activeAccounts.length === 0 || monthBootstrapPending} 
+                  onChange={(event) => setSelectedAccountId(event.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
+                >
+                  {activeAccounts.length === 0 ? (
+                    <option value="">No active accounts available</option>
+                  ) : (
+                    activeAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name} · {account.type}
+                      </option>
+                    ))
+                  )}
+                </select>
               </div>
-              <Pencil />
+
+              {/* Action Buttons Section */}
+              <div className="md:col-span-4 flex flex-wrap gap-2.5">
+                <button 
+                  type="button"
+                  className="btn-secondary flex-1" 
+                  disabled={!selectedDayRecord || selectedDayRecord.status === "closed" || monthBootstrapPending} 
+                  onClick={() => void closeSelectedDay()}
+                >
+                  Close Day
+                </button>
+                <button 
+                  type="button"
+                  className="btn-primary flex-1" 
+                  disabled={!canEdit || loading || monthBootstrapPending} 
+                  onClick={() => void saveEntry()}
+                >
+                  <Save className="h-4 w-4 mr-1.5" /> Save Now
+                </button>
+              </div>
             </div>
-            <label>
-              CCR/DO Account
-              <select value={selectedAccountId} disabled={!canEdit || activeAccounts.length === 0 || monthBootstrapPending} onChange={(event) => setSelectedAccountId(event.target.value)}>
-                {activeAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.type}</option>)}
-              </select>
-            </label>
-            {!canEdit && <p className="warning mt-4">This stock day is read-only for your role or current day status.</p>}
-            {activeAccounts.length === 0 && <p className="warning mt-4">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
+
+            {/* Warnings */}
+            {!canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
+            {activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
           </section>
 
           {selectedAccount && previewEntry && (
@@ -2483,16 +2709,16 @@ export function StockLedgerModule({
             {[
               { id: "masterSummary", label: "Master Stock Summary" },
               { id: "stockPosition", label: "Monthly Stock Position" },
-              { id: "overview", label: "Monthly Overview" },
+              // { id: "overview", label: "Monthly Overview" },
               { id: "products", label: "Product stock flow" },
-              { id: "accounts", label: "Account summaries" },
-              { id: "stockIn", label: "Stock In (Jazz)" },
-              { id: "stockOut", label: "Stock Out (Allotments)" },
-              { id: "payments", label: "Payment Recovery" },
-              { id: "dues", label: "Due Balances" },
-              { id: "currentStock", label: "Current Stock" },
+              // { id: "accounts", label: "Account summaries" },
+              // { id: "stockIn", label: "Stock In (Jazz)" },
+              // { id: "stockOut", label: "Stock Out (Allotments)" },
+              // { id: "payments", label: "Payment Recovery" },
+              // { id: "dues", label: "Due Balances" },
+              // { id: "currentStock", label: "Current Stock" },
               { id: "cashCredit", label: "Cash vs Credit In" },
-              { id: "audit", label: "Audit & Log Report" }
+              // { id: "audit", label: "Audit & Log Report" }
             ].map((sub) => {
               const active = activeReportSubTab === sub.id;
               return (
@@ -2566,61 +2792,57 @@ export function StockLedgerModule({
 
                 return (
                   <div className="space-y-4">
-                    <div className="table-wrap border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
-                      <table className="!text-xs border-collapse w-full">
+                    <div className="table-wrap">
+                      <table className="!text-xs w-full">
                         <thead>
-                          {/* TOP HEADER BLOCK - CYAN/BLUE */}
-                          <tr className="bg-sky-500 text-slate-900 font-extrabold text-center uppercase tracking-wider border-b border-sky-600">
-                            <th className="py-2.5 px-3 border border-sky-600 text-left">Date</th>
-                            <th colSpan={activeProducts.length} className="py-2.5 px-3 border border-sky-600">
+                          <tr className="border-b border-slate-800 text-slate-100 font-semibold text-center uppercase tracking-wider">
+                            <th className="py-2.5 px-3 text-left">Date</th>
+                            <th colSpan={activeProducts.length} className="py-2.5 px-3 text-slate-100">
                               Monthly Stock Position & Value
                             </th>
-                            <th className="py-2.5 px-3 border border-sky-600">Total</th>
+                            <th className="py-2.5 px-3 text-slate-100">Total</th>
                           </tr>
-                          
-                          {/* DYNAMIC PRODUCT UNIT RATES HEADER ROW - GREEN */}
-                          <tr className="bg-emerald-600 text-white font-mono text-center border-b border-emerald-700">
-                            <th className="py-2 px-3 border border-emerald-700 text-left font-sans text-[10px] uppercase font-bold text-emerald-100">
+
+                          <tr className="border-b border-slate-800 text-slate-200 font-mono text-center">
+                            <th className="py-2 px-3 text-left font-sans text-[10px] uppercase font-bold text-slate-400">
                               Unit Rate (Rs.)
                             </th>
                             {activeProducts.map((p) => (
-                              <th key={p.id} className="py-2 px-3 border border-emerald-700 font-bold">
+                              <th key={p.id} className="py-2 px-3 font-bold text-emerald-400">
                                 {productRateById[p.id] ?? 0}
                               </th>
                             ))}
-                            <th className="py-2 px-3 border border-emerald-700 font-bold">RATE</th>
+                            <th className="py-2 px-3 font-bold text-slate-100">RATE</th>
                           </tr>
 
-                          {/* DYNAMIC PRODUCT NAMES HEADER ROW - GREEN */}
-                          <tr className="bg-emerald-600 text-white font-extrabold text-center border-b border-emerald-700">
-                            <th className="py-2 px-3 border border-emerald-700 text-left text-[10px] uppercase tracking-wider text-emerald-100">
+                          <tr className="border-b border-slate-800 text-slate-100 font-extrabold text-center">
+                            <th className="py-2 px-3 text-left text-[10px] uppercase tracking-wider text-slate-400">
                               Product Name
                             </th>
                             {activeProducts.map((p) => (
-                              <th key={p.id} className="py-2 px-3 border border-emerald-700 font-bold uppercase">
+                              <th key={p.id} className="py-2 px-3 font-bold uppercase text-slate-100">
                                 {p.name}
                               </th>
                             ))}
-                            <th className="py-2 px-3 border border-emerald-700 font-bold uppercase">TOTAL QTY</th>
+                            <th className="py-2 px-3 font-bold uppercase text-slate-100">TOTAL QTY</th>
                           </tr>
                         </thead>
 
                         <tbody>
-                          {/* OPENING ROW - GOLD/AMBER */}
-                          <tr className="bg-amber-500 text-slate-950 font-bold border-b border-amber-600">
-                            <td className="py-2.5 px-3 border border-amber-600 text-left font-black tracking-wide">
+                          <tr className="border-b border-slate-800 font-bold">
+                            <td className="py-2.5 px-3 text-left font-black tracking-wide text-amber-400">
                               OPENING
                             </td>
                             {activeProducts.map((p) => {
                               const val = productOpening[p.id];
                               return (
-                                <td key={p.id} className="py-2.5 px-3 border border-amber-600 text-center font-mono">
-                                  {val > 0 ? val : "—"}
+                                <td key={p.id} className="py-2.5 px-3 text-center font-mono text-slate-100">
+                                  {val > 0 ? formatMoney(val) : "—"}
                                 </td>
                               );
                             })}
-                            <td className="py-2.5 px-3 border border-amber-600 text-center font-mono font-black">
-                              {grandOpening > 0 ? grandOpening : "—"}
+                            <td className="py-2.5 px-3 text-center font-mono font-black text-slate-100">
+                              {grandOpening > 0 ? formatMoney(grandOpening) : "—"}
                             </td>
                           </tr>
 
@@ -2633,8 +2855,8 @@ export function StockLedgerModule({
                             const dayTotalQty = shipments.reduce((sum, s) => sum + s.totalQty, 0);
 
                             return (
-                              <tr key={dayNo} className="hover:bg-slate-900/40 border-b border-slate-800 transition-colors">
-                                <td className="py-2 px-3 border border-slate-800 text-left font-bold text-amber-400 bg-slate-900/60 w-24">
+                              <tr key={dayNo} className="border-b border-slate-800 transition-colors hover:bg-slate-900/40">
+                                <td className="py-2 px-3 text-left font-bold text-slate-400 w-24">
                                   Day {dayNo}
                                 </td>
                                 {activeProducts.map((p) => {
@@ -2644,86 +2866,82 @@ export function StockLedgerModule({
                                   }, 0);
 
                                   return (
-                                    <td key={p.id} className={`py-2 px-3 border border-slate-800 text-center font-mono font-semibold ${dayProductQty > 0 ? "text-indigo-400 font-bold bg-indigo-500/5" : "text-slate-600"}`}>
-                                      {dayProductQty > 0 ? dayProductQty : "—"}
+                                    <td key={p.id} className={`py-2 px-3 text-center font-mono font-semibold ${dayProductQty > 0 ? "text-indigo-400 font-bold" : "text-slate-600"}`}>
+                                      {dayProductQty > 0 ? formatMoney(dayProductQty) : "—"}
                                     </td>
                                   );
                                 })}
-                                <td className={`py-2 px-3 border border-slate-800 text-center font-mono font-bold bg-slate-900/60 ${dayTotalQty > 0 ? "text-slate-200" : "text-slate-600"}`}>
-                                  {dayTotalQty > 0 ? dayTotalQty : "—"}
+                                <td className={`py-2 px-3 text-center font-mono font-bold ${dayTotalQty > 0 ? "text-slate-100" : "text-slate-600"}`}>
+                                  {dayTotalQty > 0 ? formatMoney(dayTotalQty) : "—"}
                                 </td>
                               </tr>
                             );
                           })}
 
-                          {/* TOTAL STOCK RECEIVED ROW (Opening + Shipments Received) - SLEEK DARK ROW */}
-                          <tr className="bg-slate-900/90 text-slate-100 font-bold border-t-2 border-b border-slate-700">
-                            <td className="py-2.5 px-3 border border-slate-700 text-left uppercase text-indigo-400 tracking-wider">
+                          <tr className="border-t border-slate-800 font-bold">
+                            <td className="py-2.5 px-3 text-left uppercase text-indigo-400 tracking-wider">
                               TOTAL STOCK RECEIVED
                             </td>
                             {activeProducts.map((p) => {
                               const val = productReceived[p.id];
                               return (
-                                <td key={p.id} className="py-2.5 px-3 border border-slate-700 text-center font-mono font-black text-indigo-300">
-                                  {val > 0 ? val : "—"}
+                                <td key={p.id} className="py-2.5 px-3 text-center font-mono font-black text-indigo-400">
+                                  {val > 0 ? formatMoney(val) : "—"}
                                 </td>
                               );
                             })}
-                            <td className="py-2.5 px-3 border border-slate-700 text-center font-mono font-black text-indigo-300 bg-indigo-500/10">
-                              {grandReceived > 0 ? grandReceived : "—"}
+                            <td className="py-2.5 px-3 text-center font-mono font-black text-indigo-400">
+                              {grandReceived > 0 ? formatMoney(grandReceived) : "—"}
                             </td>
                           </tr>
 
-                          {/* TOTAL STOCK ISSUANCE ROW (Allotted) - SLEEK DARK ROW */}
-                          <tr className="bg-slate-900/90 text-slate-100 font-bold border-b border-slate-700">
-                            <td className="py-2.5 px-3 border border-slate-700 text-left uppercase text-rose-400 tracking-wider">
+                          <tr className="border-b border-slate-800 font-bold">
+                            <td className="py-2.5 px-3 text-left uppercase text-rose-400 tracking-wider">
                               TOTAL STOCK ISSUANCE
                             </td>
                             {activeProducts.map((p) => {
                               const val = productIssued[p.id];
                               return (
-                                <td key={p.id} className="py-2.5 px-3 border border-slate-700 text-center font-mono font-black text-rose-300">
-                                  {val > 0 ? val : "—"}
+                                <td key={p.id} className="py-2.5 px-3 text-center font-mono font-black text-rose-400">
+                                  {val > 0 ? formatMoney(val) : "—"}
                                 </td>
                               );
                             })}
-                            <td className="py-2.5 px-3 border border-slate-700 text-center font-mono font-black text-rose-300 bg-rose-500/10">
-                              {grandIssued > 0 ? grandIssued : "—"}
+                            <td className="py-2.5 px-3 text-center font-mono font-black text-rose-400">
+                              {grandIssued > 0 ? formatMoney(grandIssued) : "—"}
                             </td>
                           </tr>
 
-                          {/* STOCK IN HAND ROW (Received - Issued) - GOLD ROW */}
-                          <tr className="bg-amber-500/10 text-amber-300 font-extrabold border-b-2 border-amber-500/30">
-                            <td className="py-3 px-3 border border-amber-500/30 text-left uppercase tracking-wider text-amber-200">
+                          <tr className="border-b border-slate-800 font-extrabold">
+                            <td className="py-3 px-3 text-left uppercase tracking-wider text-amber-400">
                               STOCK IN HAND
                             </td>
                             {activeProducts.map((p) => {
                               const val = productInHand[p.id];
                               return (
-                                <td key={p.id} className="py-3 px-3 border border-amber-500/30 text-center font-mono font-black text-[13px] text-amber-300">
-                                  {val > 0 ? val : "—"}
+                                <td key={p.id} className="py-3 px-3 text-center font-mono font-black text-[13px] text-amber-400">
+                                  {val > 0 ? formatMoney(val) : "—"}
                                 </td>
                               );
                             })}
-                            <td className="py-3 px-3 border border-amber-500/30 text-center font-mono font-black text-[13px] text-amber-300 bg-amber-500/25">
-                              {grandInHand > 0 ? grandInHand : "—"}
+                            <td className="py-3 px-3 text-center font-mono font-black text-[13px] text-amber-400">
+                              {grandInHand > 0 ? formatMoney(grandInHand) : "—"}
                             </td>
                           </tr>
 
-                          {/* STOCK VALUE ROW (Stock In Hand * Rate) - SLEEK VALUATION ROW */}
-                          <tr className="bg-emerald-500/15 text-emerald-300 font-extrabold border-b border-emerald-500/30">
-                            <td className="py-3 px-3 border border-emerald-500/30 text-left uppercase tracking-wider text-emerald-200">
+                          <tr className="border-b border-slate-800 font-extrabold">
+                            <td className="py-3 px-3 text-left uppercase tracking-wider text-emerald-400">
                               STOCK VALUE
                             </td>
                             {activeProducts.map((p) => {
                               const val = productValuation[p.id];
                               return (
-                                <td key={p.id} className="py-3 px-3 border border-emerald-500/30 text-center font-mono font-black text-[13px] text-emerald-300">
+                                <td key={p.id} className="py-3 px-3 text-center font-mono font-black text-[13px] text-emerald-400">
                                   {val > 0 ? formatMoney(val) : "—"}
                                 </td>
                               );
                             })}
-                            <td className="py-3 px-3 border border-emerald-500/30 text-center font-mono font-black text-[13px] text-emerald-300 bg-emerald-500/25">
+                            <td className="py-3 px-3 text-center font-mono font-black text-[13px] text-emerald-400">
                               {grandValuation > 0 ? formatMoney(grandValuation) : "—"}
                             </td>
                           </tr>
