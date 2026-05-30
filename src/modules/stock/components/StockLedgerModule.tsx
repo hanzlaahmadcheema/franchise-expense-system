@@ -1952,7 +1952,7 @@ export function StockLedgerModule({
                   <tbody>
                     {selectedDealerMasterDayRows.map((row) => (
                       <tr key={row.dayNo}>
-                        <td className="font-semibold text-slate-200">Day {row.dayNo} <span className="text-xs text-slate-500 font-normal">({row.date})</span></td>
+                        <td className="font-semibold text-slate-200">{new Date(`${monthId}-${String(row.dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
                         <td className="font-mono text-slate-100">{formatMoney(row.opening)}</td>
                         {activeProducts.map((p) => (
                           <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
