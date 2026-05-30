@@ -3006,7 +3006,7 @@ export function StockLedgerModule({
                             return (
                               <tr key={dayNo} className="border-b border-slate-800 transition-colors hover:bg-slate-900/40">
                                 <td className="py-2 px-3 text-left font-bold text-slate-400 w-24">
-                                  Day {dayNo}
+                                  {new Date(`${monthId}-${String(dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
                                 </td>
                                 {activeProducts.map((p) => {
                                   const dayProductQty = shipments.reduce((sum, s) => {
