@@ -642,6 +642,42 @@ export function StockLedgerModule({
       totalDueBalance: 0
     });
   }, [selectedAccountDayRows]);
+  const selectedDealerMasterSummary = useMemo(() => {
+    if (!selectedAccountId || !selectedAccount) return null;
+    const entriesPeriod = days
+      .filter((day) => day.dayNo >= 1 && day.dayNo <= daysInMonth(monthId))
+      .sort((a, b) => a.dayNo - b.dayNo)
+      .flatMap((day) => day.entries.filter((entry) => entry.accountId === selectedAccountId));
+    const sortedDaysWithEntries = [...days].sort((a, b) => a.dayNo - b.dayNo);
+    const firstEntry = sortedDaysWithEntries.flatMap((day) => day.entries.filter((entry) => entry.accountId === selectedAccountId)).at(0);
+    const latestEntry = entriesPeriod.at(-1);
+    const activeProductTotals = Object.fromEntries(activeProducts.map((product) => [product.id, 0]));
+
+    for (const entry of entriesPeriod) {
+      for (const line of entry.products) {
+        if (activeProductTotals[line.productId] !== undefined) {
+          activeProductTotals[line.productId] = roundMoney(activeProductTotals[line.productId] + line.quantity);
+        }
+      }
+    }
+
+    const opening = firstEntry ? firstEntry.carryForwardBalance : (selectedAccount.openingBalance ?? 0);
+    const totalQty = entriesPeriod.reduce((sum, entry) => sum + entry.totalQty, 0);
+    const totalAmount = entriesPeriod.reduce((sum, entry) => sum + entry.totalAmount, 0);
+    const totalPayments = entriesPeriod.reduce((sum, entry) => sum + entry.totalPaymentReceived, 0);
+    const currentDue = latestEntry?.dueBalance ?? opening;
+    const closing = currentDue;
+
+    return {
+      opening,
+      totalQty,
+      totalAmount,
+      totalPayments,
+      currentDue,
+      closing,
+      productTotals: activeProductTotals
+    };
+  }, [activeProducts, days, monthId, selectedAccount, selectedAccountId]);
 
   const jazzPayableLedger = useMemo(() => {
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
@@ -1833,6 +1869,69 @@ export function StockLedgerModule({
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section className="panel mt-6">
+            <div className="panel-title">
+              <div>
+                <h2>{selectedAccount?.name ? `${selectedAccount.name} Master Summary` : "Selected Dealer Master Summary"}</h2>
+                <p>Month summary for the selected dealer only.</p>
+              </div>
+              <FileSpreadsheet className="text-emerald-500" />
+            </div>
+            {!selectedDealerMasterSummary ? (
+              <p className="warning mt-4">Select a CCR/DO/DSO account to view the dealer master summary.</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="!text-xs">
+                  <thead>
+                    <tr>
+                      <th>Dealer / Account Name</th>
+                      <th>Account Type</th>
+                      <th>Opening Balance</th>
+                      {activeProducts.map((p) => (
+                        <th key={p.id} className="text-center font-mono">{p.name}</th>
+                      ))}
+                      <th>Total Allotted Qty</th>
+                      <th>Total Stock Amount</th>
+                      <th>Payment Received</th>
+                      <th>Current Due</th>
+                      <th>Closing Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="font-semibold text-slate-200">{selectedAccount?.name ?? "—"}</td>
+                      <td className="uppercase font-bold text-[10px] text-slate-400">{selectedAccount?.type ?? "—"}</td>
+                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.opening)}</td>
+                      {activeProducts.map((p) => (
+                        <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
+                          {formatMoney(selectedDealerMasterSummary.productTotals[p.id] ?? 0)}
+                        </td>
+                      ))}
+                      <td className="font-semibold text-slate-300">{formatMoney(selectedDealerMasterSummary.totalQty)}</td>
+                      <td className="font-mono text-slate-300">{formatMoney(selectedDealerMasterSummary.totalAmount)}</td>
+                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.totalPayments)}</td>
+                      <td className="text-slate-300 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.currentDue)}</td>
+                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterSummary.closing)}</td>
+                    </tr>
+                    <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                      <td className="text-slate-100">Total</td>
+                      <td className="text-slate-500">—</td>
+                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.opening)}</td>
+                      {activeProducts.map((p) => (
+                        <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.productTotals[p.id] ?? 0)}</td>
+                      ))}
+                      <td className="text-slate-100">{formatMoney(selectedDealerMasterSummary.totalQty)}</td>
+                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterSummary.totalAmount)}</td>
+                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterSummary.totalPayments)}</td>
+                      <td className="text-slate-100">{formatMoney(selectedDealerMasterSummary.currentDue)}</td>
+                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterSummary.closing)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         </>
       )}
