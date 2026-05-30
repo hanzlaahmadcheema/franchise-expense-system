@@ -92,6 +92,8 @@ export function exportStockMonthlyXlsx(summary: StockMonthlySummary, days: Stock
     ],
     [24, 12, 12, 16, 16, 16, 14]
   );
+
+
   appendSheet(
     workbook,
     "Products",
@@ -210,6 +212,13 @@ export function exportStockPrintable(summary: StockMonthlySummary, days: StockDa
       </tr>
     `)
   ).join("");
+  const totals = days.flatMap((day) => day.entries).reduce((acc, entry) => ({
+    qty: acc.qty + entry.totalQty,
+    amount: acc.amount + entry.totalAmount,
+    payment: acc.payment + entry.totalPaymentReceived,
+    carry: acc.carry + entry.carryForwardBalance,
+    due: acc.due + entry.dueBalance
+  }), { qty: 0, amount: 0, payment: 0, carry: 0, due: 0 });
   const win = window.open("", "_blank", "noopener,noreferrer");
   if (!win) throw new Error("Popup blocked. Allow popups to print the stock report.");
   win.document.write(`
@@ -240,7 +249,20 @@ export function exportStockPrintable(summary: StockMonthlySummary, days: StockDa
         </div>
         <table>
           <thead><tr><th>Day</th><th>Account</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Carry</th><th>Due</th></tr></thead>
-          <tbody>${rows || "<tr><td colspan='7'>No stock records saved.</td></tr>"}</tbody>
+          <tbody>
+            ${rows || "<tr><td colspan='7'>No stock records saved.</td></tr>"}
+            ${rows ? `
+              <tr>
+                <td><strong>Total</strong></td>
+                <td></td>
+                <td><strong>${formatMoney(totals.qty)}</strong></td>
+                <td><strong>${formatMoney(totals.amount)}</strong></td>
+                <td><strong>${formatMoney(totals.payment)}</strong></td>
+                <td></td>
+                <td><strong>${formatMoney(totals.due)}</strong></td>
+              </tr>
+            ` : ""}
+          </tbody>
         </table>
       </body>
     </html>

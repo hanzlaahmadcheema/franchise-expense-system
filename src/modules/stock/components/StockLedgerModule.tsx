@@ -1248,212 +1248,9 @@ export function StockLedgerModule({
             </div>
           </section>
 
-          {/* Selected Date Summary & Stock Flow Dashboard */}
-          <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border-slate-800">
-            <div className="panel-title border-b border-slate-800 pb-3">
-              <div>
-                <h2>Selected Date Summary & Stock Flow</h2>
-                <p>Quick summaries, stock-in, allotments, and stock closing flow for {dayDate(monthId, selectedDay)}.</p>
-              </div>
-              <BarChart3 className="text-emerald-500" />
-            </div>
 
-            {/* Metrics cards grid */}
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Stock Issued</span>
-                <p className="mt-1 text-lg font-extrabold text-slate-100">{formatMoney(selectedDayRecord?.summary.totalQty ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Units allotted today</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Amount</span>
-                <p className="mt-1 text-lg font-extrabold text-emerald-400">{formatMoney(selectedDayRecord?.summary.totalAmount ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Total value issued</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Payments Recovered</span>
-                <p className="mt-1 text-lg font-extrabold text-blue-400">{formatMoney(selectedDayRecord?.summary.totalPaymentReceived ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Total collected today</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Stock In (Jazz)</span>
-                <p className="mt-1 text-lg font-extrabold text-indigo-400">
-                  {formatMoney(
-                    (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => sum + r.totalQty, 0)
-                  )}
-                </p>
-                <p className="text-[10px] text-slate-500 mt-1">Units received from Jazz</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Net Dues Change</span>
-                <p className="mt-1 text-lg font-extrabold text-rose-400">
-                  {formatMoney(
-                    roundMoney(
-                      (selectedDayRecord?.summary.totalAmount ?? 0) -
-                        (selectedDayRecord?.summary.totalPaymentReceived ?? 0)
-                    )
-                  )}
-                </p>
-                <p className="text-[10px] text-slate-500 mt-1">Difference today</p>
-              </div>
-            </div>
 
-            {/* Daily stock Closing Impact flow */}
-            <div className="mt-6">
-              <h3 className="text-sm font-semibold text-slate-100 mb-2 flex items-center gap-1.5">
-                <RefreshCw className="h-4 w-4 text-emerald-400 animate-spin-slow" />
-                <span>Day Inventory Closing Flow & Impact</span>
-              </h3>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th>Opening Stock (A)</th>
-                      <th>Stock Received (B)</th>
-                      <th>Stock Out / Allotted (C)</th>
-                      <th>Closing Stock (A + B - C)</th>
-                      <th>Rate Snapshot</th>
-                      <th>Closing Value (Rs.)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {products.map((p) => {
-                      const todayOpening = (() => {
-                        const openingVal = monthOpeningStock[p.id] ?? 0;
-                        let cumulativeStockIn = 0;
-                        let cumulativeStockOut = 0;
 
-                        for (const day of days) {
-                          if (day.dayNo < selectedDay) {
-                            // Stock In
-                            const stockInRecs = day.stockIn ?? [];
-                            for (const record of stockInRecs) {
-                              const prodLine = record.products.find((line) => line.productId === p.id);
-                              if (prodLine) cumulativeStockIn += prodLine.quantity;
-                            }
-                            // Stock Out
-                            for (const entry of day.entries) {
-                              const prodLine = entry.products.find((line) => line.productId === p.id);
-                              if (prodLine) cumulativeStockOut += prodLine.quantity;
-                            }
-                          }
-                        }
-                        return roundMoney(openingVal + cumulativeStockIn - cumulativeStockOut);
-                      })();
-
-                      const stockInToday = (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => {
-                        const prodLine = r.products.find((line) => line.productId === p.id);
-                        return sum + (prodLine?.quantity ?? 0);
-                      }, 0);
-
-                      const stockOutToday = (selectedDayRecord?.entries ?? []).reduce((sum, entry) => {
-                        const prodLine = entry.products.find((line) => line.productId === p.id);
-                        return sum + (prodLine?.quantity ?? 0);
-                      }, 0);
-
-                      const closingToday = roundMoney(todayOpening + stockInToday - stockOutToday);
-
-                      return (
-                        <tr key={p.id}>
-                          <td className="font-semibold text-slate-200">{p.name}</td>
-                          <td>{formatMoney(todayOpening)}</td>
-                          <td className="text-indigo-400 font-semibold">{formatMoney(stockInToday)}</td>
-                          <td className="text-rose-400 font-semibold">{formatMoney(stockOutToday)}</td>
-                          <td className="font-bold text-slate-100">{formatMoney(closingToday)}</td>
-                          <td>{formatMoney(p.rate)}</td>
-                          <td className="font-mono text-emerald-400">{formatMoney(roundMoney(closingToday * p.rate))}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Grid of Stock In vs Stock Out lists for today */}
-            <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Stock In today */}
-              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
-                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <ArrowDownRight className="h-3.5 w-3.5 text-indigo-400" />
-                    <span>Stock In Received Today (Jazz)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.stockIn ?? []).length} shipments</span>
-                </h4>
-                <div className="table-wrap max-h-60 overflow-y-auto">
-                  <table className="!text-xs">
-                    <thead>
-                      <tr>
-                        <th>Mode</th>
-                        <th>Total Amount</th>
-                        <th>Paid</th>
-                        <th>Payable</th>
-                        <th>Reference</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(selectedDayRecord?.stockIn ?? []).map((r) => (
-                        <tr key={r.id}>
-                          <td className="capitalize font-semibold text-slate-300">{r.stockInMode}</td>
-                          <td className="font-mono">{formatMoney(r.totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
-                          <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
-                          <td className="text-slate-400 truncate max-w-[120px]" title={r.notes}>{r.notes || "—"}</td>
-                        </tr>
-                      ))}
-                      {(selectedDayRecord?.stockIn ?? []).length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No Jazz shipments received today.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Stock Out today */}
-              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
-                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <ArrowUpRight className="h-3.5 w-3.5 text-rose-400" />
-                    <span>Stock Out Issued Today (Accounts)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.entries ?? []).length} accounts allotted</span>
-                </h4>
-                <div className="table-wrap max-h-60 overflow-y-auto">
-                  <table className="!text-xs">
-                    <thead>
-                      <tr>
-                        <th>Account</th>
-                        <th>Qty</th>
-                        <th>Issued Value</th>
-                        <th>Payment</th>
-                        <th>Due</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(selectedDayRecord?.entries ?? []).map((e) => (
-                        <tr key={e.id}>
-                          <td className="font-semibold text-slate-300">{e.accountName}</td>
-                          <td>{formatMoney(e.totalQty)}</td>
-                          <td className="font-mono">{formatMoney(e.totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
-                          <td className="font-bold text-slate-200">{formatMoney(e.dueBalance)}</td>
-                        </tr>
-                      ))}
-                      {(selectedDayRecord?.entries ?? []).length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No customer allotments entered today.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </section>
 
           <section className="panel">
             <div className="panel-title">
@@ -1576,66 +1373,85 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {Object.entries(draft.productQuantities)
-                        .filter(([_, qty]) => qty > 0)
-                        .map(([prodId, qty]) => {
+                      {(() => {
+                        const addedItems = Object.entries(draft.productQuantities).filter(([_, qty]) => qty > 0);
+                        const totalQty = addedItems.reduce((sum, [, qty]) => sum + qty, 0);
+                        const totalAmount = addedItems.reduce((sum, [prodId, qty]) => {
                           const prod = products.find((p) => p.id === prodId);
-                          if (!prod) return null;
-                          const snapshot = previewEntry.products.find((item) => item.productId === prodId);
-                          return (
-                            <tr key={prodId}>
-                              <td className="font-semibold text-slate-200">{prod.name}</td>
-                              <td>{formatMoney(prod.rate)}</td>
-                              <td>
-                                {canEdit ? (
-                                  <div className="w-24">
-                                    <NumberInput
-                                      value={qty}
-                                      disabled={monthBootstrapPending}
-                                      onChange={(val) => {
-                                        setDraft((curr) => ({
-                                          ...curr,
-                                          productQuantities: {
-                                            ...curr.productQuantities,
-                                            [prodId]: val
-                                          }
-                                        }));
-                                      }}
-                                    />
-                                  </div>
-                                ) : (
-                                  qty
-                                )}
-                              </td>
-                              <td className="font-mono text-slate-300">{formatMoney(snapshot?.amount ?? (qty * prod.rate))}</td>
-                              {canEdit && (
-                                <td>
-                                  <button
-                                    type="button"
-                                    className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
-                                    title="Remove product"
-                                    onClick={() => {
-                                      setDraft((curr) => {
-                                        const next = { ...curr.productQuantities };
-                                        delete next[prodId];
-                                        return { ...curr, productQuantities: next };
-                                      });
-                                    }}
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </button>
+                          return sum + (qty * (prod?.rate ?? 0));
+                        }, 0);
+                        return (
+                          <>
+                            {addedItems.map(([prodId, qty]) => {
+                              const prod = products.find((p) => p.id === prodId);
+                              if (!prod) return null;
+                              const snapshot = previewEntry.products.find((item) => item.productId === prodId);
+                              return (
+                                <tr key={prodId}>
+                                  <td className="font-semibold text-slate-200">{prod.name}</td>
+                                  <td>{formatMoney(prod.rate)}</td>
+                                  <td>
+                                    {canEdit ? (
+                                      <div className="w-24">
+                                        <NumberInput
+                                          value={qty}
+                                          disabled={monthBootstrapPending}
+                                          onChange={(val) => {
+                                            setDraft((curr) => ({
+                                              ...curr,
+                                              productQuantities: {
+                                                ...curr.productQuantities,
+                                                [prodId]: val
+                                              }
+                                            }));
+                                          }}
+                                        />
+                                      </div>
+                                    ) : (
+                                      qty
+                                    )}
+                                  </td>
+                                  <td className="font-mono text-slate-300">{formatMoney(snapshot?.amount ?? (qty * prod.rate))}</td>
+                                  {canEdit && (
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
+                                        title="Remove product"
+                                        onClick={() => {
+                                          setDraft((curr) => {
+                                            const next = { ...curr.productQuantities };
+                                            delete next[prodId];
+                                            return { ...curr, productQuantities: next };
+                                          });
+                                        }}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                            {addedItems.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-100">{formatMoney(totalQty)}</td>
+                                <td className="font-mono text-slate-100">{formatMoney(totalAmount)}</td>
+                                {canEdit && <td className="text-slate-500">—</td>}
+                              </tr>
+                            )}
+                            {addedItems.length === 0 && (
+                              <tr>
+                                <td colSpan={5} className="text-center text-slate-500 py-4 italic">
+                                  No products added to this daily entry yet. Select a product above to begin.
                                 </td>
-                              )}
-                            </tr>
-                          );
-                        })}
-                      {Object.entries(draft.productQuantities).filter(([_, qty]) => qty > 0).length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="text-center text-slate-500 py-4 italic">
-                            No products added to this daily entry yet. Select a product above to begin.
-                          </td>
-                        </tr>
-                      )}
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -2087,49 +1903,77 @@ export function StockLedgerModule({
                       <th>Payable Remaining</th>
                     </tr>
                   </thead>
-                  <tbody>
-                    {(() => {
-                      const allShipments = days
-                        .flatMap((d) => d.stockIn ?? [])
-                        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+                    <tbody>
+                      {(() => {
+                        const allShipments = days
+                          .flatMap((d) => d.stockIn ?? [])
+                          .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-                      if (allShipments.length === 0) {
-                        const totalColSpan = 6 + products.filter(p => p.active).length;
+                        if (allShipments.length === 0) {
+                          const totalColSpan = 6 + products.filter(p => p.active).length;
+                          return (
+                            <tr>
+                              <td colSpan={totalColSpan} className="text-center text-slate-500 py-4 italic">
+                                No stock received entries found in this month.
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        const activeProds = products.filter(p => p.active);
+                        const productTotals = Object.fromEntries(activeProds.map((p) => [p.id, 0]));
+                        let totalQty = 0;
+                        let totalAmount = 0;
+                        let totalPaidAmount = 0;
+                        let totalPayable = 0;
+
                         return (
-                          <tr>
-                            <td colSpan={totalColSpan} className="text-center text-slate-500 py-4 italic">
-                              No stock received entries found in this month.
-                            </td>
-                          </tr>
-                        );
-                      }
-
-                      const activeProds = products.filter(p => p.active);
-
-                      return allShipments.map((s) => {
-                        return (
-                          <tr key={s.id}>
-                            <td className="font-semibold text-slate-200">{s.date}</td>
-                            <td className="uppercase font-bold text-[10px] text-slate-400">{s.stockInMode}</td>
-                            {activeProds.map((p) => {
-                              const match = s.products.find((sp) => sp.productId === p.id);
-                              const qty = match?.quantity ?? 0;
+                          <>
+                            {allShipments.map((s) => {
+                              totalQty += s.totalQty;
+                              totalAmount += s.totalAmount;
+                              totalPaidAmount += s.paidAmount;
+                              totalPayable += s.jazzPayableAmount;
+                              activeProds.forEach((p) => {
+                                const match = s.products.find((sp) => sp.productId === p.id);
+                                productTotals[p.id] = (productTotals[p.id] ?? 0) + (match?.quantity ?? 0);
+                              });
                               return (
-                                <td key={p.id} className={`text-center font-mono font-semibold ${qty > 0 ? "text-indigo-400" : "text-slate-500"}`}>
-                                  {qty > 0 ? qty : "—"}
-                                </td>
+                                <tr key={s.id}>
+                                  <td className="font-semibold text-slate-200">{s.date}</td>
+                                  <td className="uppercase font-bold text-[10px] text-slate-400">{s.stockInMode}</td>
+                                  {activeProds.map((p) => {
+                                    const match = s.products.find((sp) => sp.productId === p.id);
+                                    const qty = match?.quantity ?? 0;
+                                    return (
+                                      <td key={p.id} className={`text-center font-mono font-semibold ${qty > 0 ? "text-indigo-400" : "text-slate-500"}`}>
+                                        {qty > 0 ? qty : "—"}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="font-semibold text-slate-300">{formatMoney(s.totalQty)}</td>
+                                  <td className="font-mono text-slate-300">{formatMoney(s.totalAmount)}</td>
+                                  <td className="text-emerald-400 font-semibold font-mono">{formatMoney(s.paidAmount)}</td>
+                                  <td className="text-rose-400 font-bold font-mono">{formatMoney(s.jazzPayableAmount)}</td>
+                                </tr>
                               );
                             })}
-                            <td className="font-semibold text-slate-300">{formatMoney(s.totalQty)}</td>
-                            <td className="font-mono text-slate-300">{formatMoney(s.totalAmount)}</td>
-                            <td className="text-emerald-400 font-semibold font-mono">{formatMoney(s.paidAmount)}</td>
-                            <td className="text-rose-400 font-bold font-mono">{formatMoney(s.jazzPayableAmount)}</td>
-                          </tr>
+                            <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                              <td className="text-slate-100">Total</td>
+                              <td className="text-slate-500">—</td>
+                              {activeProds.map((p) => (
+                                <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(productTotals[p.id] ?? 0)}</td>
+                              ))}
+                              <td className="font-semibold text-slate-100">{formatMoney(totalQty)}</td>
+                              <td className="font-mono text-slate-100">{formatMoney(totalAmount)}</td>
+                              <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totalPaidAmount)}</td>
+                              <td className="text-rose-400 font-bold font-mono">{formatMoney(totalPayable)}</td>
+                            </tr>
+                          </>
                         );
-                      });
-                    })()}
-                  </tbody>
-                </table>
+                      })()}
+                    </tbody>
+                  </table>
               </div>
             </section>
 
@@ -2163,66 +2007,94 @@ export function StockLedgerModule({
                     </tr>
                   </thead>
                   <tbody>
-                    {accounts.map((a) => {
-                      const entriesPeriod = days.flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
-                      const activeProds = products.filter(p => p.active);
+                    {(() => {
+                      const activeProds = products.filter((p) => p.active);
+                      const totals = {
+                        opening: 0,
+                        totalQty: 0,
+                        totalAmount: 0,
+                        totalPayments: 0,
+                        currentDue: 0,
+                        closing: 0,
+                        productQuantities: Object.fromEntries(activeProds.map((p) => [p.id, 0]))
+                      };
 
-                      // Product-wise Allotment calculation
-                      const productQuantities: Record<string, number> = {};
-                      activeProds.forEach((p) => {
-                        productQuantities[p.id] = 0;
-                      });
+                      const rows = accounts.map((a) => {
+                        const entriesPeriod = days.flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
 
-                      entriesPeriod.forEach((e) => {
-                        e.products.forEach((snap) => {
-                          if (productQuantities[snap.productId] !== undefined) {
-                            productQuantities[snap.productId] += snap.quantity;
-                          }
+                        const productQuantities: Record<string, number> = {};
+                        activeProds.forEach((p) => {
+                          productQuantities[p.id] = 0;
                         });
+
+                        entriesPeriod.forEach((e) => {
+                          e.products.forEach((snap) => {
+                            if (productQuantities[snap.productId] !== undefined) {
+                              productQuantities[snap.productId] += snap.quantity;
+                              totals.productQuantities[snap.productId] = roundMoney((totals.productQuantities[snap.productId] as number) + snap.quantity);
+                            }
+                          });
+                        });
+
+                        const sortedDaysWithEntries = [...days].sort((x, y) => x.dayNo - y.dayNo);
+                        const firstEntry = sortedDaysWithEntries.flatMap((d) => d.entries.filter((e) => e.accountId === a.id)).at(0);
+                        const opening = firstEntry ? firstEntry.carryForwardBalance : (a.openingBalance ?? 0);
+                        const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
+                        const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
+                        const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
+                        const currentDue = roundMoney(opening + totalAmount - totalPayments);
+                        const closing = currentDue;
+
+                        totals.opening = roundMoney(totals.opening + opening);
+                        totals.totalQty = roundMoney(totals.totalQty + totalQty);
+                        totals.totalAmount = roundMoney(totals.totalAmount + totalAmount);
+                        totals.totalPayments = roundMoney(totals.totalPayments + totalPayments);
+                        totals.currentDue = roundMoney(totals.currentDue + currentDue);
+                        totals.closing = roundMoney(totals.closing + closing);
+
+                        return (
+                          <tr key={a.id}>
+                            <td className="font-semibold text-slate-200">{a.name}</td>
+                            <td className="uppercase font-bold text-[10px] text-slate-400">{a.type}</td>
+                            <td className="font-mono">{formatMoney(opening)}</td>
+                            {activeProds.map((p) => {
+                              const qty = productQuantities[p.id] ?? 0;
+                              return (
+                                <td key={p.id} className={`text-center font-mono font-semibold ${qty > 0 ? "text-indigo-400" : "text-slate-500"}`}>
+                                  {qty > 0 ? qty : "—"}
+                                </td>
+                              );
+                            })}
+                            <td className="font-semibold text-slate-300">{formatMoney(totalQty)}</td>
+                            <td className="font-mono text-slate-300">{formatMoney(totalAmount)}</td>
+                            <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totalPayments)}</td>
+                            <td className="text-slate-500 font-mono">—</td>
+                            <td className="text-slate-300 font-semibold font-mono">{formatMoney(currentDue)}</td>
+                            <td className="text-rose-400 font-bold font-mono">{formatMoney(closing)}</td>
+                          </tr>
+                        );
                       });
-
-                      const sortedDaysWithEntries = [...days]
-                        .sort((x, y) => x.dayNo - y.dayNo);
-
-                      const firstEntry = sortedDaysWithEntries
-                        .flatMap((d) => d.entries.filter((e) => e.accountId === a.id))
-                        .at(0);
-
-                      const latestEntry = sortedDaysWithEntries
-                        .flatMap((d) => d.entries.filter((e) => e.accountId === a.id))
-                        .at(-1);
-
-                      const opening = firstEntry ? firstEntry.carryForwardBalance : (a.openingBalance ?? 0);
-                      const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
-                      const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
-                      const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
-                      const adjustments = 0;
-                      
-                      const currentDue = roundMoney(opening + totalAmount - totalPayments);
-                      const closing = roundMoney(opening + totalAmount - totalPayments + adjustments);
 
                       return (
-                        <tr key={a.id}>
-                          <td className="font-semibold text-slate-200">{a.name}</td>
-                          <td className="uppercase font-bold text-[10px] text-slate-400">{a.type}</td>
-                          <td className="font-mono">{formatMoney(opening)}</td>
-                          {activeProds.map((p) => {
-                            const qty = productQuantities[p.id] ?? 0;
-                            return (
-                              <td key={p.id} className={`text-center font-mono font-semibold ${qty > 0 ? "text-indigo-400" : "text-slate-500"}`}>
-                                {qty > 0 ? qty : "—"}
-                              </td>
-                            );
-                          })}
-                          <td className="font-semibold text-slate-300">{formatMoney(totalQty)}</td>
-                          <td className="font-mono text-slate-300">{formatMoney(totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totalPayments)}</td>
-                          <td className="text-slate-500 font-mono">—</td>
-                          <td className="text-slate-300 font-semibold font-mono">{formatMoney(currentDue)}</td>
-                          <td className="text-rose-400 font-bold font-mono">{formatMoney(closing)}</td>
-                        </tr>
+                        <>
+                          {rows}
+                          <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                            <td className="text-slate-100">Total</td>
+                            <td className="text-slate-500">—</td>
+                            <td className="font-mono text-slate-100">{formatMoney(totals.opening)}</td>
+                            {activeProds.map((p) => (
+                              <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(totals.productQuantities[p.id] ?? 0)}</td>
+                            ))}
+                            <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
+                            <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
+                            <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totals.totalPayments)}</td>
+                            <td className="text-slate-500 font-mono">—</td>
+                            <td className="text-slate-100">{formatMoney(totals.currentDue)}</td>
+                            <td className="text-rose-400 font-bold font-mono">{formatMoney(totals.closing)}</td>
+                          </tr>
+                        </>
                       );
-                    })}
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -3139,38 +3011,74 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {accounts
-                        .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
-                        .map((a) => {
-                          const entriesPeriod = days
-                            .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                            .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
+                      {(() => {
+                        const rows = accounts
+                          .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
+                          .flatMap((a) => {
+                            const entriesPeriod = days
+                              .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
+                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
 
-                          if (entriesPeriod.length === 0 && filterDueStatus === "due") return null;
+                            if (entriesPeriod.length === 0 && filterDueStatus === "due") return [];
 
-                          const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
-                          const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
-                          const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
-                          const latestEntry = entriesPeriod.at(-1);
-                          const carry = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
-                          const currentDue = latestEntry?.dueBalance ?? carry;
+                            const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
+                            const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
+                            const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
+                            const latestEntry = entriesPeriod.at(-1);
+                            const carry = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
+                            const currentDue = latestEntry?.dueBalance ?? carry;
 
-                          if (filterDueStatus === "due" && currentDue === 0) return null;
-                          if (filterDueStatus === "nodue" && currentDue !== 0) return null;
+                            if (filterDueStatus === "due" && currentDue === 0) return [];
+                            if (filterDueStatus === "nodue" && currentDue !== 0) return [];
 
-                          return (
-                            <tr key={a.id}>
-                              <td className="font-semibold text-slate-200">{a.name}</td>
-                              <td className="uppercase font-bold text-slate-400">{a.type}</td>
-                              <td>{formatMoney(totalQty)}</td>
-                              <td className="font-mono">{formatMoney(totalAmount)}</td>
-                              <td className="text-emerald-400 font-semibold">{formatMoney(totalPayments)}</td>
-                              <td>{formatMoney(carry)}</td>
-                              <td className="font-bold text-slate-100">{formatMoney(currentDue)}</td>
-                              <td className="text-xs text-slate-400">{latestEntry?.date || "—"}</td>
-                            </tr>
-                          );
-                        })}
+                            return [{
+                              id: a.id,
+                              name: a.name,
+                              type: a.type,
+                              totalQty,
+                              totalAmount,
+                              totalPayments,
+                              carry,
+                              currentDue,
+                              latestDate: latestEntry?.date || "—"
+                            }];
+                          });
+                        const totals = rows.reduce((acc, row) => ({
+                          totalQty: acc.totalQty + row.totalQty,
+                          totalAmount: acc.totalAmount + row.totalAmount,
+                          totalPayments: acc.totalPayments + row.totalPayments,
+                          carry: acc.carry + row.carry,
+                          currentDue: acc.currentDue + row.currentDue
+                        }), { totalQty: 0, totalAmount: 0, totalPayments: 0, carry: 0, currentDue: 0 });
+                        return (
+                          <>
+                            {rows.map((row) => (
+                              <tr key={row.id}>
+                                <td className="font-semibold text-slate-200">{row.name}</td>
+                                <td className="uppercase font-bold text-slate-400">{row.type}</td>
+                                <td>{formatMoney(row.totalQty)}</td>
+                                <td className="font-mono">{formatMoney(row.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(row.totalPayments)}</td>
+                                <td>{formatMoney(row.carry)}</td>
+                                <td className="font-bold text-slate-100">{formatMoney(row.currentDue)}</td>
+                                <td className="text-xs text-slate-400">{row.latestDate}</td>
+                              </tr>
+                            ))}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
+                                <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.totalPayments)}</td>
+                                <td className="text-slate-100">{formatMoney(totals.carry)}</td>
+                                <td className="font-bold text-slate-100">{formatMoney(totals.currentDue)}</td>
+                                <td className="text-slate-500">—</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3193,30 +3101,54 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {days
-                        .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                        .flatMap((d) => (d.stockIn ?? []).filter(r => !filterStockInMode || r.stockInMode === filterStockInMode))
-                        .map((r) => (
-                          <tr key={r.id}>
-                            <td className="font-semibold">{r.date}</td>
-                            <td>
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${r.stockInMode === "cash" ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
-                                {r.stockInMode}
-                              </span>
-                            </td>
-                            <td className="text-xs max-w-xs truncate">
-                              {r.products
-                                .filter((p) => !filterProductId || p.productId === filterProductId)
-                                .map((p) => `${p.productName} (x${p.quantity})`)
-                                .join(", ")}
-                            </td>
-                            <td>{formatMoney(r.totalQty)}</td>
-                            <td className="font-mono">{formatMoney(r.totalAmount)}</td>
-                            <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
-                            <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
-                            <td className="text-xs text-slate-400 italic">{r.notes || "—"}</td>
-                          </tr>
-                        ))}
+                      {(() => {
+                        const rows = days
+                          .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
+                          .flatMap((d) => (d.stockIn ?? []).filter(r => !filterStockInMode || r.stockInMode === filterStockInMode));
+                        const totals = rows.reduce((acc, row) => ({
+                          totalQty: acc.totalQty + row.totalQty,
+                          totalAmount: acc.totalAmount + row.totalAmount,
+                          paidAmount: acc.paidAmount + row.paidAmount,
+                          jazzPayableAmount: acc.jazzPayableAmount + row.jazzPayableAmount
+                        }), { totalQty: 0, totalAmount: 0, paidAmount: 0, jazzPayableAmount: 0 });
+                        return (
+                          <>
+                            {rows.map((r) => (
+                              <tr key={r.id}>
+                                <td className="font-semibold">{r.date}</td>
+                                <td>
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${r.stockInMode === "cash" ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
+                                    {r.stockInMode}
+                                  </span>
+                                </td>
+                                <td className="text-xs max-w-xs truncate">
+                                  {r.products
+                                    .filter((p) => !filterProductId || p.productId === filterProductId)
+                                    .map((p) => `${p.productName} (x${p.quantity})`)
+                                    .join(", ")}
+                                </td>
+                                <td>{formatMoney(r.totalQty)}</td>
+                                <td className="font-mono">{formatMoney(r.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
+                                <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
+                                <td className="text-xs text-slate-400 italic">{r.notes || "—"}</td>
+                              </tr>
+                            ))}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
+                                <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.paidAmount)}</td>
+                                <td className="text-rose-400 font-semibold">{formatMoney(totals.jazzPayableAmount)}</td>
+                                <td className="text-slate-500">—</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3239,26 +3171,50 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {days
-                        .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                        .flatMap((d) => d.entries.filter(e => (!filterAccountId || e.accountId === filterAccountId) && (!filterAccountType || e.accountType === filterAccountType)))
-                        .map((e) => (
-                          <tr key={e.id}>
-                            <td>Day {e.dayNo} <span className="text-xs text-slate-500">({e.date})</span></td>
-                            <td className="font-semibold text-slate-200">{e.accountName}</td>
-                            <td className="uppercase font-bold text-slate-400 text-xs">{e.accountType}</td>
-                            <td className="text-xs max-w-xs truncate">
-                              {e.products
-                                .filter((p) => !filterProductId || p.productId === filterProductId)
-                                .map((p) => `${p.productName} (x${p.quantity})`)
-                                .join(", ")}
-                            </td>
-                            <td>{formatMoney(e.totalQty)}</td>
-                            <td className="font-mono text-slate-300">{formatMoney(e.totalAmount)}</td>
-                            <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
-                            <td className="font-bold text-slate-100">{formatMoney(e.dueBalance)}</td>
-                          </tr>
-                        ))}
+                      {(() => {
+                        const rows = days
+                          .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
+                          .flatMap((d) => d.entries.filter(e => (!filterAccountId || e.accountId === filterAccountId) && (!filterAccountType || e.accountType === filterAccountType)));
+                        const totals = rows.reduce((acc, row) => ({
+                          totalQty: acc.totalQty + row.totalQty,
+                          totalAmount: acc.totalAmount + row.totalAmount,
+                          totalPaymentReceived: acc.totalPaymentReceived + row.totalPaymentReceived,
+                          dueBalance: acc.dueBalance + row.dueBalance
+                        }), { totalQty: 0, totalAmount: 0, totalPaymentReceived: 0, dueBalance: 0 });
+                        return (
+                          <>
+                            {rows.map((e) => (
+                              <tr key={e.id}>
+                                <td>Day {e.dayNo} <span className="text-xs text-slate-500">({e.date})</span></td>
+                                <td className="font-semibold text-slate-200">{e.accountName}</td>
+                                <td className="uppercase font-bold text-slate-400 text-xs">{e.accountType}</td>
+                                <td className="text-xs max-w-xs truncate">
+                                  {e.products
+                                    .filter((p) => !filterProductId || p.productId === filterProductId)
+                                    .map((p) => `${p.productName} (x${p.quantity})`)
+                                    .join(", ")}
+                                </td>
+                                <td>{formatMoney(e.totalQty)}</td>
+                                <td className="font-mono text-slate-300">{formatMoney(e.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
+                                <td className="font-bold text-slate-100">{formatMoney(e.dueBalance)}</td>
+                              </tr>
+                            ))}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
+                                <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.totalPaymentReceived)}</td>
+                                <td className="font-bold text-slate-100">{formatMoney(totals.dueBalance)}</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3278,28 +3234,51 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {accounts
-                        .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
-                        .map((a) => {
-                          const entriesPeriod = days
-                            .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                            .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
+                      {(() => {
+                        const rows = accounts
+                          .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
+                          .map((a) => {
+                            const entriesPeriod = days
+                              .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
+                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
 
-                          const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
-                          const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
-                          const latestEntry = entriesPeriod.at(-1);
-                          const currentDue = latestEntry?.dueBalance ?? a.openingBalance ?? 0;
-
-                          return (
-                            <tr key={a.id}>
-                              <td className="font-semibold text-slate-200">{a.name}</td>
-                              <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
-                              <td className="font-mono text-slate-300">{formatMoney(totalAmount)}</td>
-                              <td className="text-emerald-400 font-extrabold">{formatMoney(totalPayments)}</td>
-                              <td className="font-bold text-rose-400">{formatMoney(currentDue)}</td>
-                            </tr>
-                          );
-                        })}
+                            return {
+                              id: a.id,
+                              name: a.name,
+                              type: a.type,
+                              totalAmount: entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0),
+                              totalPayments: entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0),
+                              currentDue: entriesPeriod.at(-1)?.dueBalance ?? a.openingBalance ?? 0
+                            };
+                          });
+                        const totals = rows.reduce((acc, row) => ({
+                          totalAmount: acc.totalAmount + row.totalAmount,
+                          totalPayments: acc.totalPayments + row.totalPayments,
+                          currentDue: acc.currentDue + row.currentDue
+                        }), { totalAmount: 0, totalPayments: 0, currentDue: 0 });
+                        return (
+                          <>
+                            {rows.map((a) => (
+                              <tr key={a.id}>
+                                <td className="font-semibold text-slate-200">{a.name}</td>
+                                <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
+                                <td className="font-mono text-slate-300">{formatMoney(a.totalAmount)}</td>
+                                <td className="text-emerald-400 font-extrabold">{formatMoney(a.totalPayments)}</td>
+                                <td className="font-bold text-rose-400">{formatMoney(a.currentDue)}</td>
+                              </tr>
+                            ))}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
+                                <td className="text-emerald-400 font-extrabold">{formatMoney(totals.totalPayments)}</td>
+                                <td className="font-bold text-rose-400">{formatMoney(totals.currentDue)}</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3320,33 +3299,64 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {accounts
-                        .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
-                        .map((a) => {
-                          const entriesPeriod = days
-                            .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                            .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
+                      {(() => {
+                        const rows = accounts
+                          .filter((a) => (!filterAccountId || a.id === filterAccountId) && (!filterAccountType || a.type === filterAccountType))
+                          .flatMap((a) => {
+                            const entriesPeriod = days
+                              .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
+                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
 
-                          const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
-                          const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
-                          const latestEntry = entriesPeriod.at(-1);
-                          const prevDue = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
-                          const currentDue = latestEntry?.dueBalance ?? prevDue;
+                            const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
+                            const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
+                            const latestEntry = entriesPeriod.at(-1);
+                            const prevDue = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
+                            const currentDue = latestEntry?.dueBalance ?? prevDue;
 
-                          if (filterDueStatus === "due" && currentDue === 0) return null;
-                          if (filterDueStatus === "nodue" && currentDue !== 0) return null;
+                            if (filterDueStatus === "due" && currentDue === 0) return [];
+                            if (filterDueStatus === "nodue" && currentDue !== 0) return [];
 
-                          return (
-                            <tr key={a.id}>
-                              <td className="font-semibold text-slate-200">{a.name}</td>
-                              <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
-                              <td>{formatMoney(prevDue)}</td>
-                              <td className="text-amber-500 font-semibold">+{formatMoney(totalAmount)}</td>
-                              <td className="text-emerald-400 font-semibold">-{formatMoney(totalPayments)}</td>
-                              <td className="font-bold text-rose-400">{formatMoney(currentDue)}</td>
-                            </tr>
-                          );
-                        })}
+                            return [{
+                              id: a.id,
+                              name: a.name,
+                              type: a.type,
+                              prevDue,
+                              totalAmount,
+                              totalPayments,
+                              currentDue
+                            }];
+                          });
+                        const totals = rows.reduce((acc, row) => ({
+                          prevDue: acc.prevDue + row.prevDue,
+                          totalAmount: acc.totalAmount + row.totalAmount,
+                          totalPayments: acc.totalPayments + row.totalPayments,
+                          currentDue: acc.currentDue + row.currentDue
+                        }), { prevDue: 0, totalAmount: 0, totalPayments: 0, currentDue: 0 });
+                        return (
+                          <>
+                            {rows.map((a) => (
+                              <tr key={a.id}>
+                                <td className="font-semibold text-slate-200">{a.name}</td>
+                                <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
+                                <td>{formatMoney(a.prevDue)}</td>
+                                <td className="text-amber-500 font-semibold">+{formatMoney(a.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">-{formatMoney(a.totalPayments)}</td>
+                                <td className="font-bold text-rose-400">{formatMoney(a.currentDue)}</td>
+                              </tr>
+                            ))}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td className="text-slate-100">{formatMoney(totals.prevDue)}</td>
+                                <td className="text-amber-500 font-semibold">+{formatMoney(totals.totalAmount)}</td>
+                                <td className="text-emerald-400 font-semibold">-{formatMoney(totals.totalPayments)}</td>
+                                <td className="font-bold text-rose-400">{formatMoney(totals.currentDue)}</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3369,35 +3379,59 @@ export function StockLedgerModule({
                       </tr>
                     </thead>
                     <tbody>
-                      {currentStockBalances
-                        .filter((row) => !filterProductId || row.productId === filterProductId)
-                        .map((row) => {
-                          const isLow = row.currentStock <= 5;
-                          const rate = productRateById[row.productId] ?? 0;
-                          const balanceValue = roundMoney(row.currentStock * rate);
-                          return (
-                            <tr key={row.productId}>
-                              <td className="font-semibold text-slate-200">{row.productName}</td>
-                              <td className="font-mono">{formatMoney(rate)}</td>
-                              <td>{formatMoney(row.openingStock)}</td>
-                              <td className="text-emerald-400">+{formatMoney(row.totalStockIn)}</td>
-                              <td className="text-rose-400">-{formatMoney(row.totalStockOut)}</td>
-                              <td className="font-bold text-slate-100">{formatMoney(row.currentStock)}</td>
-                              <td className="font-mono font-semibold text-emerald-400">{formatMoney(balanceValue)}</td>
-                              <td>
-                                <span className={`px-2 py-0.5 rounded text-xs font-semibold uppercase ${
-                                  row.currentStock < 0 
-                                    ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                                    : isLow
-                                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                                      : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                                }`}>
-                                  {row.currentStock < 0 ? "Negative Stock" : isLow ? "Low Stock" : "In Stock"}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
+                      {(() => {
+                        const rows = currentStockBalances.filter((row) => !filterProductId || row.productId === filterProductId);
+                        const totals = rows.reduce((acc, row) => ({
+                          openingStock: acc.openingStock + row.openingStock,
+                          totalStockIn: acc.totalStockIn + row.totalStockIn,
+                          totalStockOut: acc.totalStockOut + row.totalStockOut,
+                          currentStock: acc.currentStock + row.currentStock,
+                          balanceValue: acc.balanceValue + (row.currentStock * (productRateById[row.productId] ?? 0))
+                        }), { openingStock: 0, totalStockIn: 0, totalStockOut: 0, currentStock: 0, balanceValue: 0 });
+                        return (
+                          <>
+                            {rows.map((row) => {
+                              const isLow = row.currentStock <= 5;
+                              const rate = productRateById[row.productId] ?? 0;
+                              const balanceValue = roundMoney(row.currentStock * rate);
+                              return (
+                                <tr key={row.productId}>
+                                  <td className="font-semibold text-slate-200">{row.productName}</td>
+                                  <td className="font-mono">{formatMoney(rate)}</td>
+                                  <td>{formatMoney(row.openingStock)}</td>
+                                  <td className="text-emerald-400">+{formatMoney(row.totalStockIn)}</td>
+                                  <td className="text-rose-400">-{formatMoney(row.totalStockOut)}</td>
+                                  <td className="font-bold text-slate-100">{formatMoney(row.currentStock)}</td>
+                                  <td className="font-mono font-semibold text-emerald-400">{formatMoney(balanceValue)}</td>
+                                  <td>
+                                    <span className={`px-2 py-0.5 rounded text-xs font-semibold uppercase ${
+                                      row.currentStock < 0 
+                                        ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                                        : isLow
+                                          ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                          : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                    }`}>
+                                      {row.currentStock < 0 ? "Negative Stock" : isLow ? "Low Stock" : "In Stock"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                            {rows.length > 0 && (
+                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                                <td className="text-slate-100">Total</td>
+                                <td className="text-slate-500">—</td>
+                                <td>{formatMoney(totals.openingStock)}</td>
+                                <td className="text-emerald-400">+{formatMoney(totals.totalStockIn)}</td>
+                                <td className="text-rose-400">-{formatMoney(totals.totalStockOut)}</td>
+                                <td className="font-bold text-slate-100">{formatMoney(totals.currentStock)}</td>
+                                <td className="font-mono font-semibold text-emerald-400">{formatMoney(totals.balanceValue)}</td>
+                                <td className="text-slate-500">—</td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3445,6 +3479,13 @@ export function StockLedgerModule({
                           <td className="text-blue-400 font-semibold">{formatMoney(creditPaidAmount)}</td>
                           <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
                         </tr>
+                        <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                          <td className="text-slate-100">Total</td>
+                          <td>{cashRecords.length + creditRecords.length}</td>
+                          <td>{formatMoney(cashTotalAmount + creditTotalAmount)}</td>
+                          <td className="text-blue-400 font-semibold">{formatMoney(cashTotalAmount + creditPaidAmount)}</td>
+                          <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
+                        </tr>
                       </tbody>
                     </table>
                   </div>
@@ -3466,19 +3507,25 @@ export function StockLedgerModule({
                     </thead>
                     <tbody>
                       {auditLogs.length > 0 ? (
-                        auditLogs.map((log) => (
-                          <tr key={log.id}>
-                            <td className="text-xs">{new Date(log.createdAt).toLocaleString()}</td>
-                            <td>
-                              <span className="font-semibold text-indigo-400 capitalize">{log.action}</span>
-                            </td>
-                            <td>{log.actorEmail || "System Automation"}</td>
-                            <td className="uppercase text-xs font-bold text-slate-500">{log.actorRole}</td>
-                            <td className="text-slate-300 max-w-sm truncate" title={log.summary}>
-                              {log.summary}
-                            </td>
+                        <>
+                          {auditLogs.map((log) => (
+                            <tr key={log.id}>
+                              <td className="text-xs">{new Date(log.createdAt).toLocaleString()}</td>
+                              <td>
+                                <span className="font-semibold text-indigo-400 capitalize">{log.action}</span>
+                              </td>
+                              <td>{log.actorEmail || "System Automation"}</td>
+                              <td className="uppercase text-xs font-bold text-slate-500">{log.actorRole}</td>
+                              <td className="text-slate-300 max-w-sm truncate" title={log.summary}>
+                                {log.summary}
+                              </td>
+                            </tr>
+                          ))}
+                          <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                            <td className="text-slate-100">Total</td>
+                            <td colSpan={4} className="text-slate-300">{auditLogs.length} log entries</td>
                           </tr>
-                        ))
+                        </>
                       ) : (
                         <tr>
                           <td colSpan={5} className="text-center text-slate-500 py-4 italic">
