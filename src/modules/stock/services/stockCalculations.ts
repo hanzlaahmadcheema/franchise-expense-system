@@ -253,15 +253,24 @@ export function calculateMonthlySummary(monthId: string, days: StockDayRecord[])
 }
 
 function buildStockCarryForwardSeed(
+  days: StockDayRecord[],
   accounts: StockAccountProfile[],
   previousSummary?: StockMonthlySummary | null
 ) {
   const seed = new Map<string, number>();
+  const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
   for (const account of accounts) {
+    const firstEntry = sortedDays.flatMap((day) => day.entries.filter((entry) => entry.accountId === account.id)).at(0);
+    if (firstEntry) {
+      seed.set(account.id, roundMoney(firstEntry.carryForwardBalance));
+      continue;
+    }
     seed.set(account.id, roundMoney(account.openingBalance ?? 0));
   }
   for (const account of previousSummary?.accountTotals ?? []) {
-    seed.set(account.accountId, roundMoney(account.dueBalance));
+    if (!seed.has(account.accountId)) {
+      seed.set(account.accountId, roundMoney(account.dueBalance));
+    }
   }
   return seed;
 }
@@ -272,7 +281,7 @@ export function recalculateStockMonthEntries(
   previousSummary?: StockMonthlySummary | null
 ) {
   const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
-  const seedByAccount = buildStockCarryForwardSeed(accounts, previousSummary);
+  const seedByAccount = buildStockCarryForwardSeed(sortedDays, accounts, previousSummary);
   const runningByAccount = new Map(seedByAccount);
 
   return sortedDays.map((day) => {

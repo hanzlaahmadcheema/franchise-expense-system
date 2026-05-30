@@ -267,6 +267,89 @@ describe("stock calculations", () => {
     expect(recalculated[1].entries[0].dueBalance).toBe(385);
   });
 
+  it("preserves the first saved opening balance when recalculating a month", () => {
+    const openingAccount: StockAccountProfile = {
+      ...account,
+      openingBalance: 0
+    };
+    const day1Entry = buildStockEntry({
+      id: openingAccount.id,
+      date: "May 1, 2026",
+      monthId: "2026-05",
+      dayNo: 1,
+      account: openingAccount,
+      draft: {
+        accountId: openingAccount.id,
+        productQuantities: { sim: 1 },
+        paymentReceived: 0
+      },
+      products: [product],
+      carryForwardBalance: 57432,
+      createdBy: "u1",
+      timestamp: 10
+    });
+    const day2Entry = buildStockEntry({
+      id: openingAccount.id,
+      date: "May 2, 2026",
+      monthId: "2026-05",
+      dayNo: 2,
+      account: openingAccount,
+      draft: {
+        accountId: openingAccount.id,
+        productQuantities: { sim: 100 },
+        paymentReceived: 0
+      },
+      products: [product],
+      carryForwardBalance: 0,
+      createdBy: "u1",
+      timestamp: 20
+    });
+
+    const days: StockDayRecord[] = [
+      {
+        id: "1",
+        date: "May 1, 2026",
+        monthId: "2026-05",
+        dayNo: 1,
+        status: "open",
+        entries: [day1Entry],
+        summary: {
+          accountCount: 1,
+          totalQty: day1Entry.totalQty,
+          totalAmount: day1Entry.totalAmount,
+          totalPaymentReceived: day1Entry.totalPaymentReceived,
+          totalDueBalance: day1Entry.dueBalance
+        },
+        createdBy: "u1",
+        createdAt: 10,
+        updatedAt: 10
+      },
+      {
+        id: "2",
+        date: "May 2, 2026",
+        monthId: "2026-05",
+        dayNo: 2,
+        status: "open",
+        entries: [day2Entry],
+        summary: {
+          accountCount: 1,
+          totalQty: day2Entry.totalQty,
+          totalAmount: day2Entry.totalAmount,
+          totalPaymentReceived: day2Entry.totalPaymentReceived,
+          totalDueBalance: day2Entry.dueBalance
+        },
+        createdBy: "u1",
+        createdAt: 20,
+        updatedAt: 20
+      }
+    ];
+
+    const recalculated = recalculateStockMonthEntries(days, [openingAccount]);
+    expect(recalculated[0].entries[0].carryForwardBalance).toBe(57432);
+    expect(recalculated[0].entries[0].dueBalance).toBe(57552);
+    expect(recalculated[1].entries[0].carryForwardBalance).toBe(57552);
+  });
+
   describe("Jazz Stock In & Current Balance calculations", () => {
     it("calculates Jazz running payable correctly", () => {
       const records = [
