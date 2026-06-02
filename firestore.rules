@@ -55,11 +55,6 @@ service cloud.firestore {
         request.resource.data.importType == "expense";
     }
 
-    function canAdminWriteExpenseRows(monthId) {
-      return isAdmin() &&
-        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
-    }
-
     function canAdminManageOpenMonth(monthId) {
       return isAdmin() &&
         get(/databases/$(database)/documents/months/$(monthId)).data.status == "open";
@@ -115,6 +110,41 @@ service cloud.firestore {
       return data.entryYear == request.time.year() &&
         data.entryMonth == request.time.month() &&
         data.entryDay == request.time.day();
+    }
+
+    function canAdminRecalculateStockDay(monthId, dayId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
+        dayId != "32" &&
+        request.resource.data.dayNo == resource.data.dayNo &&
+        request.resource.data.entryYear == resource.data.entryYear &&
+        request.resource.data.entryMonth == resource.data.entryMonth &&
+        request.resource.data.entryDay == resource.data.entryDay &&
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.recalculatedAt != null;
+    }
+
+    function canAdminEditStockDay(monthId, dayId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
+        dayId != "32" &&
+        (
+          resource.data.status == "open" ||
+          isLiveStockDayData(request.resource.data) ||
+          ("reopenedUntilAt" in resource.data && resource.data.reopenedUntilAt != null && resource.data.reopenedUntilAt > request.time.toMillis())
+        );
+    }
+
+    function canAdminEditStockRows(monthId, dayId) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
+        dayId != "32" &&
+        (
+          get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
+          ("reopenedUntilAt" in get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data &&
+           get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt != null &&
+           get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt > request.time.toMillis())
+        );
     }
 
     function canCloseEditableDay(monthId, dayId) {
@@ -183,13 +213,13 @@ service cloud.firestore {
 
       match /days/{dayId}/expenses/{expenseId} {
         allow read: if isActiveUser();
-        allow create, update: if canManageDayData(monthId, get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data);
+        allow create, update: if canManageDayData(monthId, getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data);
         allow delete: if isOwner() || canAdminManageOpenMonth(monthId);
       }
 
       match /days/{dayId}/{subCollection=**}/{docId} {
         allow read: if isActiveUser();
-        allow create, update: if canManageDayData(monthId, get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data);
+        allow create, update: if canManageDayData(monthId, getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data);
         allow delete: if isOwner() || canAdminManageOpenMonth(monthId);
       }
     }
@@ -291,6 +321,11 @@ service cloud.firestore {
       allow create, update, delete: if isOwner();
     }
 
+    match /stockSettings/recoveryBuckets/items/{bucketId} {
+      allow read: if isActiveUser();
+      allow create, update, delete: if isOwner();
+    }
+
     match /stockSettings/audit/items/{eventId} {
       allow read: if isOwner();
       allow create: if isOwner();
@@ -324,25 +359,14 @@ service cloud.firestore {
         allow read: if isActiveUser();
         allow create: if (isOwner() || isAdmin()) &&
           get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
-        allow update: if (isOwner() || (isAdmin() && (
-            resource.data.status == "open" ||
-            isLiveStockDayData(request.resource.data) ||
-            ("reopenedUntilAt" in resource.data && resource.data.reopenedUntilAt != null && resource.data.reopenedUntilAt > request.time.toMillis())
-          ))) &&
-          get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
+        allow update: if isOwner() || canAdminRecalculateStockDay(monthId, dayId) || canAdminEditStockDay(monthId, dayId);
         allow delete: if isOwner();
 
         match /entries/{entryId} {
           allow read: if isActiveUser();
           allow create: if (isOwner() || isAdmin()) &&
             get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
-          allow update: if (isOwner() || (isAdmin() && (
-            get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-            ("reopenedUntilAt" in get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt != null &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt > request.time.toMillis())
-          ))) &&
-          get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
+          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
           allow delete: if isOwner();
         }
 
@@ -350,13 +374,7 @@ service cloud.firestore {
           allow read: if isActiveUser();
           allow create: if (isOwner() || isAdmin()) &&
             get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
-          allow update: if (isOwner() || (isAdmin() && (
-            get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-            ("reopenedUntilAt" in get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt != null &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt > request.time.toMillis())
-          ))) &&
-          get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
+          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
           allow delete: if isOwner();
         }
 
@@ -364,13 +382,7 @@ service cloud.firestore {
           allow read: if isActiveUser();
           allow create: if (isOwner() || isAdmin()) &&
             get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
-          allow update: if (isOwner() || (isAdmin() && (
-            get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-            ("reopenedUntilAt" in get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt != null &&
-             get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.reopenedUntilAt > request.time.toMillis())
-          ))) &&
-          get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open";
+          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
           allow delete: if isOwner();
         }
       }

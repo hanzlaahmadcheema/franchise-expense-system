@@ -60,6 +60,14 @@ import {
   monthLabel,
   parseMoneyInput
 } from "../utils/jazzLoadFormatters";
+import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
+import { UniversalDayControlBar } from "../../../shared/dayControls/UniversalDayControlBar";
+import { useSidebarDayControls } from "../../../shared/context/SidebarDayControlsContext";
+import { useSelectedDate } from "../../../shared/context/SelectedDateContext";
+import { useAutoSaveEntry } from "../../../shared/hooks/useAutoSaveEntry";
+import { runMasterRecalculation } from "../../../shared/services/masterRecalculationService";
+import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
+import { createJazzLoadRecalculationAdapter } from "../adapters/jazzLoadRecalculationAdapter";
 
 type JazzLoadSection = "daily" | "dashboard" | "reports" | "settings" | "backup";
 type JazzLoadPopup = {
@@ -79,6 +87,7 @@ type Props = {
   onStatus: (message: string) => void;
   onExportBackup: () => void;
   onImportBackup: (file: File | null) => void;
+  onTriggerMasterRefresh?: (adapter: MasterRecalculationAdapter, title: string) => Promise<void>;
   loading?: boolean;
 };
 
@@ -214,10 +223,11 @@ export function JazzLoadModule({
   onStatus,
   onExportBackup,
   onImportBackup,
+  onTriggerMasterRefresh,
   loading
 }: Props) {
+  const { selectedDay, setSelectedDay } = useSelectedDate();
   const [section, setSection] = useState<JazzLoadSection>("daily");
-  const [selectedDay, setSelectedDay] = useState(new Date().getDate());
   const [months, setMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<JazzLoadDay[]>([]);
   const [previousMonthDays, setPreviousMonthDays] = useState<JazzLoadDay[]>([]);
@@ -239,21 +249,11 @@ export function JazzLoadModule({
   const [doNameDraft, setDoNameDraft] = useState("");
   const [doLineDraft, setDoLineDraft] = useState("");
   const [now, setNow] = useState(() => new Date());
-  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
   const [bulkClosingDays, setBulkClosingDays] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
-    const stored = localStorage.getItem("jazzLoadAutoSaveEnabled");
-    return stored !== "false";
-  });
-  const toggleAutoSave = (enabled: boolean) => {
-    setAutoSaveEnabled(enabled);
-    localStorage.setItem("jazzLoadAutoSaveEnabled", String(enabled));
-  };
   const [editingDoNameRows, setEditingDoNameRows] = useState<Set<string>>(() => new Set());
   const [popup, setPopup] = useState<JazzLoadPopup | null>(null);
-  const saveInFlightRef = useRef(false);
   const lastSavedRef = useRef("");
   const lastSystemMessageRef = useRef("");
   const callbacksRef = useRef({
@@ -310,7 +310,37 @@ export function JazzLoadModule({
     !selectedDayFuture &&
     currentMonth?.status !== "closed" &&
     (role === "owner" || selectedDayLive) &&
-    (selectedDayRecord?.status !== "closed" || selectedDayCorrectionActive);
+    (selectedDayLive || selectedDayRecord?.status !== "closed" || selectedDayCorrectionActive);
+  const jazzCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
+    return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
+      const dayNo = index + 1;
+      const day = days.find((entry) => entry.dayNo === dayNo);
+      const future = isFutureJazzDay(monthId, dayNo, now);
+      const live = monthId === currentMonthId(now) && dayNo === now.getDate();
+      const correctionActive = Boolean(day?.reopenedUntilAt && getMillis(day.reopenedUntilAt) > now.getTime());
+      return {
+        moduleKey: "jazzLoad",
+        monthId,
+        dayNo,
+        saved: Boolean(day),
+        dateLabel: dayDate(monthId, dayNo),
+        reopenedUntilAt: day?.reopenedUntilAt,
+        disabledReason: future ? "Future Jazz Load days are disabled and cannot create records." : undefined,
+        status: future
+          ? "futureDisabled"
+          : live
+            ? "today"
+            : correctionActive
+              ? "reopened"
+              : day?.status === "closed"
+                ? "closed"
+                : day
+                  ? "open"
+                  : "missing"
+      };
+    });
+  }, [days, monthId, now]);
+  const selectedJazzStatus = jazzCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
   const canManageSettings = roleCanJazzLoad(role, "settings");
   const canBackup = roleCanJazzLoad(role, "backup");
   const sortedDoLines = useMemo(
@@ -609,7 +639,13 @@ export function JazzLoadModule({
     });
   }
 
-  async function saveDay(status: "open" | "closed" = "open", options: { silent?: boolean } = {}) {
+  async function saveDay(
+    status: "open" | "closed" = "open",
+    options: {
+      silent?: boolean;
+      nextDrafts?: JazzLoadDoEntryDraft[];
+    } = {}
+  ) {
     if (selectedDayFuture) {
       if (!options.silent) pushPopup("warning", "Future Jazz Load days are disabled and cannot create records.");
       return;
@@ -622,14 +658,16 @@ export function JazzLoadModule({
       if (!options.silent) pushPopup("error", "Admins can only edit the current running day.");
       return;
     }
-    if (!validation.valid) {
-      if (!options.silent) pushPopup("error", validation.errors[0] ?? "Fix Jazz Load validation errors before saving.");
+    const currentDrafts = options.nextDrafts ?? drafts;
+    const workingValidation = validateJazzLoadDrafts(currentDrafts, activeRates);
+    if (!workingValidation.valid) {
+      if (!options.silent) pushPopup("error", workingValidation.errors[0] ?? "Fix Jazz Load validation errors before saving.");
       return;
     }
     const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
     const timestamp = Date.now();
     const nextStatus = status === "closed" || (selectedDayRecord?.status === "closed" && !selectedDayCorrectionActive) ? "closed" : "open";
-    const entries = drafts.map((draft) => {
+    const entries = currentDrafts.map((draft) => {
       const previous = resolveOpeningEntry(draft);
       const openingBase = previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0;
       return calculateDoRow(
@@ -797,8 +835,8 @@ export function JazzLoadModule({
   }
 
   async function masterRefreshCalculations() {
-    if (!roleCanJazzLoad(role, "daily")) {
-      pushPopup("error", "Only owner or admin can refresh Jazz Load calculations.");
+    if (role !== "owner") {
+      pushPopup("error", "Only owner can refresh Jazz Load calculations.");
       return;
     }
     if (days.length === 0) {
@@ -813,16 +851,32 @@ export function JazzLoadModule({
       pushPopup("warning", "Reopen the Jazz Load month before refreshing calculations.");
       return;
     }
-    const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
-    setRecalculating(true);
-    const recalculation = recalculateJazzLoadMonth(month, days, activeRates, user, role)
-      .then((result) => {
+    const adapter = createJazzLoadRecalculationAdapter({
+      monthId,
+      canRun: role === "owner" && days.length > 0 && Boolean(activeRates.mlRate) && (currentMonth?.status ?? "open") === "open",
+      disabledReason: "Only owner can run Jazz Load master refresh on an open month with saved days.",
+      run: async () => {
+        const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
+        const result = await recalculateJazzLoadMonth(month, days, activeRates, user, role);
         setDays(result.days);
         setSummary(result.summary);
-      })
-      .finally(() => setRecalculating(false));
-    onQueueWrite(recalculation, "Could not queue Jazz Load calculation refresh.");
-    pushPopup("success", "Jazz Load master refresh queued. Openings will follow previous closings.");
+        return {
+          daysChecked: result.days.length,
+          mismatchesCorrected: result.days.length,
+          monthlySummariesUpdated: 1,
+          message: "Jazz Load openings now follow previous closings."
+        };
+      }
+    });
+    if (onTriggerMasterRefresh) {
+      await onTriggerMasterRefresh(adapter, "Jazz Load");
+    } else {
+      setRecalculating(true);
+      const recalculation = runMasterRecalculation({ adapter })
+        .finally(() => setRecalculating(false));
+      onQueueWrite(recalculation, "Could not queue Jazz Load calculation refresh.");
+      pushPopup("success", "Jazz Load master refresh queued. Openings will follow previous closings.");
+    }
   }
 
   function saveRate() {
@@ -990,6 +1044,18 @@ export function JazzLoadModule({
       updatedAt: Date.now()
     }]);
     onQueueWrite(upsertJazzLoadDoAssignment(assignment, user, role), "Could not queue DO assignment.");
+    const nextDrafts = drafts.map((draft) => {
+      if (draft.id === line.id) {
+        return {
+          ...draft,
+          doNameId: name.id,
+          doName: name.name
+        };
+      }
+      return draft;
+    });
+    setDrafts(nextDrafts);
+    void saveDay("open", { silent: true, nextDrafts });
     pushPopup("success", `Assigned ${name.name} to line ${line.line} for ${selectedDate}.`);
   }
 
@@ -1008,24 +1074,105 @@ export function JazzLoadModule({
     [dayNotes, drafts, liftingOpening, mlLifting, monthId, selectedDay, selectedDayRecord?.reopenedUntilAt, selectedDayRecord?.status]
   );
 
-  useEffect(() => {
-    if (!canEditDaily || selectedDayFuture || !validation.valid || drafts.length === 0 || !activeRates.mlRate || !activeRates.commission1Rate || !activeRates.commission2Rate || !autoSaveEnabled) return;
-    const timer = window.setTimeout(() => {
-      if (autosaveSignature === lastSavedRef.current || saveInFlightRef.current) return;
-      saveInFlightRef.current = true;
-      setAutoSaveState("saving");
-      void saveDay("open", { silent: true })
-        .then(() => {
-          lastSavedRef.current = autosaveSignature;
-          setAutoSaveState("saved");
-        })
-        .catch(() => setAutoSaveState("error"))
-        .finally(() => {
-          saveInFlightRef.current = false;
-        });
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [activeRates.commission1Rate, activeRates.commission2Rate, activeRates.mlRate, autosaveSignature, canEditDaily, drafts.length, selectedDayFuture, validation.valid, autoSaveEnabled]);
+  const { autoSaveStatus } = useAutoSaveEntry({
+    data: autosaveSignature,
+    enabled: true,
+    disabled: !canEditDaily || selectedDayFuture || drafts.length === 0 || !activeRates.mlRate || !activeRates.commission1Rate || !activeRates.commission2Rate,
+    debounceMs: 900,
+    resetKey: `${monthId}-${selectedDay}-${selectedDayRecord?.updatedAt ?? ""}`,
+    validate: () => validation.valid || validation.errors,
+    save: async () => {
+      await saveDay("open", { silent: true });
+      lastSavedRef.current = autosaveSignature;
+    }
+  });
+
+  const sidebarDayControls = useMemo(() => (
+    <>
+      <p className="text-xs font-semibold uppercase text-slate-500">Day Controls</p>
+      {/* <p className="mt-1 text-sm font-semibold text-white">{selectedDate}</p> */}
+      <UniversalCalendar
+        moduleKey="jazzLoad"
+        monthId={monthId}
+        selectedDay={selectedDay}
+        days={jazzCalendarDays}
+        now={now}
+        onSelect={setSelectedDay}
+        variant="mini"
+      />
+      <UniversalDayControlBar
+        moduleKey="jazzLoad"
+        selectedDateLabel={selectedDate}
+        selectedMonthLabel={monthLabel(monthId)}
+        selectedStatus={selectedJazzStatus}
+        role={role}
+        density="compact"
+        busy={loading || recalculating || bulkReopening !== null || bulkClosingDays}
+        autoSaveStatus={autoSaveStatus}
+        permissions={{
+          canCloseSelectedDay: canEditDaily && validation.valid,
+          canReopenSelectedDay: role === "owner" && !selectedDayFuture && currentMonth?.status !== "closed",
+          canReopenAllDays: role === "owner" && currentMonth?.status !== "closed" && availableJazzLoadDayNumbers(monthId, now).length > 1,
+          canClosePreviousDaysExceptToday: role === "owner" && currentMonth?.status !== "closed" && availableJazzLoadDayNumbers(monthId, now).length > 1,
+          canRunMasterRefresh: role === "owner" && days.length > 0 && currentMonth?.status !== "closed",
+          closeDisabledReason: "This Jazz Load day cannot be closed for the current role/status.",
+          reopenDisabledReason: "Only owner can reopen Jazz Load days.",
+          reopenAllDisabledReason: "Only owner can reopen all Jazz Load days.",
+          closePreviousDisabledReason: "Only owner can close previous Jazz Load days.",
+          masterRefreshDisabledReason: "Only owner can run master refresh and the month must be open."
+        }}
+        onCloseSelectedDay={() => {
+          if (!window.confirm(`Close Jazz Load day ${selectedDay}?`)) return;
+          void saveDay("closed");
+        }}
+        onReopenSelectedDay={reopenDay}
+        onReopenAllDays={() => void reopenMonthDays("all")}
+        onClosePreviousDaysExceptToday={closeAllDaysExceptToday}
+        onRunMasterRefresh={masterRefreshCalculations}
+        extraActions={
+          <>
+            <button
+              className="btn-primary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!canEditDaily || !validation.valid || loading}
+              onClick={() => void saveDay("open")}
+            >
+              <Save />
+              Save
+            </button>
+            <button className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadXlsx(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}>
+              <FileSpreadsheet />
+              Export Daily Excel
+            </button>
+            <button className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]))}>
+              <FileDown />
+              Export Daily PDF
+            </button>
+          </>
+        }
+      />
+    </>
+  ), [
+    autoSaveStatus,
+    bulkClosingDays,
+    bulkReopening,
+    canEditDaily,
+    currentMonth?.status,
+    days.length,
+    jazzCalendarDays,
+    loading,
+    monthId,
+    now,
+    recalculating,
+    role,
+    selectedDate,
+    selectedDay,
+    selectedDayFuture,
+    selectedDayRecord,
+    selectedJazzStatus,
+    setSelectedDay,
+    validation.valid
+  ]);
+  useSidebarDayControls("jazzLoad", sidebarDayControls, canRead && section === "daily");
 
   if (!canRead) {
     return (
@@ -1116,82 +1263,10 @@ export function JazzLoadModule({
                 <p>Open a date from the calendar. Future days are disabled and do not create records.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <label className="flex flex-row items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={autoSaveEnabled}
-                    disabled={!canEditDaily}
-                    onChange={(event) => toggleAutoSave(event.target.checked)}
-                    className="h-4 w-4 accent-emerald-400 cursor-pointer rounded border-slate-700 bg-slate-950/70"
-                  />
-                  <span>Auto-Save</span>
-                </label>
                 <span className="btn-chip">
-                  {autoSaveEnabled ? (
-                    autoSaveState === "saving" ? "Autosaving..." : autoSaveState === "error" ? "Autosave failed" : "Autosave on"
-                  ) : (
-                    "Autosave off"
-                  )}
+                  {autoSaveStatus === "saving" ? "Autosaving..." : autoSaveStatus === "error" ? "Autosave failed" : "Autosave on"}
                 </span>
-                <button className="btn-secondary" disabled={!canEditDaily || !validation.valid || loading} onClick={() => window.confirm(`Close Jazz Load day ${selectedDay}?`) && void saveDay("closed")}>
-                  Close Day
-                </button>
-                <button className="btn-primary" disabled={!canEditDaily || !validation.valid || loading} onClick={() => void saveDay("open")}>
-                  Save Now
-                </button>
               </div>
-            </div>
-            <JazzLoadCalendar
-              monthId={monthId}
-              selectedDay={selectedDay}
-              days={days}
-              now={now}
-              onSelect={setSelectedDay}
-            />
-            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-              <button className="btn-secondary w-full sm:w-auto" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadXlsx(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}>
-                <FileSpreadsheet />
-                Export Daily Excel
-              </button>
-              <button className="btn-secondary w-full sm:w-auto" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]))}>
-                <FileDown />
-                Export Daily PDF
-              </button>
-              {roleCanJazzLoad(role, "daily") && (
-                <button
-                  className="btn-secondary w-full sm:w-auto"
-                  disabled={loading || recalculating || days.length === 0 || currentMonth?.status === "closed"}
-                  onClick={() => void masterRefreshCalculations()}
-                  title="Refresh Jazz Load calculations so openings follow previous closings"
-                >
-                  {recalculating ? "Refreshing..." : "Master Refresh Calculations"}
-                </button>
-              )}
-              {role === "owner" && (
-                <>
-                  <button
-                    className="btn-secondary w-full sm:w-auto"
-                    disabled={loading || bulkReopening !== null || selectedDayFuture || currentMonth?.status === "closed"}
-                    onClick={() => reopenMonthDays("selected")}
-                  >
-                    {bulkReopening === "selected" ? "Reopening..." : "Reopen Selected Day"}
-                  </button>
-                  <button
-                    className="btn-secondary w-full sm:w-auto"
-                    disabled={loading || bulkReopening !== null || currentMonth?.status === "closed" || availableJazzLoadDayNumbers(monthId, now).length <= 1}
-                    onClick={() => reopenMonthDays("all")}
-                  >
-                    {bulkReopening === "all" ? "Reopening..." : "Reopen All Days"}
-                  </button>
-                  <button
-                    className="btn-secondary w-full sm:w-auto"
-                    disabled={loading || bulkClosingDays || currentMonth?.status === "closed" || availableJazzLoadDayNumbers(monthId, now).length <= 1}
-                    onClick={closeAllDaysExceptToday}
-                  >
-                    {bulkClosingDays ? "Closing..." : "Close All"}
-                  </button>
-                </>
-              )}
             </div>
             <div className="mb-4 flex flex-wrap gap-2 text-sm text-slate-300">
               <span className="btn-chip"><CalendarDays /> {selectedDate}</span>
@@ -1631,64 +1706,6 @@ function ReportTable({ title, headers, rows }: { title: string; headers: string[
         </table>
       </div>
     </section>
-  );
-}
-
-function JazzLoadCalendar({
-  monthId,
-  selectedDay,
-  days,
-  now,
-  onSelect
-}: {
-  monthId: string;
-  selectedDay: number;
-  days: JazzLoadDay[];
-  now: Date;
-  onSelect: (dayNo: number) => void;
-}) {
-  const savedByDay = new Map(days.map((day) => [day.dayNo, day]));
-  return (
-    <div className="mb-4 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-      <div className="mb-2 grid grid-cols-7 gap-2 text-center text-[11px] font-semibold uppercase text-slate-500">
-        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => <span key={day}>{day}</span>)}
-      </div>
-      <div className="grid grid-cols-7 gap-2">
-        {Array.from({ length: daysInMonth(monthId) }, (_, index) => {
-          const dayNo = index + 1;
-          const saved = savedByDay.get(dayNo);
-          const disabled = isFutureJazzDay(monthId, dayNo, now);
-          const selected = dayNo === selectedDay;
-          const correctionActive = Boolean(saved?.reopenedUntilAt && getMillis(saved.reopenedUntilAt) > now.getTime());
-          const isOpen = !disabled && (saved?.status !== "closed" || correctionActive);
-          const stateLabel = disabled ? "Future" : correctionActive ? "Re-open" : isOpen ? "Open" : "Closed";
-          const stateClass = disabled
-            ? "bg-slate-800 text-slate-500"
-            : correctionActive
-              ? "bg-blue-400/15 text-blue-200"
-              : isOpen
-              ? "bg-emerald-400/15 text-emerald-200"
-              : "bg-rose-400/15 text-rose-200";
-          return (
-            <button
-              key={dayNo}
-              className={[
-                "min-h-16 flex-col rounded-lg border px-2 py-2 text-xs",
-                selected ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : "border-slate-800 bg-slate-900/70 text-slate-200",
-                disabled ? "opacity-40" : ""
-              ].join(" ")}
-              disabled={disabled}
-              onClick={() => onSelect(dayNo)}
-              title={disabled ? "Future day disabled" : `Day ${dayNo} - ${stateLabel}`}
-            >
-              <span className="text-sm font-semibold">{dayNo}</span>
-              <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}>{stateLabel}</span>
-              {selected && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 

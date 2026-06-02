@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { computeMonth } from "./formulaEngine";
+import { computeMonth, resolveCreditClosingBalance } from "./formulaEngine";
 
 describe("formulaEngine", () => {
+  it("resolves credit closing balances from supported saved field shapes", () => {
+    const base = { id: "credit", partyName: "Party", opening: 10, loan: 5, receive: 2 };
+
+    expect(resolveCreditClosingBalance({ ...base, closingBalance: "1,200" } as never)).toBe(1200);
+    expect(resolveCreditClosingBalance({ ...base, balance: "900" } as never)).toBe(900);
+    expect(resolveCreditClosingBalance({ ...base, calculatedBalance: 800 } as never)).toBe(800);
+    expect(resolveCreditClosingBalance({ ...base, holdingBalance: "700" } as never)).toBe(700);
+    expect(resolveCreditClosingBalance(base)).toBe(13);
+  });
+
   it("computes carry-forward and totals in day order", () => {
     const month = computeMonth(
       [
@@ -109,6 +119,138 @@ describe("formulaEngine", () => {
     expect(localComputed.homeSummary).toEqual(reloadedComputed.homeSummary);
     expect(localComputed.days[1].openingBalance).toBe(1250);
     expect(localComputed.homeSummary.monthlyExpenseTotal).toBe(250);
+  });
+
+  it("repairs credit party carry-forward from previous closing balances without changing manual movement", () => {
+    const month = computeMonth(
+      [
+        {
+          dayNo: 29,
+          expenses: [],
+          commissions: [],
+          credits: [
+            {
+              id: "day-29-masjid",
+              partyId: "masjid-account",
+              partyName: "Masjid Account",
+              opening: 1000,
+              loan: 250,
+              receive: 50
+            }
+          ],
+          ownerBalances: []
+        },
+        {
+          dayNo: 30,
+          expenses: [],
+          commissions: [],
+          credits: [
+            {
+              id: "day-30-masjid",
+              partyId: "masjid-account",
+              partyName: "Masjid Account",
+              opening: "0" as unknown as number,
+              loan: "75" as unknown as number,
+              receive: "25" as unknown as number
+            }
+          ],
+          ownerBalances: []
+        },
+        {
+          dayNo: 31,
+          expenses: [],
+          commissions: [],
+          credits: [],
+          ownerBalances: []
+        }
+      ],
+      0
+    );
+
+    expect(month.days[0].creditRows[0].balance).toBe(1200);
+    expect(month.days[1].creditRows[0].opening).toBe(1200);
+    expect(month.days[1].creditRows[0].loan).toBe(75);
+    expect(month.days[1].creditRows[0].receive).toBe(25);
+    expect(month.days[1].creditRows[0].balance).toBe(1250);
+    expect(month.days[2].creditRows[0].opening).toBe(1250);
+    expect(month.days[2].creditRows[0].balance).toBe(1250);
+  });
+
+  it("rebuilds credit openings day-by-day from day 28 through day 30 while preserving manual movement", () => {
+    const month = computeMonth(
+      [
+        {
+          dayNo: 28,
+          expenses: [],
+          commissions: [],
+          credits: [
+            {
+              id: "day-28-usman",
+              partyId: "usman-cheema",
+              partyName: "Usman cheema",
+              opening: 1000,
+              loan: 1500,
+              receive: 500
+            },
+            {
+              id: "day-28-akhtar",
+              partyId: "akhtar",
+              partyName: "AKHTAR",
+              opening: 10000,
+              loan: 10000,
+              receive: 2000
+            }
+          ],
+          ownerBalances: []
+        },
+        {
+          dayNo: 29,
+          expenses: [],
+          commissions: [],
+          credits: [],
+          ownerBalances: []
+        },
+        {
+          dayNo: 30,
+          expenses: [],
+          commissions: [],
+          credits: [
+            {
+              id: "day-30-usman",
+              partyId: "usman-cheema",
+              partyName: "Usman cheema",
+              opening: 0,
+              loan: 9000,
+              today: 9000,
+              receive: 0
+            }
+          ],
+          ownerBalances: []
+        }
+      ],
+      0
+    );
+
+    const day28Usman = month.days[0].creditRows.find((row) => row.partyId === "usman-cheema");
+    const day28Akhtar = month.days[0].creditRows.find((row) => row.partyId === "akhtar");
+    const day29Usman = month.days[1].creditRows.find((row) => row.partyId === "usman-cheema");
+    const day29Akhtar = month.days[1].creditRows.find((row) => row.partyId === "akhtar");
+    const day30Usman = month.days[2].creditRows.find((row) => row.partyId === "usman-cheema");
+    const day30Akhtar = month.days[2].creditRows.find((row) => row.partyId === "akhtar");
+
+    expect(day28Usman?.balance).toBe(2000);
+    expect(day28Akhtar?.balance).toBe(18000);
+    expect(day29Usman?.opening).toBe(day28Usman?.balance);
+    expect(day29Usman?.balance).toBe(day28Usman?.balance);
+    expect(day29Akhtar?.opening).toBe(day28Akhtar?.balance);
+    expect(day29Akhtar?.balance).toBe(day28Akhtar?.balance);
+    expect(day30Usman?.opening).toBe(day29Usman?.balance);
+    expect(day30Usman?.loan).toBe(9000);
+    expect(day30Usman?.today).toBe(9000);
+    expect(day30Usman?.receive).toBe(0);
+    expect(day30Usman?.balance).toBe(11000);
+    expect(day30Akhtar?.opening).toBe(day29Akhtar?.balance);
+    expect(day30Akhtar?.balance).toBe(day29Akhtar?.balance);
   });
 
   it("keeps automated balance fields derived from inputs", () => {

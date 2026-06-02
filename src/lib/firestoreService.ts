@@ -78,6 +78,22 @@ function mergeStoredRows<T extends { id: string }>(embeddedRows: unknown, subcol
   return subcollectionRows;
 }
 
+function rowsFromDocs<T extends { id: string }>(docs: QueryDocumentSnapshot<DocumentData>[]): T[] {
+  return docs
+    .map((itemDoc) => ({ id: itemDoc.id, ...itemDoc.data() }) as T)
+    .filter((row) => Boolean(row.id));
+}
+
+function mergeCreditRowsForRead(
+  embeddedRows: unknown,
+  subcollectionRows: DailyLedgerInput["credits"]
+): DailyLedgerInput["credits"] {
+  const safeEmbeddedRows = Array.isArray(embeddedRows)
+    ? embeddedRows.filter((row): row is DailyLedgerInput["credits"][number] => Boolean(row && typeof row === "object" && "id" in row))
+    : [];
+  return safeEmbeddedRows.length > 0 ? safeEmbeddedRows : subcollectionRows;
+}
+
 let auditActorRole: UserRole = "viewer";
 
 export function setAuditActorRole(role: UserRole | null) {
@@ -561,6 +577,22 @@ async function syncDaySubcollection<T extends { id: string }>(
   );
 }
 
+async function syncCreditSubcollectionInBatch(
+  batch: ReturnType<typeof writeBatch>,
+  dayRef: ReturnType<typeof doc>,
+  credits: DailyLedgerInput["credits"],
+  merge = true
+) {
+  const existingSnap = await getDocs(collection(dayRef, "credits"));
+  const nextIds = new Set(credits.map((credit) => credit.id));
+  for (const creditDoc of existingSnap.docs) {
+    if (!nextIds.has(creditDoc.id)) batch.delete(creditDoc.ref);
+  }
+  for (const credit of credits) {
+    batch.set(doc(dayRef, "credits", credit.id), cleanForFirestore(credit), { merge });
+  }
+}
+
 export async function upsertDay(
   monthId: string,
   day: DailyLedgerInput,
@@ -633,9 +665,9 @@ export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[
         base.commissions,
         commissionSnap.docs.map((d) => d.data() as DailyLedgerInput["commissions"][number])
       ),
-      credits: mergeStoredRows(
+      credits: mergeCreditRowsForRead(
         base.credits,
-        creditsSnap.docs.map((d) => d.data() as DailyLedgerInput["credits"][number])
+        rowsFromDocs<DailyLedgerInput["credits"][number]>(creditsSnap.docs)
       ),
       ownerBalances: mergeStoredRows(
         base.ownerBalances,
@@ -676,19 +708,12 @@ function mapDayDoc(dayDoc: QueryDocumentSnapshot<DocumentData>): DailyLedgerInpu
 
 async function hydrateDayDoc(dayDoc: QueryDocumentSnapshot<DocumentData>): Promise<DailyLedgerInput> {
   const base = dayDoc.data() as Partial<DailyLedgerInput>;
-  if (
-    Array.isArray(base.expenses) &&
-    Array.isArray(base.commissions) &&
-    Array.isArray(base.credits) &&
-    Array.isArray(base.ownerBalances)
-  ) {
-    return mapDayDoc(dayDoc);
-  }
+  const mustCheckCreditsSubcollection = !Array.isArray(base.credits) || base.credits.length === 0;
 
   const [expenseSnap, commissionSnap, creditsSnap, ownerSnap] = await Promise.all([
     Array.isArray(base.expenses) ? Promise.resolve(null) : getDocs(collection(dayDoc.ref, "expenses")),
     Array.isArray(base.commissions) ? Promise.resolve(null) : getDocs(collection(dayDoc.ref, "commissions")),
-    Array.isArray(base.credits) ? Promise.resolve(null) : getDocs(collection(dayDoc.ref, "credits")),
+    mustCheckCreditsSubcollection ? getDocs(collection(dayDoc.ref, "credits")) : Promise.resolve(null),
     Array.isArray(base.ownerBalances) ? Promise.resolve(null) : getDocs(collection(dayDoc.ref, "ownerBalances"))
   ]);
   const mapped = mapDayDoc(dayDoc);
@@ -701,9 +726,10 @@ async function hydrateDayDoc(dayDoc: QueryDocumentSnapshot<DocumentData>): Promi
     commissions: Array.isArray(base.commissions)
       ? mapped.commissions
       : (commissionSnap?.docs.map((d) => d.data() as DailyLedgerInput["commissions"][number]) ?? []),
-    credits: Array.isArray(base.credits)
-      ? mapped.credits
-      : (creditsSnap?.docs.map((d) => d.data() as DailyLedgerInput["credits"][number]) ?? []),
+    credits: mergeCreditRowsForRead(
+      base.credits,
+      creditsSnap ? rowsFromDocs<DailyLedgerInput["credits"][number]>(creditsSnap.docs) : []
+    ),
     ownerBalances: Array.isArray(base.ownerBalances)
       ? mapped.ownerBalances
       : (ownerSnap?.docs.map((d) => d.data() as DailyLedgerInput["ownerBalances"][number]) ?? [])
@@ -788,7 +814,7 @@ export async function saveDayAndRecalculate(
   return computed;
 }
 
-export function queueDayAndSummaryWrite(
+export async function queueDayAndSummaryWrite(
   month: MonthRecord,
   day: DailyLedgerInput,
   computed: MonthComputed,
@@ -821,7 +847,7 @@ export function queueDayAndSummaryWrite(
   }
   for (const expense of day.expenses) batch.set(doc(dayRef, "expenses", expense.id), cleanForFirestore(expense), { merge: true });
   for (const commission of day.commissions) batch.set(doc(dayRef, "commissions", commission.id), cleanForFirestore(commission), { merge: true });
-  for (const credit of day.credits) batch.set(doc(dayRef, "credits", credit.id), cleanForFirestore(credit), { merge: true });
+  await syncCreditSubcollectionInBatch(batch, dayRef, day.credits);
   for (const ownerBalance of day.ownerBalances) batch.set(doc(dayRef, "ownerBalances", ownerBalance.id), cleanForFirestore(ownerBalance), { merge: true });
   batch.set(doc(monthRef, "summary", "home"), cleanForFirestore(computed.homeSummary), { merge: true });
   const auditDetail = auditAction === "lock-day" ? `Closed day ${day.dayNo}` : `Saved day ${day.dayNo}`;
@@ -1122,7 +1148,7 @@ export async function commitWorkbookImport(preview: WorkbookImportPreview): Prom
     for (const commission of day.commissions) {
       batch.set(doc(dayRef, "commissions", commission.id), cleanForFirestore(commission));
     }
-    for (const credit of day.credits) batch.set(doc(dayRef, "credits", credit.id), cleanForFirestore(credit));
+    await syncCreditSubcollectionInBatch(batch, dayRef, day.credits, false);
     for (const ownerBalance of day.ownerBalances) {
       batch.set(doc(dayRef, "ownerBalances", ownerBalance.id), cleanForFirestore(ownerBalance));
     }
@@ -1143,7 +1169,7 @@ export async function commitWorkbookImport(preview: WorkbookImportPreview): Prom
 export async function saveMonthRecord(
   month: MonthRecord,
   days: DailyLedgerInput[],
-  options?: { suppressPerDayAudit?: boolean }
+  options?: { suppressPerDayAudit?: boolean; onlyWriteEditableDays?: boolean }
 ): Promise<MonthComputed> {
   const firestore = requireDb();
   const computed = computeMonth(days, month.openingBalance, month.id, month.ownerOpeningBalance ?? 0);
@@ -1157,7 +1183,23 @@ export async function saveMonthRecord(
     },
     { merge: true }
   );
+
+  const date = new Date();
+  const year = date.getFullYear();
+  const monthString = String(date.getMonth() + 1).padStart(2, "0");
+  const liveMonthId = `${year}-${monthString}`;
+  const liveDayNo = date.getDate();
+
+  const isEditable = (day: DailyLedgerInput) => {
+    const isLive = month.id === liveMonthId && day.dayNo === liveDayNo;
+    const isReopened = Boolean(day.reopenedUntilAt && day.reopenedUntilAt > now());
+    return (isLive && !day.lockedAt) || isReopened;
+  };
+
   for (const day of days) {
+    if (options?.onlyWriteEditableDays && !isEditable(day)) {
+      continue;
+    }
     const dayRef = doc(monthRef, "days", String(day.dayNo));
     batch.set(dayRef, cleanForFirestore({ ...day, updatedAt: now() }), { merge: true });
     for (const expense of day.expenses) {
@@ -1166,14 +1208,16 @@ export async function saveMonthRecord(
     for (const commission of day.commissions) {
       batch.set(doc(dayRef, "commissions", commission.id), cleanForFirestore(commission));
     }
-    for (const credit of day.credits) batch.set(doc(dayRef, "credits", credit.id), cleanForFirestore(credit));
+    await syncCreditSubcollectionInBatch(batch, dayRef, day.credits, false);
     for (const ownerBalance of day.ownerBalances) {
       batch.set(doc(dayRef, "ownerBalances", ownerBalance.id), cleanForFirestore(ownerBalance));
     }
   }
   batch.set(doc(monthRef, "summary", "home"), cleanForFirestore(computed.homeSummary), { merge: true });
   await batch.commit();
-  await Promise.all(days.map((day) => upsertDay(month.id, day, { suppressPerDayAudit: options?.suppressPerDayAudit })));
+
+  const daysToUpsert = options?.onlyWriteEditableDays ? days.filter(isEditable) : days;
+  await Promise.all(daysToUpsert.map((day) => upsertDay(month.id, day, { suppressPerDayAudit: options?.suppressPerDayAudit })));
   return computed;
 }
 

@@ -133,16 +133,41 @@ export async function queryAuditLogs(
   filters: AuditLogFilters,
   pageCursor?: QueryDocumentSnapshot<DocumentData>
 ): Promise<{ logs: SystemAuditLog[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null }> {
-  const constraints = buildAuditLogQueryConstraints(filters);
-  if (pageCursor) constraints.push(startAfter(pageCursor));
-  constraints.push(limit(PAGE_SIZE));
+  const constraints = [orderBy("createdAt", "desc"), limit(1000)];
   const snap = await getDocs(query(auditLogCollection(), ...constraints));
   let logs = snap.docs.map((entry) => entry.data() as SystemAuditLog);
+
+  if (filters.fromMs != null) logs = logs.filter(l => l.createdAt >= filters.fromMs!);
+  if (filters.toMs != null) logs = logs.filter(l => l.createdAt <= filters.toMs!);
+  if (filters.module) logs = logs.filter(l => l.module === filters.module);
+  if (filters.action) logs = logs.filter(l => l.action === filters.action);
+  if (filters.actorUid) logs = logs.filter(l => l.actorUid === filters.actorUid);
+  if (filters.monthId) logs = logs.filter(l => l.monthId === filters.monthId);
   if (filters.search) {
     logs = logs.filter((entry) => matchesAuditSearch(entry, filters.search!));
   }
-  const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
-  return { logs, lastDoc };
+
+  let startIndex = 0;
+  if (pageCursor) {
+    const cursorId = pageCursor.id;
+    const index = logs.findIndex(l => l.id === cursorId);
+    if (index !== -1) {
+      startIndex = index + 1;
+    }
+  }
+
+  const pageLogs = logs.slice(startIndex, startIndex + PAGE_SIZE);
+
+  let lastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+  if (pageLogs.length > 0) {
+    const lastLog = pageLogs[pageLogs.length - 1];
+    const foundDoc = snap.docs.find(d => d.id === lastLog.id);
+    if (foundDoc) {
+      lastDoc = foundDoc;
+    }
+  }
+
+  return { logs: pageLogs, lastDoc };
 }
 
 export function subscribeAuditLogs(
@@ -150,17 +175,24 @@ export function subscribeAuditLogs(
   onNext: (logs: SystemAuditLog[], metadata: FirestoreSnapshotMeta) => void,
   onError?: (error: FirestoreError) => void
 ) {
-  const constraints = buildAuditLogQueryConstraints(filters);
-  constraints.push(limit(PAGE_SIZE));
+  const constraints = [orderBy("createdAt", "desc"), limit(1000)];
   return onSnapshot(
     query(auditLogCollection(), ...constraints),
     { includeMetadataChanges: true },
     (snap) => {
       let logs = snap.docs.map((entry) => entry.data() as SystemAuditLog);
+
+      if (filters.fromMs != null) logs = logs.filter(l => l.createdAt >= filters.fromMs!);
+      if (filters.toMs != null) logs = logs.filter(l => l.createdAt <= filters.toMs!);
+      if (filters.module) logs = logs.filter(l => l.module === filters.module);
+      if (filters.action) logs = logs.filter(l => l.action === filters.action);
+      if (filters.actorUid) logs = logs.filter(l => l.actorUid === filters.actorUid);
+      if (filters.monthId) logs = logs.filter(l => l.monthId === filters.monthId);
       if (filters.search) {
         logs = logs.filter((entry) => matchesAuditSearch(entry, filters.search!));
       }
-      onNext(logs, snap.metadata);
+
+      onNext(logs.slice(0, PAGE_SIZE), snap.metadata);
     },
     onError
   );

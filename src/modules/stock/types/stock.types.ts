@@ -87,7 +87,8 @@ export type StockDailyAccountEntry = {
 export type StockDailyAccountDraft = {
   accountId: string;
   productQuantities: Record<string, number>;
-  productPayments: Record<string, number>;
+  productPayments?: Record<string, number>;
+  paymentReceived?: number;
   carryForwardBalance?: number;
   notes?: string;
 };
@@ -123,6 +124,7 @@ export type StockDayRecord = {
   reopenedAt?: number;
   reopenedBy?: string;
   reopenedUntilAt?: number;
+  recalculatedAt?: number;
 };
 
 export type StockMonth = {

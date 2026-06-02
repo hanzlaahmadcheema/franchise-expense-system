@@ -5,11 +5,24 @@ type InputDay = {
   notes?: string;
   expenses: Array<{ amount: number; category?: string; name?: string; description?: string }>;
   commissions: Array<{ amount: number; category: string }>;
-  credits: Array<{ opening: number; today?: number; loan?: number; receive: number; partyName: string }>;
+  credits: Array<{ id?: string; partyId?: string; opening: number; today?: number; loan?: number; receive: number; partyName: string; balance?: number; closingBalance?: number; calculatedBalance?: number; holdingBalance?: number }>;
   ownerBalances?: Array<{ label?: string; description?: string; opening?: number; amount: number; expense?: number; received?: number }>;
 };
 
 const sum = (nums: number[]) => nums.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+
+function roundAmount(value: number) {
+  return Number.isFinite(value) ? Math.round(value) : 0;
+}
+
+function parseLedgerNumber(value: unknown): number {
+  if (typeof value === "number") return roundAmount(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/,/g, "").trim());
+    return Number.isFinite(parsed) ? roundAmount(parsed) : 0;
+  }
+  return 0;
+}
 
 function normalizeKey(value: string) {
   return value.trim().toLowerCase();
@@ -19,6 +32,68 @@ function normalizeCommissionCategory(category: string) {
   if (category === "Jazz Cash") return "JazzCash";
   if (category === "Jazz Load") return "JazzLoad";
   return category;
+}
+
+function creditCarryKey(row: { partyId?: string; partyName: string }) {
+  return row.partyId ? `id:${row.partyId}` : `name:${normalizeKey(row.partyName ?? "")}`;
+}
+
+function resolveCreditClosingBalance(row: Record<string, unknown>) {
+  const explicit = [row.closingBalance, row.balance, row.calculatedBalance, row.holdingBalance];
+  for (const value of explicit) {
+    if (value !== undefined && value !== null && value !== "") return parseLedgerNumber(value);
+  }
+  return roundAmount(
+    parseLedgerNumber(row.opening) +
+    parseLedgerNumber(row.loan ?? row.today) -
+    parseLedgerNumber(row.receive)
+  );
+}
+
+function normalizeCreditRow(row: InputDay["credits"][number]) {
+  const loan = parseLedgerNumber(row.loan ?? row.today);
+  return {
+    ...row,
+    opening: parseLedgerNumber(row.opening),
+    loan,
+    today: loan,
+    receive: parseLedgerNumber(row.receive),
+    balance: resolveCreditClosingBalance(row as Record<string, unknown>)
+  };
+}
+
+function applyCreditCarryForward(
+  dayNo: number,
+  rows: InputDay["credits"],
+  runningBalances: Map<string, { partyId?: string; partyName: string; balance: number }>
+) {
+  const normalizedRows = rows.map(normalizeCreditRow);
+  const seenKeys = new Set(normalizedRows.map(creditCarryKey));
+  const carriedRows = normalizedRows.map((row) => {
+    const previous = runningBalances.get(creditCarryKey(row));
+    if (!previous) return row;
+    return {
+      ...row,
+      opening: previous.balance,
+      balance: roundAmount(previous.balance + parseLedgerNumber(row.loan ?? row.today) - parseLedgerNumber(row.receive))
+    };
+  });
+
+  for (const [key, previous] of runningBalances.entries()) {
+    if (previous.balance === 0 || seenKeys.has(key)) continue;
+    carriedRows.push({
+      id: `${dayNo}-credit-carry-${key.replace(/[^a-z0-9-]+/gi, "-")}`,
+      partyId: previous.partyId,
+      partyName: previous.partyName,
+      opening: previous.balance,
+      loan: 0,
+      today: 0,
+      receive: 0,
+      balance: previous.balance
+    });
+  }
+
+  return carriedRows;
 }
 
 function expenseCategory(item: { category?: string; name?: string; description?: string }) {
@@ -36,8 +111,9 @@ function expenseCategory(item: { category?: string; name?: string; description?:
 
 export function computeMonth(dailyInputs: InputDay[], openingBalance: number, monthId?: string, ownerOpeningBalance = 0) {
   const sorted = [...dailyInputs].sort((a, b) => a.dayNo - b.dayNo);
-  let currentOpening = openingBalance;
-  let currentOwnerOpening = ownerOpeningBalance;
+  let currentOpening = Number.isFinite(openingBalance) ? openingBalance : 0;
+  let currentOwnerOpening = Number.isFinite(ownerOpeningBalance) ? ownerOpeningBalance : 0;
+  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>();
 
   const days = sorted.map((day) => {
     const issueBalance = sum(day.commissions.map((item) => item.amount));
@@ -54,10 +130,11 @@ export function computeMonth(dailyInputs: InputDay[], openingBalance: number, mo
     });
     let ownerRunningOpening = currentOwnerOpening || (ownerRows[0]?.opening ?? 0);
     const ownerBalances = ownerRows.map((row) => {
-      const expense = row.expense ?? Math.max(row.amount, 0);
-      const received = row.received ?? Math.max(-row.amount, 0);
+      const amt = Number.isFinite(row.amount) ? (row.amount as number) : 0;
+      const expense = Number.isFinite(row.expense) ? (row.expense as number) : Math.max(amt, 0);
+      const received = Number.isFinite(row.received) ? (row.received as number) : Math.max(-amt, 0);
       const amount = expense - received;
-      const rowOpening = ownerRunningOpening;
+      const rowOpening = Number.isFinite(ownerRunningOpening) ? ownerRunningOpening : 0;
       const balance = rowOpening + amount;
       ownerRunningOpening = balance;
       return {
@@ -72,13 +149,20 @@ export function computeMonth(dailyInputs: InputDay[], openingBalance: number, mo
       };
     });
     const ownerBalanceTotal = ownerBalances.at(-1)?.balance ?? currentOwnerOpening;
-    const creditRows = day.credits.map((row) => ({
-      ...row,
-      loan: row.loan ?? row.today ?? 0,
-      today: row.loan ?? row.today ?? 0,
-      receive: row.receive ?? 0,
-      balance: row.opening + (row.loan ?? row.today ?? 0) - (row.receive ?? 0)
-    }));
+    const carriedCredits = applyCreditCarryForward(day.dayNo, day.credits, creditRunningBalances);
+    const creditRows = carriedCredits.map((row) => {
+      const opening = parseLedgerNumber(row.opening);
+      const loan = parseLedgerNumber(row.loan ?? row.today);
+      const receive = parseLedgerNumber(row.receive);
+      return {
+        ...row,
+        opening,
+        loan,
+        today: loan,
+        receive,
+        balance: opening + loan - receive
+      };
+    });
 
     const result = {
       dayNo: day.dayNo,
@@ -105,6 +189,19 @@ export function computeMonth(dailyInputs: InputDay[], openingBalance: number, mo
 
     currentOpening = returnBalance;
     currentOwnerOpening = ownerBalanceTotal;
+    for (const row of creditRows) {
+      const key = creditCarryKey(row);
+      const balance = resolveCreditClosingBalance(row as Record<string, unknown>);
+      if (balance === 0) {
+        creditRunningBalances.delete(key);
+      } else {
+        creditRunningBalances.set(key, {
+          partyId: row.partyId,
+          partyName: row.partyName,
+          balance
+        });
+      }
+    }
     return result;
   });
 

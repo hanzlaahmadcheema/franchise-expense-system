@@ -44,12 +44,14 @@ export const recalculateMonth = onCall(callableOptions, async (request) => {
   for (const dayDoc of dayDocs.docs) {
     const base = dayDoc.data();
     const dayNo = Number(base.dayNo ?? dayDoc.id);
+    const mustCheckCreditsSubcollection = !Array.isArray(base.credits) || base.credits.length === 0;
     const [expensesSnap, commissionsSnap, creditsSnap, ownerSnap] = await Promise.all([
       Array.isArray(base.expenses) ? Promise.resolve(null) : dayDoc.ref.collection("expenses").get(),
       Array.isArray(base.commissions) ? Promise.resolve(null) : dayDoc.ref.collection("commissions").get(),
-      Array.isArray(base.credits) ? Promise.resolve(null) : dayDoc.ref.collection("credits").get(),
+      mustCheckCreditsSubcollection ? dayDoc.ref.collection("credits").get() : Promise.resolve(null),
       Array.isArray(base.ownerBalances) ? Promise.resolve(null) : dayDoc.ref.collection("ownerBalances").get()
     ]);
+    const subcollectionCredits = creditsSnap?.docs.map((d) => ({ id: d.id, ...d.data() } as Record<string, unknown>)) ?? [];
     days.push({
       dayNo,
       date: base.date,
@@ -57,15 +59,37 @@ export const recalculateMonth = onCall(callableOptions, async (request) => {
       notes: base.notes,
       expenses: Array.isArray(base.expenses) ? base.expenses : expensesSnap?.docs.map((d) => d.data() as { amount: number }) ?? [],
       commissions: Array.isArray(base.commissions) ? base.commissions : commissionsSnap?.docs.map((d) => d.data() as { amount: number; category: string }) ?? [],
-      credits: Array.isArray(base.credits) ? base.credits : creditsSnap?.docs.map((d) => d.data() as { opening: number; today: number; receive: number; partyName: string }) ?? [],
+      credits: Array.isArray(base.credits) && base.credits.length > 0 ? base.credits : subcollectionCredits,
       ownerBalances: Array.isArray(base.ownerBalances) ? base.ownerBalances : ownerSnap?.docs.map((d) => d.data() as { label: string; amount: number }) ?? []
     });
   }
 
   const computed = computeMonth(days, openingBalance, monthId, ownerOpeningBalance);
   const batch = db.batch();
+  const inputByDay = new Map(days.map((day) => [day.dayNo, day]));
   for (const day of computed.days) {
-    batch.set(monthRef.collection("days").doc(String(day.dayNo)), day, { merge: true });
+    const original = inputByDay.get(day.dayNo);
+    const dayRef = monthRef.collection("days").doc(String(day.dayNo));
+    const repairedCredits = day.creditRows;
+    batch.set(
+      dayRef,
+      {
+        ...original,
+        ...day,
+        credits: repairedCredits,
+        ownerBalances: day.ownerBalances
+      },
+      { merge: true }
+    );
+    const existingCreditsSnap = await dayRef.collection("credits").get();
+    const nextCreditIds = new Set(repairedCredits.map((row: { id?: string }) => row.id).filter(Boolean));
+    for (const creditDoc of existingCreditsSnap.docs) {
+      if (!nextCreditIds.has(creditDoc.id)) batch.delete(creditDoc.ref);
+    }
+    for (const credit of repairedCredits) {
+      if (!credit.id) continue;
+      batch.set(dayRef.collection("credits").doc(credit.id), credit, { merge: true });
+    }
   }
   batch.set(monthRef.collection("summary").doc("home"), computed.homeSummary, { merge: true });
   batch.set(monthRef, { updatedAt: Date.now() }, { merge: true });

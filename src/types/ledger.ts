@@ -253,6 +253,11 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "reopen-window-close",
     "import",
     "recalculate",
+    "master-refresh-started",
+    "master-refresh-completed",
+    "master-refresh-failed",
+    "auto-save-success",
+    "auto-save-failed",
     "close-month",
     "reopen-month",
     "backup-restore",
@@ -266,7 +271,12 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "close-month",
     "reopen-month",
     "do-assignment",
-    "backup-restore"
+    "backup-restore",
+    "master-refresh-started",
+    "master-refresh-completed",
+    "master-refresh-failed",
+    "auto-save-success",
+    "auto-save-failed"
   ],
   stock: [
     "save-day",
@@ -274,7 +284,12 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "reopen-day",
     "close-month",
     "reopen-month",
-    "backup-restore"
+    "backup-restore",
+    "master-refresh-started",
+    "master-refresh-completed",
+    "master-refresh-failed",
+    "auto-save-success",
+    "auto-save-failed"
   ],
   settings: [
     "catalog-upsert",
@@ -291,5 +306,5 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "authorized-email-delete",
     "user-bootstrap"
   ],
-  system: ["recalculate", "manual-email", "export-report"]
+  system: ["recalculate", "manual-email", "export-report", "master-refresh-started", "master-refresh-completed", "master-refresh-failed"]
 };

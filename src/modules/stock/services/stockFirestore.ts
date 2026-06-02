@@ -198,7 +198,7 @@ export function roleCanStock(
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily" || permission === "backup";
+  if (role === "admin") return permission === "daily" || permission === "backup" || permission === "monthControls";
   return false;
 }
 
@@ -637,14 +637,15 @@ export async function recalculateStockMonth(
   const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
   recalculatedDays.forEach((day) => {
-    batch.set(dayRef(month.id, day.dayNo), {
-      ...cleanForFirestore({
-        ...day,
-        ...stockDayDateFields(month.id, day.dayNo),
-        stockOut: day.entries,
-        updatedBy: currentActor.userId,
-        updatedAt: timestamp
-      }),
+  batch.set(dayRef(month.id, day.dayNo), {
+    ...cleanForFirestore({
+      ...day,
+      ...stockDayDateFields(month.id, day.dayNo),
+      stockOut: day.entries,
+      recalculatedAt: timestamp,
+      updatedBy: currentActor.userId,
+      updatedAt: timestamp
+    }),
       closedAt: day.closedAt ?? deleteField(),
       closedBy: day.closedBy ?? deleteField(),
       reopenedAt: day.reopenedAt ?? deleteField(),

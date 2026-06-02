@@ -10,7 +10,8 @@ import {
   type MonthComputed,
   type OwnerBalanceRow
 } from "../types/ledger";
-import { computeDay } from "../lib/formulaEngine";
+import { computeDay, parseLedgerNumber, resolveCreditClosingBalance } from "../lib/formulaEngine";
+import { useAutoSaveEntry } from "../shared/hooks/useAutoSaveEntry";
 
 type Props = {
   dayNo: number;
@@ -33,7 +34,6 @@ type Props = {
   reopenExpiresAt?: number;
   reopenRequiresTime?: boolean;
   previousDay?: DailyLedgerInput;
-  previousDayClosed?: boolean;
   onSave: (input: DailyLedgerInput, options?: { silent?: boolean }) => Promise<void>;
   onCloseDay: (input: DailyLedgerInput) => Promise<void>;
   onSendEmail?: (input: DailyLedgerInput) => Promise<void>;
@@ -42,6 +42,7 @@ type Props = {
   canCreateCatalogs?: boolean;
   onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
   onPendingStateChange?: (pending: boolean) => void;
+  onManualSaveReady?: (save: (() => Promise<boolean>) | null) => void;
 };
 
 const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -50,11 +51,11 @@ function LoadingIcon({ label = "Loading" }: { label?: string }) {
   return <LoaderCircle className="h-4 w-4 animate-spin" aria-label={label} />;
 }
 
-function carryCreditsFromPrevious(dayNo: number, previousDay?: DailyLedgerInput, previousDayClosed?: boolean) {
-  if (!previousDay || !previousDayClosed) return [];
+function carryCreditsFromPrevious(dayNo: number, previousDay?: DailyLedgerInput) {
+  if (!previousDay) return [];
   return previousDay.credits
     .map((row) => {
-      const opening = creditClosingBalance(row);
+      const opening = resolveCreditClosingBalance(row);
       return {
         ...row,
         id: `${dayNo}-credit-${crypto.randomUUID()}`,
@@ -65,11 +66,6 @@ function carryCreditsFromPrevious(dayNo: number, previousDay?: DailyLedgerInput,
       };
     })
     .filter(isCreditMovementRow);
-}
-
-function creditClosingBalance(row: CreditRow) {
-  const loan = row.loan ?? row.today ?? 0;
-  return row.balance ?? row.opening + loan - row.receive;
 }
 
 function InputText({
@@ -119,21 +115,6 @@ function InputText({
 
 function inputText(value: number, onChange: (value: number) => void, disabled?: boolean) {
   return <InputText value={value} onChange={onChange} disabled={disabled} />;
-}
-
-function formatTimeInputValue(timestamp: number) {
-  const date = new Date(timestamp);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function timeInputToTimestamp(timeValue: string) {
-  if (!timeValue) return null;
-  const [hours, minutes] = timeValue.split(":").map((part) => Number(part));
-  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
-  const date = new Date();
-  date.setSeconds(0, 0);
-  date.setHours(hours, minutes, 0, 0);
-  return date.getTime();
 }
 
 function activeOrFallback(items: CatalogItem[], fallback: string[]) {
@@ -220,24 +201,28 @@ function mergeCreditRows(rows: CreditRow[]) {
   const merged = new Map<string, CreditRow>();
   for (const row of rows) {
     const key = row.partyId ?? normalizeKey(row.partyName);
+    const rowLoan = parseLedgerNumber(row.loan ?? row.today);
+    const rowReceive = parseLedgerNumber(row.receive);
     const current = merged.get(key);
     if (current) {
-      current.loan = (current.loan ?? current.today ?? 0) + (row.loan ?? row.today ?? 0);
+      current.loan = parseLedgerNumber(current.loan ?? current.today) + rowLoan;
       current.today = current.loan;
-      current.receive += row.receive;
+      current.receive = parseLedgerNumber(current.receive) + rowReceive;
       continue;
     }
     merged.set(key, {
       ...row,
-      loan: row.loan ?? row.today ?? 0,
-      today: row.loan ?? row.today ?? 0
+      opening: parseLedgerNumber(row.opening),
+      loan: rowLoan,
+      today: rowLoan,
+      receive: rowReceive
     });
   }
   return [...merged.values()].filter(isCreditMovementRow);
 }
 
 function isCreditMovementRow(row: CreditRow) {
-  return row.opening !== 0 || (row.loan ?? row.today ?? 0) !== 0 || row.receive !== 0;
+  return parseLedgerNumber(row.opening) !== 0 || parseLedgerNumber(row.loan ?? row.today) !== 0 || parseLedgerNumber(row.receive) !== 0;
 }
 
 export function DailyEntryForm({
@@ -255,21 +240,14 @@ export function DailyEntryForm({
   initial,
   disabled,
   locked,
-  canClose,
-  canReopen,
-  reopenLabel = "Reopen 15 Min",
-  reopenExpiresAt,
-  reopenRequiresTime = false,
   previousDay,
-  previousDayClosed,
   onSave,
-  onCloseDay,
   onSendEmail,
-  onReopenDay,
   canSendEmail,
   canCreateCatalogs,
   onCreateCatalog,
-  onPendingStateChange
+  onPendingStateChange,
+  onManualSaveReady
 }: Props) {
   const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
   const commissionOptions = activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
@@ -280,7 +258,7 @@ export function DailyEntryForm({
     () => ownerRowsForEntry(initial?.ownerBalances ?? [])
   );
   const [credits, setCredits] = useState<CreditRow[]>(
-    () => mergeCreditRows(initial?.credits?.length ? initial.credits : carryCreditsFromPrevious(dayNo, previousDay, previousDayClosed))
+    () => mergeCreditRows(initial?.credits?.length ? initial.credits : carryCreditsFromPrevious(dayNo, previousDay))
   );
 
   const [expenseDraft, setExpenseDraft] = useState<Pick<ExpenseItem, "categoryId" | "category" | "name" | "description" | "amount">>({
@@ -320,34 +298,21 @@ export function DailyEntryForm({
   const [commissionFilter, setCommissionFilter] = useState("all");
   const [saving, setSaving] = useState(false);
   const [emailing, setEmailing] = useState(false);
-  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
-    const stored = localStorage.getItem("autoSaveEnabled");
-    return stored !== "false";
-  });
-  const toggleAutoSave = (enabled: boolean) => {
-    setAutoSaveEnabled(enabled);
-    localStorage.setItem("autoSaveEnabled", String(enabled));
-  };
   const [creditVerifyMessage, setCreditVerifyMessage] = useState("");
   const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
-  const [reopenPickerOpen, setReopenPickerOpen] = useState(false);
-  const [reopenTimeDraft, setReopenTimeDraft] = useState(formatTimeInputValue(Date.now() + 15 * 60 * 1000));
-  const [reopenTimeError, setReopenTimeError] = useState("");
-  const saveInFlightRef = useRef(false);
   const lastSavedRef = useRef("");
   const [saveInFlight, setSaveInFlight] = useState(false);
   const [saveBaselineReady, setSaveBaselineReady] = useState(false);
 
-function previousCreditOpening(partyId: string, partyName: string) {
-    if (!previousDayClosed || !previousDay) return 0;
+  function previousCreditOpening(partyId: string, partyName: string) {
+    if (!previousDay) return 0;
     const previousRow = previousDay.credits.find(
       (row) => row.partyId === partyId || normalizeKey(row.partyName) === normalizeKey(partyName)
     );
     if (!previousRow) return 0;
-    return creditClosingBalance(previousRow);
+    return resolveCreditClosingBalance(previousRow);
   }
 
   function currentCreditOpening(partyId: string, partyName: string, excludeId?: string | null) {
@@ -356,22 +321,40 @@ function previousCreditOpening(partyId: string, partyName: string) {
   }
 
   function verifyCreditOpeningsFromPreviousDay() {
-    if (!previousDayClosed || !previousDay) {
-      setCreditVerifyMessage("Previous day is not closed or not loaded yet.");
+    if (!previousDay) {
+      setCreditVerifyMessage("Previous day checked: none\nRecords found: 0\nNon-zero balances found: 0");
       return;
     }
     let addedCount = 0;
-    let carriedCount = 0;
-    setCredits((rows) => {
-      const existingKeys = new Set(rows.flatMap((row) => [row.partyId, normalizeKey(row.partyName)].filter(Boolean) as string[]));
-      const missingRows = previousDay.credits
-        .map((row) => ({ row, opening: creditClosingBalance(row) }))
-        .filter(({ row, opening }) => {
-          if (opening === 0) return false;
-          carriedCount += 1;
-          return !existingKeys.has(row.partyId ?? "") && !existingKeys.has(normalizeKey(row.partyName));
-        })
-        .map(({ row, opening }) => ({
+    let updatedCount = 0;
+    const previousNonZeroRows = previousDay.credits
+      .map((row) => ({ row, opening: resolveCreditClosingBalance(row) }))
+      .filter(({ opening }) => opening !== 0);
+    const matchedPartyIds = new Set<string>();
+    const unmatchedPartyNames = new Set<string>();
+    const carriedBalances: string[] = [];
+    const existingKeys = new Set(credits.flatMap((row) => [row.partyId, normalizeKey(row.partyName)].filter(Boolean) as string[]));
+    const updatedRows = credits.map((row) => {
+      const previous = previousNonZeroRows.find(({ row: previousRow }) =>
+        (row.partyId && previousRow.partyId === row.partyId) ||
+        normalizeKey(previousRow.partyName) === normalizeKey(row.partyName)
+      );
+      if (!previous) return row;
+      if (previous.row.partyId ?? row.partyId) matchedPartyIds.add(previous.row.partyId ?? row.partyId ?? "");
+      carriedBalances.push(`${previous.row.partyName}: ${previous.opening.toLocaleString()}`);
+      if (parseLedgerNumber(row.opening) === previous.opening) return row;
+      updatedCount += 1;
+      return { ...row, opening: previous.opening };
+    });
+    const missingRows = previousNonZeroRows
+      .filter(({ row }) => {
+        const found = existingKeys.has(row.partyId ?? "") || existingKeys.has(normalizeKey(row.partyName));
+        if (!found) unmatchedPartyNames.add(row.partyName);
+        return !found;
+      })
+      .map(({ row, opening }) => {
+        carriedBalances.push(`${row.partyName}: ${opening.toLocaleString()}`);
+        return {
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
@@ -379,17 +362,20 @@ function previousCreditOpening(partyId: string, partyName: string) {
           loan: 0,
           today: 0,
           receive: 0
-        }));
-      addedCount = missingRows.length;
-      return missingRows.length ? mergeCreditRows([...rows, ...missingRows]) : rows;
-    });
-    setCreditVerifyMessage(
-      addedCount > 0
-        ? `Added ${addedCount} missing credit opening${addedCount === 1 ? "" : "s"} from previous closing balance.`
-        : carriedCount > 0
-          ? "Credit openings already match previous non-zero closing balances."
-          : "No non-zero previous credit closing balances to carry."
-    );
+        };
+      });
+    addedCount = missingRows.length;
+    if (missingRows.length || updatedCount) setCredits(mergeCreditRows([...updatedRows, ...missingRows]));
+    setCreditVerifyMessage([
+      `Previous day checked: Day ${previousDay.dayNo}`,
+      `Records found: ${previousDay.credits.length}`,
+      `Non-zero balances found: ${previousNonZeroRows.length}`,
+      `Matched party IDs: ${matchedPartyIds.size ? [...matchedPartyIds].join(", ") : "none"}`,
+      `Unmatched party names: ${unmatchedPartyNames.size ? [...unmatchedPartyNames].join(", ") : "none"}`,
+      `Balances carried forward: ${carriedBalances.length ? carriedBalances.join("; ") : "none"}`,
+      `Rows updated: ${updatedCount}`,
+      `Rows added: ${addedCount}`
+    ].join("\n"));
   }
 
   const derivedOwnerBalances = useMemo(
@@ -414,37 +400,39 @@ function previousCreditOpening(partyId: string, partyName: string) {
       mergeCreditRows(credits)
         .map((row) => {
           const opening = previousCreditOpening(row.partyId ?? "", row.partyName);
-          const loan = row.loan ?? row.today ?? 0;
+          const loan = parseLedgerNumber(row.loan ?? row.today);
+          const receive = parseLedgerNumber(row.receive);
           return {
             ...row,
             opening,
             loan,
             today: loan,
-            balance: opening + loan - row.receive
+            receive,
+            balance: opening + loan - receive
           };
         })
         .filter(isCreditMovementRow),
-    [credits, previousDay, previousDayClosed]
+    [credits, previousDay]
   );
 
   useEffect(() => {
-    if (!previousDayClosed || !previousDay) return;
+    if (!previousDay) return;
     setCredits((rows) => {
       const existingKeys = new Set(rows.map((row) => row.partyId ?? normalizeKey(row.partyName)));
       const missingRows = previousDay.credits
-        .filter((row) => !existingKeys.has(row.partyId ?? normalizeKey(row.partyName)) && creditClosingBalance(row) !== 0)
+        .filter((row) => !existingKeys.has(row.partyId ?? normalizeKey(row.partyName)) && resolveCreditClosingBalance(row) !== 0)
         .map((row) => ({
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
-          opening: creditClosingBalance(row),
+          opening: resolveCreditClosingBalance(row),
           loan: 0,
           today: 0,
           receive: 0
         }));
       return missingRows.length ? mergeCreditRows([...rows, ...missingRows]) : rows;
     });
-  }, [dayNo, previousDay, previousDayClosed]);
+  }, [dayNo, previousDay]);
 
   const payload = useMemo<DailyLedgerInput>(
     () => ({
@@ -496,6 +484,23 @@ function previousCreditOpening(partyId: string, partyName: string) {
     ]
   );
 
+  const { autoSaveStatus, hasPendingAutoSave } = useAutoSaveEntry({
+    data: payload,
+    enabled: true,
+    disabled,
+    debounceMs: 900,
+    resetKey: `${dayNo}-${initial?.lockedAt ?? ""}-${initial?.updatedAt ?? ""}`,
+    save: async (nextPayload) => {
+      setSaveInFlight(true);
+      try {
+        await onSave(nextPayload, { silent: true });
+        lastSavedRef.current = JSON.stringify(nextPayload);
+      } finally {
+        setSaveInFlight(false);
+      }
+    }
+  });
+
   const preview: MonthComputed["days"][number] = computeDay(payload, openingBalance, ownerOpeningBalance);
 
   const editingOwnerOpening = editingOwnerId
@@ -511,13 +516,12 @@ function previousCreditOpening(partyId: string, partyName: string) {
   useEffect(() => {
     lastSavedRef.current = JSON.stringify(payload);
     setSaveInFlight(false);
-    setAutoSaveState("saved");
     setSaveBaselineReady(true);
   }, [dayNo, initial?.lockedAt, initial?.updatedAt]);
 
   const hasPendingChanges = saveBaselineReady && (
     saveInFlight ||
-    autoSaveState === "error" ||
+    hasPendingAutoSave ||
     JSON.stringify(payload) !== lastSavedRef.current
   );
 
@@ -535,59 +539,30 @@ function previousCreditOpening(partyId: string, partyName: string) {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [hasPendingChanges]);
 
-  useEffect(() => {
-    if (disabled || !autoSaveEnabled) return;
-    const timer = window.setInterval(async () => {
-      const signature = JSON.stringify(payload);
-      if (signature === lastSavedRef.current || saveInFlightRef.current) return;
-      saveInFlightRef.current = true;
-      setSaveInFlight(true);
-      setAutoSaveState("saving");
-      try {
-        await onSave(payload, { silent: true });
-        lastSavedRef.current = signature;
-        setAutoSaveState("saved");
-      } catch {
-        setAutoSaveState("error");
-      } finally {
-        saveInFlightRef.current = false;
-        setSaveInFlight(false);
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [disabled, autoSaveEnabled, onSave, payload]);
-
-  async function handleCloseDay() {
-    if (!window.confirm(`Close ${payload.label ?? `Day ${dayNo}`}? Admin users will only be able to view it after closing.`)) return;
-    setSaving(true);
-    try {
-      await onCloseDay(payload);
-      lastSavedRef.current = JSON.stringify({ ...payload, lockedAt: payload.lockedAt ?? Date.now() });
-      setAutoSaveState("saved");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function handleManualSave() {
     setSaving(true);
-    saveInFlightRef.current = true;
     setSaveInFlight(true);
-    setAutoSaveState("saving");
     try {
       await onSave(payload);
       lastSavedRef.current = JSON.stringify(payload);
-      setAutoSaveState("saved");
       return true;
     } catch {
-      setAutoSaveState("error");
       return false;
     } finally {
-      saveInFlightRef.current = false;
       setSaveInFlight(false);
       setSaving(false);
     }
   }
+
+  const manualSaveRef = useRef<() => Promise<boolean>>(handleManualSave);
+  manualSaveRef.current = handleManualSave;
+
+  useEffect(() => {
+    if (!onManualSaveReady) return;
+    const save = () => manualSaveRef.current();
+    onManualSaveReady(save);
+    return () => onManualSaveReady(null);
+  }, [onManualSaveReady]);
 
   async function handleSendEmail() {
     if (!onSendEmail) return;
@@ -712,9 +687,9 @@ function previousCreditOpening(partyId: string, partyName: string) {
                 ...row,
                 partyId: creditDraft.partyId,
                 partyName: creditDraft.partyName,
-                loan: (row.loan ?? row.today ?? 0) + (creditDraft.loan ?? 0),
-                today: (row.loan ?? row.today ?? 0) + (creditDraft.loan ?? 0),
-                receive: row.receive + creditDraft.receive
+                loan: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
+                today: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
+                receive: parseLedgerNumber(row.receive) + parseLedgerNumber(creditDraft.receive)
               }
             : row
         );
@@ -745,8 +720,8 @@ function previousCreditOpening(partyId: string, partyName: string) {
     setCreditDraft({
       partyId: row.partyId ?? "",
       partyName: row.partyName ?? "",
-      loan: row.loan ?? row.today ?? 0,
-      receive: row.receive
+      loan: parseLedgerNumber(row.loan ?? row.today),
+      receive: parseLedgerNumber(row.receive)
     });
     setEditingCreditId(row.id);
   }
@@ -774,31 +749,6 @@ function previousCreditOpening(partyId: string, partyName: string) {
   function deleteCommission(item: CommissionItem) {
     if (!window.confirm(`Delete ${item.category} commission entry of ${item.amount.toLocaleString()}?`)) return;
     setCommissions((rows) => rows.filter((row) => row.id !== item.id));
-  }
-
-  function openReopenPicker() {
-    setReopenTimeDraft(formatTimeInputValue(reopenExpiresAt ?? Date.now() + 15 * 60 * 1000));
-    setReopenTimeError("");
-    setReopenPickerOpen(true);
-  }
-
-  async function confirmReopen() {
-    if (!onReopenDay) return;
-    if (!reopenRequiresTime) {
-      await onReopenDay();
-      return;
-    }
-    const reopenUntilAt = timeInputToTimestamp(reopenTimeDraft);
-    if (!reopenUntilAt) {
-      setReopenTimeError("Choose a valid time.");
-      return;
-    }
-    if (reopenUntilAt <= Date.now()) {
-      setReopenTimeError("Choose a future time.");
-      return;
-    }
-    setReopenPickerOpen(false);
-    await onReopenDay(reopenUntilAt);
   }
 
   function addCommission() {
@@ -896,42 +846,6 @@ function previousCreditOpening(partyId: string, partyName: string) {
           </div>
         </div>
       )}
-      {reopenPickerOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 text-slate-100 backdrop-blur-sm" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-black/40">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase text-emerald-300">Reopen Window</p>
-                <h3 className="mt-1 text-lg font-semibold">Select reopen time</h3>
-              </div>
-              <button className="btn-ghost !h-9 !w-9 !px-0" onClick={() => setReopenPickerOpen(false)} title="Close popup">
-                <X />
-              </button>
-            </div>
-            <label className="mt-4 block">
-              Reopen until
-              <input
-                type="time"
-                step={60}
-                value={reopenTimeDraft}
-                min={formatTimeInputValue(Date.now())}
-                onChange={(event) => {
-                  setReopenTimeDraft(event.target.value);
-                  setReopenTimeError("");
-                }}
-              />
-            </label>
-            <p className="mt-2 text-xs text-slate-400">Choose the time until this day stays open for corrections.</p>
-            {reopenTimeError && <p className="mt-2 text-sm text-rose-300">{reopenTimeError}</p>}
-            <div className="mt-5 flex justify-end gap-2">
-              <button className="btn-secondary" onClick={() => setReopenPickerOpen(false)}>Cancel</button>
-              <button className="btn-primary" disabled={saving || !onReopenDay} onClick={() => void confirmReopen()}>
-                Reopen
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       <div className="space-y-5">
         <section className="panel">
           <div className="panel-title">
@@ -939,37 +853,19 @@ function previousCreditOpening(partyId: string, partyName: string) {
               <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
             </div>
             <div className="hidden items-center gap-3 md:flex">
-              <label className="flex flex-row items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoSaveEnabled}
-                  disabled={disabled}
-                  onChange={(event) => toggleAutoSave(event.target.checked)}
-                  className="h-4 w-4 accent-emerald-400 cursor-pointer rounded border-slate-700 bg-slate-950/70"
-                />
-                <span>Auto-Save</span>
-              </label>
-              {autoSaveEnabled ? (
-                <span className={`text-xs font-semibold uppercase ${
-                  autoSaveState === "error"
-                    ? "text-rose-300"
-                    : autoSaveState === "saving"
-                      ? "text-amber-300"
-                      : "text-emerald-300"
-                }`}>
-                  {autoSaveState === "error"
-                    ? "Save failed"
-                    : autoSaveState === "saving"
-                      ? "Saving..."
-                      : "Saved"}
-                </span>
-              ) : (
-                <span className="text-xs font-semibold uppercase text-slate-500">Auto-save off</span>
-              )}
-              <button className="btn-secondary" disabled={disabled || saving} onClick={() => void handleManualSave()}>
-                {saving && <LoadingIcon label="Saving day" />}
-                {saving ? "Saving..." : "Save Now"}
-              </button>
+              <span className={`text-xs font-semibold uppercase ${
+                autoSaveStatus === "error"
+                  ? "text-rose-300"
+                  : autoSaveStatus === "saving"
+                    ? "text-amber-300"
+                    : "text-emerald-300"
+              }`}>
+                {autoSaveStatus === "error"
+                  ? "Autosave failed"
+                  : autoSaveStatus === "saving"
+                    ? "Autosaving..."
+                    : "Autosave on"}
+              </span>
               {onSendEmail && (
                 <button
                   className="btn-secondary"
@@ -981,20 +877,6 @@ function previousCreditOpening(partyId: string, partyName: string) {
                   {emailing ? "Sending..." : "Send Email"}
                 </button>
               )}
-              {canReopen && (
-                <button className="btn-secondary" disabled={saving || !onReopenDay} onClick={() => void (reopenRequiresTime ? openReopenPicker() : onReopenDay?.())}>
-                  {reopenLabel}
-                </button>
-              )}
-              {!canReopen && reopenExpiresAt && reopenExpiresAt > Date.now() && (
-                <span className="text-xs font-semibold uppercase text-emerald-300">
-                  Open until {new Date(reopenExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              )}
-              <button className="btn-primary" disabled={!canClose || saving} onClick={handleCloseDay}>
-                {saving && <LoadingIcon label="Closing day" />}
-                {saving ? "Closing..." : locked ? "Day Closed" : "Close Day"}
-              </button>
             </div>
           </div>
           <div className="grid two">
@@ -1011,48 +893,18 @@ function previousCreditOpening(partyId: string, partyName: string) {
 
         <div className="mobile-entry-actions md:hidden">
           <div className="flex flex-col gap-0.5">
-            <label className="flex flex-row items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={autoSaveEnabled}
-                disabled={disabled}
-                onChange={(event) => toggleAutoSave(event.target.checked)}
-                className="h-3.5 w-3.5 accent-emerald-400 cursor-pointer rounded border-slate-700 bg-slate-950/70"
-              />
-              <span>Auto-Save</span>
-            </label>
-            {autoSaveEnabled ? (
-              <p className={`text-[11px] font-semibold uppercase ${
-                autoSaveState === "error"
-                  ? "text-rose-300"
-                  : autoSaveState === "saving"
-                    ? "text-amber-300"
-                    : "text-emerald-300"
-              }`}>
-                {autoSaveState === "error" ? "Save failed" : autoSaveState === "saving" ? "Saving..." : "Saved"}
-              </p>
-            ) : (
-              <p className="text-[11px] font-semibold uppercase text-slate-500">Auto-save off</p>
-            )}
+            <p className={`text-[11px] font-semibold uppercase ${
+              autoSaveStatus === "error"
+                ? "text-rose-300"
+                : autoSaveStatus === "saving"
+                  ? "text-amber-300"
+                  : "text-emerald-300"
+            }`}>
+              {autoSaveStatus === "error" ? "Autosave failed" : autoSaveStatus === "saving" ? "Autosaving..." : "Autosave on"}
+            </p>
             <p className="mt-0.5 text-xs text-slate-400">
               {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
             </p>
-          </div>
-          <div className="flex shrink-0 gap-2">
-            <button className="btn-secondary !h-10 !px-3" disabled={disabled || saving} onClick={() => void handleManualSave()}>
-              {saving && <LoadingIcon label="Saving day" />}
-              Save
-            </button>
-            {canReopen ? (
-              <button className="btn-secondary !h-10 !px-3" disabled={saving || !onReopenDay} onClick={() => void (reopenRequiresTime ? openReopenPicker() : onReopenDay?.())}>
-                Reopen
-              </button>
-            ) : (
-              <button className="btn-primary !h-10 !px-3" disabled={!canClose || saving} onClick={handleCloseDay}>
-                {saving && <LoadingIcon label="Closing day" />}
-                Close
-              </button>
-            )}
           </div>
         </div>
 
@@ -1433,13 +1285,13 @@ function previousCreditOpening(partyId: string, partyName: string) {
             </div>
             <button
               className="btn-secondary"
-              disabled={disabled || !previousDayClosed || !previousDay}
+              disabled={!previousDay}
               onClick={verifyCreditOpeningsFromPreviousDay}
             >
-              Verify Credit Openings
+              Verify Credit Parties
             </button>
           </div>
-          {creditVerifyMessage && <p className="status">{creditVerifyMessage}</p>}
+          {creditVerifyMessage && <pre className="status whitespace-pre-wrap font-sans text-sm">{creditVerifyMessage}</pre>}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
             <label>
               Party
@@ -1485,7 +1337,7 @@ function previousCreditOpening(partyId: string, partyName: string) {
           </div>
           <div className="mobile-card-list md:hidden">
             {derivedCredits.map((row) => {
-              const balance = row.balance ?? row.opening + (row.loan ?? row.today ?? 0) - row.receive;
+              const balance = resolveCreditClosingBalance(row);
               return (
                 <article className="mobile-list-card" key={row.id}>
                   <div className="mobile-card-head">
@@ -1527,7 +1379,7 @@ function previousCreditOpening(partyId: string, partyName: string) {
               </thead>
               <tbody>
                 {derivedCredits.map((row) => {
-                  const balance = row.balance ?? row.opening + (row.loan ?? row.today ?? 0) - row.receive;
+                  const balance = resolveCreditClosingBalance(row);
                   return (
                     <tr key={row.id}>
                       <td>{row.partyName}</td>

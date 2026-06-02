@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -11,7 +11,6 @@ import {
   Cloud,
   FileDown,
   FileSpreadsheet,
-  History,
   LayoutDashboard,
   PackageOpen,
   ScrollText,
@@ -20,8 +19,8 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  RefreshCw,
   Bell,
+  Save,
   Shield,
   Sun,
   Tags,
@@ -59,6 +58,14 @@ import { applyPwaUpdate } from "./pwa";
 import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
 import { JazzLoadModule } from "./modules/jazzLoad/components/JazzLoadModule";
 import { StockLedgerModule } from "./modules/stock/components/StockLedgerModule";
+import { UniversalCalendar } from "./shared/calendar/UniversalCalendar";
+import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/context/SidebarDayControlsContext";
+import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
+import { MasterCalculationRefreshModal } from "./shared/dayControls/MasterCalculationRefreshModal";
+import { UniversalDayControlBar } from "./shared/dayControls/UniversalDayControlBar";
+import { runMasterRecalculation } from "./shared/services/masterRecalculationService";
+import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot, UniversalDayStatus } from "./shared/types/dayControl.types";
+import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
 import { listJazzLoadBackup, restoreJazzLoadBackup, roleCanJazzLoad, setJazzLoadMonthStatus, subscribeJazzLoadMonths } from "./modules/jazzLoad/services/jazzLoadFirestore";
 import {
   commitWorkbookImport,
@@ -101,7 +108,7 @@ import {
 } from "./lib/firestoreService";
 
 type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
-type ExpenseSection = "daily-entry" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
+type ExpenseSection = "daily-entry" | "previous-records" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
 
 type BackupPackage = {
   exportedAt: number;
@@ -171,12 +178,6 @@ function isLiveDay(monthId: string, dayNo: number, now: Date) {
 
 function isReopenActive(day: DailyLedgerInput | undefined, now: Date) {
   return Boolean(day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime());
-}
-
-function isDayClosedForCarry(monthId: string, day: DailyLedgerInput | undefined, now: Date) {
-  if (!day) return false;
-  if (isLiveDay(monthId, day.dayNo, now)) return Boolean(day.lockedAt);
-  return !isReopenActive(day, now);
 }
 
 function LoadingIcon({ label = "Loading" }: { label?: string }) {
@@ -279,100 +280,6 @@ function clampSelectedDay(dayNo: number, monthId: string, now: Date) {
   if (availableDays.length === 0) return 1;
   if (availableDays.includes(dayNo)) return dayNo;
   return Math.min(dayNo, availableDays.at(-1) ?? 1);
-}
-
-function calendarCells(monthId: string) {
-  const totalDays = daysInMonth(monthId);
-  const [yearText, monthText] = monthId.split("-");
-  const firstDate = new Date(Number(yearText), Number(monthText) - 1, 1);
-  const leadingEmpty = firstDate.getDay();
-  const cells: Array<{ dayNo: number | null }> = Array.from({ length: leadingEmpty }, () => ({ dayNo: null }));
-  for (let day = 1; day <= totalDays; day += 1) {
-    cells.push({ dayNo: day });
-  }
-  while (cells.length % 7 !== 0) cells.push({ dayNo: null });
-  return cells;
-}
-
-function DayCalendar({
-  monthId,
-  selectedDay,
-  days,
-  onSelect,
-  disabled,
-  now,
-  showFinal = false
-}: {
-  monthId: string;
-  selectedDay: number;
-  days?: DailyLedgerInput[];
-  onSelect: (dayNo: number) => void;
-  disabled?: boolean;
-  now: Date;
-  showFinal?: boolean;
-}) {
-  const availableDays = new Set(availableDayNumbers(monthId, now));
-  const canSelectFinal = showFinal && canUseFinalPeriod(monthId, now);
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-  return (
-    <div className={`mb-4 rounded-xl border border-slate-800 bg-slate-950/40 p-3 ${disabled ? "opacity-60" : ""}`}>
-      <div className="mb-2 grid grid-cols-7 gap-2 text-center text-[11px] font-semibold uppercase text-slate-500">
-        {weekdays.map((day) => (
-          <span key={day}>{day}</span>
-        ))}
-      </div>
-      <div className="grid grid-cols-7 gap-2">
-        {calendarCells(monthId).map((cell, index) => {
-          if (cell.dayNo == null) return <span key={`empty-${index}`} className="min-h-16" aria-hidden="true" />;
-          const isAvailable = availableDays.has(cell.dayNo);
-          const isSelected = selectedDay === cell.dayNo;
-          const day = days?.find((entry) => entry.dayNo === cell.dayNo);
-          const isLive = isLiveDay(monthId, cell.dayNo, now);
-          const reopened = isAvailable && isReopenActive(day, now);
-          const isOpen = isAvailable && (isLive ? !day?.lockedAt : reopened);
-          const stateLabel = !isAvailable ? "Future" : reopened ? "Re-open" : isOpen ? "Open" : "Closed";
-          const stateClass = !isAvailable
-            ? "bg-slate-800 text-slate-500"
-            : reopened
-              ? "bg-blue-400/15 text-blue-200"
-              : isOpen
-              ? "bg-emerald-400/15 text-emerald-200"
-              : "bg-rose-400/15 text-rose-200";
-          return (
-            <button
-              key={cell.dayNo}
-              type="button"
-              className={[
-                "min-h-16 flex-col rounded-lg border px-2 py-2 text-xs",
-                isSelected ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : "border-slate-800 bg-slate-900/70 text-slate-200",
-                !isAvailable ? "opacity-40" : ""
-              ].join(" ")}
-              disabled={disabled || !isAvailable}
-              onClick={() => onSelect(cell.dayNo!)}
-              title={`${dateLabelFor(monthId, cell.dayNo)} - ${stateLabel}`}
-            >
-              <span className="text-sm font-semibold">{cell.dayNo}</span>
-              <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}>{stateLabel}</span>
-              {isSelected && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
-            </button>
-          );
-        })}
-      </div>
-      {showFinal && (
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            className={selectedDay === 32 ? "btn-chip btn-chip-active" : "btn-chip"}
-            disabled={disabled || !canSelectFinal}
-            onClick={() => onSelect(32)}
-          >
-            FINAL
-          </button>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function liveClockText(now: Date) {
@@ -1063,17 +970,13 @@ function RecordsView({
   selectedDay,
   days,
   computed,
-  loading,
-  onDaySelect,
-  now
+  loading
 }: {
   monthId: string;
   selectedDay: number;
   days: DailyLedgerInput[];
   computed: MonthComputed | null;
   loading: boolean;
-  onDaySelect: (dayNo: number) => void;
-  now: Date;
 }) {
   const [recordMode, setRecordMode] = useState<"month" | "day">("month");
   const dayInput = days.find((day) => day.dayNo === selectedDay);
@@ -1147,17 +1050,9 @@ function RecordsView({
             <input value={formatMonth(monthId)} disabled readOnly />
           </label>
         </div>
-        <div className={recordMode === "day" ? "" : "pointer-events-none opacity-50"}>
-          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Date / Period</p>
-          <DayCalendar
-            monthId={monthId}
-            selectedDay={selectedDay}
-            onSelect={onDaySelect}
-            disabled={loading || recordMode === "month"}
-            now={now}
-            showFinal
-          />
-        </div>
+        {recordMode === "day" && (
+          <p className="mt-3 text-sm text-slate-400">Selected period: {dayInput?.date ?? dateLabelFor(monthId, selectedDay)}</p>
+        )}
         {loading && (
           <p className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-300">
             <LoadingIcon label="Loading previous records" />
@@ -1427,8 +1322,9 @@ function App() {
   const [importMonthId, setImportMonthId] = useState(initialDate.monthId);
   const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
   const [status, setStatus] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState("Working...");
+  const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState("Loading application data...");
+  const [isAutosaving, setIsAutosaving] = useState(false);
   const [monthEmailing, setMonthEmailing] = useState(false);
   const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
   const [bulkClosingDays, setBulkClosingDays] = useState(false);
@@ -1446,14 +1342,24 @@ function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
+  const [expenseManualSave, setExpenseManualSave] = useState<(() => Promise<boolean>) | null>(null);
   const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
   const [pwaNotice, setPwaNotice] = useState<PwaNotice>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [masterRefreshModal, setMasterRefreshModal] = useState<MasterRefreshModalState>({
+    open: false,
+    title: "",
+    progress: []
+  });
   const syncedLiveDateRef = useRef(false);
   const creatingMonthsRef = useRef(new Set<string>());
   const pendingWritesRef = useRef(false);
   const syncErrorRef = useRef(false);
   const queuedWriteCountRef = useRef(0);
+
+  const handleExpenseManualSaveReady = useCallback((save: (() => Promise<boolean>) | null) => {
+    setExpenseManualSave(() => save);
+  }, []);
 
   function confirmLeavePendingChanges() {
     return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
@@ -1554,6 +1460,15 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const handleAutosaveStatus = (e: Event) => {
+      const count = (e as CustomEvent<number>).detail;
+      setIsAutosaving(count > 0);
+    };
+    window.addEventListener("autosave-active-count", handleAutosaveStatus);
+    return () => window.removeEventListener("autosave-active-count", handleAutosaveStatus);
+  }, []);
+
+  useEffect(() => {
     const handleOfflineReady = () => setPwaNotice("offline-ready");
     const handleUpdateAvailable = () => setPwaNotice("update-available");
     window.addEventListener("pwa-offline-ready", handleOfflineReady);
@@ -1611,6 +1526,8 @@ function App() {
     }
     const liveDateOnLoad = currentDateState();
     setStatus("");
+    setLoadingMessage("Loading month data...");
+    setLoading(true);
     setMonthId(nextMonthId);
     if (!syncedLiveDateRef.current && nextMonthId === liveDateOnLoad.monthId) {
       setSelectedDay(liveDateOnLoad.dayNo);
@@ -1688,6 +1605,15 @@ function App() {
   useEffect(() => {
     if (!user || !role) return;
     const liveDateOnLoad = currentDateState();
+    let monthRecordReceived = false;
+    let monthDaysReceived = false;
+
+    const checkComplete = () => {
+      if (monthRecordReceived && monthDaysReceived) {
+        setLoading(false);
+      }
+    };
+
     const unsubscribers = [
       subscribeMonthRecord(
         monthId,
@@ -1698,6 +1624,8 @@ function App() {
               setStatus("This month does not exist yet. Owner or admin access is required to create it.");
               setDays([]);
               setComputed(null);
+              monthRecordReceived = true;
+              checkComplete();
               return;
             }
             if (creatingMonthsRef.current.has(monthId)) return;
@@ -1714,7 +1642,11 @@ function App() {
                 setStatus(`Created ${formatMonth(monthId)} locally. Firestore will sync when online.`);
               })
               .catch((err) => setStatus(err instanceof Error ? err.message : "Could not create Firestore month."))
-              .finally(() => creatingMonthsRef.current.delete(monthId));
+              .finally(() => {
+                creatingMonthsRef.current.delete(monthId);
+                monthRecordReceived = true;
+                checkComplete();
+              });
             return;
           }
           setOpeningBalance(record.openingBalance);
@@ -1733,16 +1665,28 @@ function App() {
             setSelectedDay(liveDateOnLoad.dayNo);
             syncedLiveDateRef.current = true;
           }
+          monthRecordReceived = true;
+          checkComplete();
         },
-        (err) => handleFirestoreError(err.message)
+        (err) => {
+          handleFirestoreError(err.message);
+          monthRecordReceived = true;
+          checkComplete();
+        }
       ),
       subscribeMonthDays(
         monthId,
         (nextDays, metadata) => {
           setDays(nextDays);
           applySnapshotMetadata(metadata);
+          monthDaysReceived = true;
+          checkComplete();
         },
-        (err) => handleFirestoreError(err.message)
+        (err) => {
+          handleFirestoreError(err.message);
+          monthDaysReceived = true;
+          checkComplete();
+        }
       )
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -1758,7 +1702,10 @@ function App() {
   );
 
   const previousDayInput = useMemo(
-    () => days.find((day) => day.dayNo === selectedDay - 1),
+    () =>
+      [...days]
+        .filter((day) => day.dayNo < selectedDay && day.dayNo !== 32 && day.credits.length > 0)
+        .sort((a, b) => b.dayNo - a.dayNo)[0],
     [days, selectedDay]
   );
 
@@ -2072,25 +2019,120 @@ function App() {
   }
 
   async function recalc() {
-    if (!roleCan(role, "ownerControls")) {
-      setStatus("Manual recalculation is restricted to owner or admin access.");
+    if (role !== "owner") {
+      setStatus("Manual recalculation is restricted to owner access.");
       return;
     }
-    setLoadingMessage(`Recalculating ${formatMonth(monthId)}...`);
-    setLoading(true);
+    const adapter = createExpenseRecalculationAdapter({
+      monthId,
+      canRun: role === "owner",
+      disabledReason: "Only owner can run Expense master refresh.",
+      run: async (emit) => {
+        emit({ step: "Saving latest local month state..." });
+        await saveMonthRecord(
+          months.find((month) => month.id === monthId) ?? createMonth(monthId, openingBalance, ownerOpeningBalance),
+          days,
+          { onlyWriteEditableDays: true }
+        );
+        emit({ step: "Recalculating daily balances..." });
+        try {
+          await recalculateMonth(monthId);
+        } catch (err) {
+          console.warn("Cloud recalculation failed/unavailable on Spark plan. Falling back to local client-side recalculation:", err);
+          emit({ step: "Recalculating daily balances (local fallback)..." });
+        }
+        emit({ step: "Loading recalculated records..." });
+        const nextDays = await fetchMonthDays(monthId);
+        const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+        setDays(nextDays);
+        setComputed(nextComputed);
+        await refreshMonthList();
+        emit({ step: "Completed successfully." });
+        return {
+          daysChecked: nextDays.length,
+          mismatchesCorrected: nextDays.length,
+          monthlySummariesUpdated: 1,
+          message: "Day openings now follow the previous closing balance."
+        };
+      }
+    });
     try {
-      await saveMonthRecord(
-        months.find((month) => month.id === monthId) ?? createMonth(monthId, openingBalance, ownerOpeningBalance),
-        days
-      );
-      await recalculateMonth(monthId);
-      const nextDays = await fetchMonthDays(monthId);
-      const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
-      setDays(nextDays);
-      setComputed(nextComputed);
-      await refreshMonthList();
-      setStatus("Master refresh complete. Day openings now follow the previous closing balance.");
+      const result = await runMasterRecalculation({
+        adapter,
+        confirm: () => window.confirm("This will recalculate balances and summaries. Manual entries will not be changed. Continue?"),
+        onStart: () => {
+          setLoadingMessage(`Recalculating ${formatMonth(monthId)}...`);
+          setLoading(true);
+          setMasterRefreshModal({
+            open: true,
+            title: `Refreshing Expense calculations for ${formatMonth(monthId)}`,
+            currentStep: "Preparing recalculation...",
+            progress: [{ step: "Preparing recalculation..." }]
+          });
+        },
+        onProgress: (progress) => {
+          setMasterRefreshModal((current) => ({
+            ...current,
+            currentStep: progress.step,
+            progress: [...current.progress, progress]
+          }));
+        },
+        onComplete: (nextResult) => {
+          setMasterRefreshModal((current) => ({
+            ...current,
+            currentStep: "Completed successfully.",
+            result: nextResult
+          }));
+        }
+      });
+      if (result) setStatus("Master refresh complete. Day openings now follow the previous closing balance.");
     } catch (err) {
+      setMasterRefreshModal((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : "Could not recalculate."
+      }));
+      setStatus(err instanceof Error ? err.message : "Could not recalculate.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function triggerMasterRefresh(adapter: MasterRecalculationAdapter, title: string) {
+    try {
+      const result = await runMasterRecalculation({
+        adapter,
+        confirm: () => window.confirm("This will recalculate balances and summaries. Manual entries will not be changed. Continue?"),
+        onStart: () => {
+          setLoadingMessage(`Recalculating ${title}...`);
+          setLoading(true);
+          setMasterRefreshModal({
+            open: true,
+            title: `Refreshing ${title} calculations for ${formatMonth(monthId)}`,
+            currentStep: "Preparing recalculation...",
+            progress: [{ step: "Preparing recalculation..." }]
+          });
+        },
+        onProgress: (progress) => {
+          setMasterRefreshModal((current) => ({
+            ...current,
+            currentStep: progress.step,
+            progress: [...current.progress, progress]
+          }));
+        },
+        onComplete: (nextResult) => {
+          setMasterRefreshModal((current) => ({
+            ...current,
+            currentStep: "Completed successfully.",
+            result: nextResult
+          }));
+        }
+      });
+      if (result) setStatus(`Master refresh complete. ${title} openings now follow the previous closing balance.`);
+    } catch (err) {
+      setMasterRefreshModal((current) => ({
+        ...current,
+        error: err instanceof Error ? err.message : "Could not recalculate."
+      }));
       setStatus(err instanceof Error ? err.message : "Could not recalculate.");
     } finally {
       setLoading(false);
@@ -2202,6 +2244,34 @@ function App() {
     }
   }, [expenseSection, role]);
 
+  const expenseCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
+    return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
+      const dayNo = index + 1;
+      const day = days.find((entry) => entry.dayNo === dayNo);
+      const future = !availableDayNumbers(monthId, now).includes(dayNo);
+      const live = isLiveDay(monthId, dayNo, now);
+      const reopened = isReopenActive(day, now);
+      let statusValue: UniversalDayStatus = "closed";
+      if (future) statusValue = "futureDisabled";
+      else if (live) statusValue = "today";
+      else if (reopened) statusValue = "reopened";
+      else if (!day) statusValue = "missing";
+      else if (day.lockedAt) statusValue = "locked";
+      else statusValue = "open";
+      return {
+        moduleKey: "expense",
+        monthId,
+        dayNo,
+        status: statusValue,
+        saved: Boolean(day),
+        dateLabel: dateLabelFor(monthId, dayNo),
+        reopenedUntilAt: day?.reopenedUntilAt,
+        disabledReason: future ? "Future days are disabled and cannot create records." : undefined
+      };
+    });
+  }, [days, monthId, now]);
+  const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? (selectedDay === 32 ? "closed" : "missing");
+
   if (!isFirebaseConfigured) return <FirebaseMissing />;
   if (!authReady || !user || !role) {
     return (
@@ -2214,9 +2284,7 @@ function App() {
   }
 
   const isClosed = monthStatus === "closed";
-  const selectedDayLocked = isSelectedLiveDay
-    ? Boolean(selectedDayInput.lockedAt)
-    : !selectedDayReopenActive;
+  const selectedDayLocked = isSelectedLiveDay ? false : !selectedDayReopenActive;
   const canEditDaily = roleCan(role, "daily") && !isClosed;
   const liveDate = currentDateState(now);
   const canEditSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || (role === "admin" && isSelectedLiveDay));
@@ -2268,7 +2336,6 @@ function App() {
       : "theme-light bg-[linear-gradient(180deg,#f8fafc,#e2e8f0)] text-slate-950";
   const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; show: boolean }> = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
-    { id: "records", label: "Previous Records", icon: History, show: true },
     { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "jazz-load", label: "Jazz Load", icon: FileSpreadsheet, show: true },
     { id: "stock-ledger", label: "Stock Ledger", icon: PackageOpen, show: true },
@@ -2281,6 +2348,7 @@ function App() {
   const showOfflineOwnerWarning = syncState === "offline";
   const currentViewLabel = navItems.find((item) => item.id === view)?.label ?? "Dashboard";
   const mobilePrimaryNav = navItems.filter((item) => item.show).filter((item) => ["dashboard", "expense", "jazz-load", "stock-ledger"].includes(item.id)).slice(0, 4);
+  const showRegisteredSidebarControls = view === "jazz-load" || view === "stock-ledger";
 
   function navigateTo(nextView: View) {
     if (hasPendingDayChanges && nextView !== view && !confirmLeavePendingChanges()) {
@@ -2378,9 +2446,117 @@ function App() {
     }
   }
 
+  const showExpenseSidebarControls = view === "expense" && (expenseSection === "daily-entry" || expenseSection === "previous-records");
+  const expenseSidebarControls = showExpenseSidebarControls ? (
+    <>
+      <p className="text-xs font-semibold uppercase text-slate-500">Day Controls</p>
+      {/* <p className="mt-1 text-sm font-semibold text-white">{dateLabel}</p> */}
+      <UniversalCalendar
+        moduleKey="expense"
+        monthId={monthId}
+        selectedDay={selectedDay}
+        days={expenseCalendarDays}
+        now={now}
+        disabled={expenseSection === "daily-entry" ? !canSelectDailyDate : false}
+        showFinal
+        canSelectFinal={canUseFinalPeriod(monthId, now)}
+        variant="mini"
+        onSelect={(nextDay) => {
+          if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
+            setStatus("Stayed on the current day because changes are still pending save.");
+            return;
+          }
+          setSelectedDay(nextDay);
+        }}
+      />
+      <UniversalDayControlBar
+        moduleKey="expense"
+        selectedDateLabel={dateLabel}
+        selectedMonthLabel={formatMonth(monthId)}
+        selectedStatus={selectedExpenseStatus}
+        role={role}
+        density="compact"
+        busy={loading || bulkReopening !== null || bulkClosingDays}
+        autoSaveStatus={selectedDayLocked ? "closed" : hasPendingDayChanges ? "unsaved" : "saved"}
+        permissions={{
+          canCloseSelectedDay: expenseSection === "daily-entry" && canCloseSelectedDay && Boolean(user),
+          canReopenSelectedDay: expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
+          canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
+          canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
+          canRunMasterRefresh: Boolean(user) && role === "owner",
+          closeDisabledReason: selectedDayLocked ? "This day is already closed." : "This day cannot be closed for your role.",
+          reopenDisabledReason: "Only owner can reopen previous days. Admin can reopen the current day only.",
+          reopenAllDisabledReason: "Only owner can reopen all days.",
+          closePreviousDisabledReason: "Only owner can close previous days.",
+          masterRefreshDisabledReason: "Only owner can run master refresh."
+        }}
+        onCloseSelectedDay={() => {
+          if (!window.confirm(`Close ${selectedDayInput.label ?? `Day ${selectedDay}`}?`)) return;
+          void closeDay(selectedDayInput);
+        }}
+        onReopenSelectedDay={() => {
+          if (canReopenSelectedDay) {
+            void reopenDay(selectedDay);
+            return;
+          }
+          void reopenMonthDays("selected");
+        }}
+        onReopenAllDays={() => void reopenMonthDays("all")}
+        onClosePreviousDaysExceptToday={closeAllDaysExceptToday}
+        onRunMasterRefresh={recalc}
+        extraActions={
+          <>
+            <button
+              className="btn-primary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={expenseSection !== "daily-entry" || !expenseManualSave || loading}
+              onClick={() => void expenseManualSave?.()}
+            >
+              <Save />
+              Save
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!computed || !selectedDayComputed}
+              onClick={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
+            >
+              <FileSpreadsheet />
+              Export Daily Excel
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!computed || !selectedDayComputed}
+              onClick={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
+            >
+              <FileDown />
+              Export Daily PDF
+            </button>
+          </>
+        }
+      />
+    </>
+  ) : null;
+
   return (
+    <SelectedDateProvider
+      value={{
+        monthId,
+        selectedDay,
+        selectedDateKey: selectedDay === 32 ? `${monthId}-FINAL` : `${monthId}-${String(selectedDay).padStart(2, "0")}`,
+        setSelectedDay
+      }}
+    >
+    <SidebarDayControlsProvider>
     <main className={`min-h-screen ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
+      {isAutosaving && (
+        <div className="fixed left-0 right-0 top-0 z-[60] h-1 overflow-hidden bg-slate-950/20 backdrop-blur-[1px]">
+          <div className="loading-bar h-full rounded-full bg-emerald-400" />
+        </div>
+      )}
+      <MasterCalculationRefreshModal
+        state={masterRefreshModal}
+        onClose={() => setMasterRefreshModal({ open: false, title: "", progress: [] })}
+      />
       <header className="mobile-topbar lg:hidden">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-300">{currentViewLabel}</p>
@@ -2413,10 +2589,6 @@ function App() {
             <button className="btn-primary" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
               {loading && <LoadingIcon label="Loading month" />}
               Load
-            </button>
-            <button className="btn-secondary" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
-              {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
-              Recalc
             </button>
             <button className="btn-secondary" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
               {loading && <LoadingIcon label="Updating month status" />}
@@ -2487,7 +2659,7 @@ function App() {
           {sidebarOpen && (
             <>
               <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
-                <p className="text-sm font-semibold uppercase text-emerald-300">Current Status</p>
+                <p className="text-sm font-semibold uppercase text-emerald-300">Operations</p>
                 <p className="mt-2 text-lg font-semibold text-white">{liveClock}</p>
                 <div className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
                   <div className="flex items-center justify-between gap-3">
@@ -2499,37 +2671,39 @@ function App() {
                     <span className="font-medium capitalize text-slate-100">{currentMonthStatus}</span>
                   </div>
                 </div>
-              </div>
-              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
-                <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
-                <label className="mt-3">
-                  Active Month
-                  <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
-                    {monthChoices.map(([id, status]) => (
-                      <option key={id} value={id}>
-                        {formatMonth(id)} · {status}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="mt-3">
-                  Opening Balance
-                  <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
-                </label>
-                <div className="mt-4 flex flex-col gap-2">
-                  <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
-                    {loading && <LoadingIcon label="Loading month" />}
-                    Load
-                  </button>
-                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canUseOwnerControls} onClick={recalc}>
-                    {loading ? <LoadingIcon label="Recalculating" /> : <RefreshCw />}
-                    Recalculate
-                  </button>
-                  <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
-                    {loading && <LoadingIcon label="Updating month status" />}
-                    {monthToggleLabel}
-                  </button>
+                <div className="mt-4 border-t border-slate-800 pt-4">
+                  <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
+                  <label className="mt-3">
+                    Active Month
+                    <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
+                      {monthChoices.map(([id, status]) => (
+                        <option key={id} value={id}>
+                          {formatMonth(id)} · {currentMonthStatus}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {/* <label className="mt-3">
+                    Opening Balance
+                    <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+                  </label> */}
+                  <div className="mt-4 flex flex-col gap-2">
+                    <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
+                      {loading && <LoadingIcon label="Loading month" />}
+                      Load
+                    </button>
+                    <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
+                      {loading && <LoadingIcon label="Updating month status" />}
+                      {monthToggleLabel}
+                    </button>
+                  </div>
                 </div>
+                {(expenseSidebarControls || showRegisteredSidebarControls) && (
+                  <div className="mt-4 border-t border-slate-800 pt-4">
+                    {expenseSidebarControls}
+                    {showRegisteredSidebarControls && <SidebarDayControlsSlot />}
+                  </div>
+                )}
                 {/* {months.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2">
                     {months.slice(0, 8).map((month) => (
@@ -2539,7 +2713,7 @@ function App() {
                     ))}
                   </div>
                 )} */}
-              </div>
+                </div>
               <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
                 <p className="text-xs font-semibold uppercase text-slate-500">User</p>
                 <p className="mt-2 text-sm font-semibold text-white">{displayName}</p>
@@ -2583,7 +2757,7 @@ function App() {
 
           {view === "dashboard" && (
             <>
-              <HomeDashboard month={computed} />
+              <HomeDashboard month={computed} monthId={monthId} />
               <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                 <button className="btn-primary w-full sm:w-auto" disabled={!computed} onClick={() => computed && runReportExport(() => exportMonthlyXlsx(computed))}>
                   <FileSpreadsheet />
@@ -2615,8 +2789,6 @@ function App() {
               days={days}
               computed={computed}
               loading={loading}
-              onDaySelect={setSelectedDay}
-              now={now}
             />
           )}
 
@@ -2626,6 +2798,7 @@ function App() {
                 {(
                   [
                     { id: "daily-entry", label: "Daily Entry", locked: false },
+                    { id: "previous-records", label: "Previous Records", locked: false },
                     { id: "expense-dashboard", label: "Dashboard", locked: false },
                     { id: "expense-categories", label: "Expense Categories", locked: !canManageCatalogs },
                     { id: "credit-parties", label: "Credit Parties", locked: !canManageCatalogs },
@@ -2656,87 +2829,6 @@ function App() {
 
               {expenseSection === "daily-entry" && (
                 <>
-                  <section className="mb-4 rounded-xl border border-slate-800 bg-slate-900/80 p-4 text-slate-100 shadow-xl shadow-black/20">
-                    <div className="mb-3 flex items-end justify-between gap-4">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-300">Day / Period</p>
-                        <h3 className="mt-1 text-lg font-semibold text-white">{formatMonth(monthId)}</h3>
-                        <p className="mt-1 text-sm text-slate-400">{dateLabel}</p>
-                      </div>
-                    </div>
-                    <DayCalendar
-                      monthId={monthId}
-                      selectedDay={selectedDay}
-                      days={days}
-                      now={now}
-                      disabled={!canSelectDailyDate}
-                      showFinal
-                      onSelect={(nextDay) => {
-                        if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
-                          setStatus("Stayed on the current day because changes are still pending save.");
-                          return;
-                        }
-                        setSelectedDay(nextDay);
-                      }}
-                    />
-                    <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                      <button
-                        className="btn-secondary w-full sm:w-auto"
-                        disabled={!computed || !selectedDayComputed}
-                        onClick={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
-                      >
-                        <FileSpreadsheet />
-                        Export Daily Excel
-                      </button>
-                      <button
-                        className="btn-secondary w-full sm:w-auto"
-                        disabled={!computed || !selectedDayComputed}
-                        onClick={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
-                      >
-                        <FileDown />
-                        Export Daily PDF
-                      </button>
-                      {roleCan(role, "ownerControls") && (
-                        <button
-                          className="btn-secondary w-full sm:w-auto"
-                          disabled={loading || !user}
-                          onClick={recalc}
-                          title="Refresh month calculations so each day opening follows the previous day closing"
-                        >
-                          {loading ? <LoadingIcon label="Refreshing calculations" /> : <RefreshCw />}
-                          Master Refresh Calculations
-                        </button>
-                      )}
-                      {role === "owner" && (
-                        <>
-                          <button
-                            className="btn-secondary w-full sm:w-auto"
-                            disabled={loading || bulkReopening !== null || !user || !canOwnerBulkReopenSelected}
-                            onClick={() => void reopenMonthDays("selected")}
-                          >
-                            {bulkReopening === "selected" && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                            {bulkReopening === "selected" ? "Reopening..." : "Reopen Selected Day"}
-                          </button>
-                          <button
-                            className="btn-secondary w-full sm:w-auto"
-                            disabled={loading || bulkReopening !== null || !user || !canOwnerBulkReopenAll}
-                            onClick={() => void reopenMonthDays("all")}
-                          >
-                            {bulkReopening === "all" && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                            {bulkReopening === "all" ? "Reopening..." : "Reopen All Days"}
-                          </button>
-                          <button
-                            className="btn-secondary w-full sm:w-auto"
-                            disabled={loading || bulkClosingDays || !user || !canOwnerCloseAllExceptToday}
-                            onClick={closeAllDaysExceptToday}
-                          >
-                            {bulkClosingDays && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                            {bulkClosingDays ? "Closing..." : "Close All"}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </section>
                   <DailyEntryForm
                     key={`${monthId}-${selectedDay}`}
                     dayNo={selectedDay}
@@ -2760,7 +2852,6 @@ function App() {
                     reopenExpiresAt={selectedDayInput.reopenedUntilAt}
                     reopenRequiresTime={!isSelectedLiveDay}
                     onReopenDay={(reopenUntilAt) => reopenDay(selectedDay, reopenUntilAt)}
-                    previousDayClosed={isDayClosedForCarry(monthId, previousDayInput, now)}
                     canCreateCatalogs={canManageCatalogs}
                     onSave={saveDay}
                     onCloseDay={closeDay}
@@ -2768,10 +2859,20 @@ function App() {
                     canSendEmail={false}
                     onCreateCatalog={saveCatalog}
                     onPendingStateChange={setHasPendingDayChanges}
+                    onManualSaveReady={handleExpenseManualSaveReady}
                   />
                 </>
               )}
-              {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} />}
+              {expenseSection === "previous-records" && (
+                <RecordsView
+                  monthId={monthId}
+                  selectedDay={selectedDay}
+                  days={days}
+                  computed={computed}
+                  loading={loading}
+                />
+              )}
+              {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} monthId={monthId} />}
               {expenseSection === "expense-categories" && (
                 <CatalogManager
                   title="Expense Categories"
@@ -2819,6 +2920,7 @@ function App() {
               onStatus={setStatus}
               onExportBackup={exportBackup}
               onImportBackup={importBackup}
+              onTriggerMasterRefresh={triggerMasterRefresh}
             />
           )}
 
@@ -2834,6 +2936,7 @@ function App() {
               onFirestoreError={handleFirestoreError}
               onQueueWrite={handleQueuedWrite}
               onStatus={setStatus}
+              onTriggerMasterRefresh={triggerMasterRefresh}
             />
           )}
 
@@ -2991,7 +3094,7 @@ function App() {
               onClick={() => navigateTo(item.id)}
             >
               <Icon />
-              <span>{item.id === "expense" ? "Entry" : item.id === "jazz-load" ? "Jazz" : item.label.replace("Previous ", "")}</span>
+              <span>{item.id === "expense" ? "Expense" : item.id === "jazz-load" ? "Jazz" : item.label.replace("Previous ", "")}</span>
             </button>
           );
         })}
@@ -3001,6 +3104,8 @@ function App() {
         </button>
       </nav>
     </main>
+    </SidebarDayControlsProvider>
+    </SelectedDateProvider>
   );
 }
 

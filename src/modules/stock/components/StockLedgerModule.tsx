@@ -62,6 +62,14 @@ import {
   roundMoney,
   slug
 } from "../utils/stockFormatters";
+import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
+import { UniversalDayControlBar } from "../../../shared/dayControls/UniversalDayControlBar";
+import { useSidebarDayControls } from "../../../shared/context/SidebarDayControlsContext";
+import { useSelectedDate } from "../../../shared/context/SelectedDateContext";
+import { useAutoSaveEntry } from "../../../shared/hooks/useAutoSaveEntry";
+import { runMasterRecalculation } from "../../../shared/services/masterRecalculationService";
+import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
+import { createStockRecalculationAdapter } from "../adapters/stockRecalculationAdapter";
 
 type StockSection = "dashboard" | "stockIn" | "daily" | "records" | "balances" | "jazzPayable" | "dues" | "products" | "accounts" | "settings" | "backup" | "reportsHub";
 type StockSectionGroup = "entries" | "reports";
@@ -76,6 +84,7 @@ type Props = {
   onFirestoreError: (message: string) => void;
   onQueueWrite: (promise: Promise<unknown>, failureMessage: string) => void;
   onStatus: (message: string) => void;
+  onTriggerMasterRefresh?: (adapter: MasterRecalculationAdapter, title: string) => Promise<void>;
   loading?: boolean;
 };
 
@@ -109,37 +118,29 @@ function getStockDayStatus(
 ) {
   const available = new Set(availableDays(monthId, now));
   if (!available.has(dayNo)) return "Future";
-  if (monthStatus === "closed") return "Closed";
-  if (day && isReopenActive(day, now)) return "Re-open";
-  if (day?.status === "closed") return "Closed";
   if (isLiveDay(monthId, dayNo, now)) return "Open";
+  if (!day) return "Missing";
+  if (monthStatus === "closed") return "Closed";
+  if (day && isReopenActive(day, now)) return "Re-Open";
+  if (day?.status === "closed") return "Closed";
   if (day?.status === "open") return "Open";
   return "Closed";
 }
 
 function getDayStatusChipClass(status: string) {
   if (status === "Open") return "bg-emerald-400/15 text-emerald-200";
-  if (status === "Re-open") return "bg-blue-400/15 text-blue-200";
-  if (status === "Closed") return "bg-rose-400/15 text-rose-200";
+  if (status === "Re-Open") return "bg-blue-400/15 text-blue-200";
+  if (status === "Missing") return "bg-orange-400/15 text-orange-200";
+  if (status === "Closed") return "bg-red-400/15 text-red-200";
   return "bg-slate-800 text-slate-500";
 }
 
 function canEditStockDay(role: UserRole | null, month: StockMonth | undefined, monthId: string, day: StockDayRecord | undefined, dayNo: number, now = new Date()) {
   if (!roleCanStock(role, "daily")) return false;
   if (month?.status === "closed") return false;
-  if (role === "admin") return isLiveDay(monthId, dayNo, now) && (day?.status !== "closed" || isReopenActive(day, now));
-  if (isLiveDay(monthId, dayNo, now)) return day?.status !== "closed" || isReopenActive(day, now);
+  if (role === "admin") return isLiveDay(monthId, dayNo, now);
+  if (isLiveDay(monthId, dayNo, now)) return true;
   return isReopenActive(day, now);
-}
-
-function calendarCells(monthId: string) {
-  const totalDays = daysInMonth(monthId);
-  const [yearText, monthText] = monthId.split("-");
-  const firstDate = new Date(Number(yearText), Number(monthText) - 1, 1);
-  const cells: Array<{ dayNo: number | null }> = Array.from({ length: firstDate.getDay() }, () => ({ dayNo: null }));
-  for (let day = 1; day <= totalDays; day += 1) cells.push({ dayNo: day });
-  while (cells.length % 7 !== 0) cells.push({ dayNo: null });
-  return cells;
 }
 
 function NumberInput({ value, onChange, disabled }: { value: number; onChange: (value: number) => void; disabled?: boolean }) {
@@ -168,59 +169,6 @@ function MetricCard({ label, value, helper }: { label: string; value: string; he
       <p className="text-sm font-medium text-slate-400">{label}</p>
       <p className="mt-2 text-2xl font-semibold text-white">{value}</p>
       <p className="mt-3 text-xs text-slate-500">{helper}</p>
-    </div>
-  );
-}
-
-function StockCalendar({
-  monthId,
-  monthStatus,
-  selectedDay,
-  days,
-  onSelect,
-  disabled
-}: {
-  monthId: string;
-  monthStatus?: StockMonth["status"];
-  selectedDay: number;
-  days: StockDayRecord[];
-  onSelect: (dayNo: number) => void;
-  disabled?: boolean;
-}) {
-  const now = new Date();
-  const available = new Set(availableDays(monthId, now));
-  return (
-    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-      <div className="mb-2 grid grid-cols-7 gap-2 text-center text-[11px] font-semibold uppercase text-slate-500">
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}
-      </div>
-      <div className="grid grid-cols-7 gap-2">
-        {calendarCells(monthId).map((cell, index) => {
-          if (cell.dayNo == null) return <span key={`empty-${index}`} className="min-h-16" />;
-          const day = days.find((item) => item.dayNo === cell.dayNo);
-          const future = !available.has(cell.dayNo);
-          const selected = selectedDay === cell.dayNo;
-          const status = getStockDayStatus(monthId, cell.dayNo, day, monthStatus, now);
-          return (
-            <button
-              key={cell.dayNo}
-              type="button"
-              className={[
-                "min-h-16 flex-col rounded-lg border px-2 py-2 text-xs",
-                selected ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : "border-slate-800 bg-slate-900/70 text-slate-200",
-                future ? "opacity-40" : ""
-              ].join(" ")}
-              disabled={disabled || future}
-              onClick={() => onSelect(cell.dayNo!)}
-              title={`${dayDate(monthId, cell.dayNo)} - ${status}`}
-            >
-              <span className="text-sm font-semibold">{cell.dayNo}</span>
-              <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${getDayStatusChipClass(status)}`}>{status}</span>
-              {selected && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -522,14 +470,15 @@ export function StockLedgerModule({
   onFirestoreError,
   onQueueWrite,
   onStatus,
+  onTriggerMasterRefresh,
   loading
 }: Props) {
+  const { selectedDay, setSelectedDay } = useSelectedDate();
   const [section, setSection] = useState<StockSection>("daily");
   const [openSectionGroups, setOpenSectionGroups] = useState<Record<StockSectionGroup, boolean>>({
     entries: true,
     reports: false
   });
-  const [selectedDay, setSelectedDay] = useState(currentDateState().dayNo);
   const [months, setMonths] = useState<StockMonth[]>([]);
   const [days, setDays] = useState<StockDayRecord[]>([]);
   const [summary, setSummary] = useState<StockMonthlySummary | null>(null);
@@ -738,6 +687,34 @@ export function StockLedgerModule({
   const canEdit = canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
   const canMonthControls = roleCanStock(role, "monthControls");
   const canReopenSelectedDay = role === "owner" || (role === "admin" && isLiveDay(monthId, selectedDay, now));
+  const stockCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
+    return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
+      const dayNo = index + 1;
+      const day = days.find((item) => item.dayNo === dayNo);
+      const status = getStockDayStatus(monthId, dayNo, day, month?.status, now);
+      return {
+        moduleKey: "stock",
+        monthId,
+        dayNo,
+        saved: Boolean(day),
+        dateLabel: dayDate(monthId, dayNo),
+        reopenedUntilAt: day?.reopenedUntilAt,
+        disabledReason: status === "Future" ? "Future Stock Ledger days are disabled and cannot create records." : undefined,
+        status: status === "Future"
+          ? "futureDisabled"
+          : isLiveDay(monthId, dayNo, now)
+            ? "today"
+            : status === "Missing"
+              ? "missing"
+              : status === "Re-Open"
+                ? "reopened"
+                : status === "Closed"
+                  ? "closed"
+                  : "open"
+      };
+    });
+  }, [days, month?.status, monthId, now]);
+  const selectedStockStatus = stockCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -835,9 +812,22 @@ export function StockLedgerModule({
     createdBy: user.uid
   }) : null;
 
-  async function saveEntry() {
-    if (!selectedAccount || !previewEntry) return;
-    const validation = validateStockDraft(draft, products, selectedAccount);
+  async function saveEntry(nextDraft = draft) {
+    if (!selectedAccount) return;
+    const computedPreviewEntry = buildStockEntry({
+      id: selectedAccount.id,
+      date: dayDate(monthId, selectedDay),
+      monthId,
+      dayNo: selectedDay,
+      account: selectedAccount,
+      draft: nextDraft,
+      products,
+      previous: selectedEntry,
+      carryForwardBalance: nextDraft.carryForwardBalance ?? previousEntry?.dueBalance ?? previousMonthDueBalance ?? selectedAccount.openingBalance ?? 0,
+      createdBy: user.uid
+    });
+    if (!computedPreviewEntry) return;
+    const validation = validateStockDraft(nextDraft, products, selectedAccount);
     if (!validation.valid) {
       onStatus(validation.errors.join(" "));
       return;
@@ -845,7 +835,7 @@ export function StockLedgerModule({
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const entries = [
       ...(selectedDayRecord?.entries.filter((entry) => entry.accountId !== selectedAccount.id) ?? []),
-      previewEntry
+      computedPreviewEntry
     ];
     const nextDay = buildStockDayRecord({
       month: workingMonth,
@@ -1024,6 +1014,10 @@ export function StockLedgerModule({
   }
 
   async function closeAllStock() {
+    if (role !== "owner") {
+      onStatus("Only owner can close all previous Stock Ledger days.");
+      return;
+    }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
     const live = currentDateState(now);
@@ -1068,6 +1062,10 @@ export function StockLedgerModule({
   }
 
   async function reopenAllStock() {
+    if (role !== "owner") {
+      onStatus("Only owner can reopen all Stock Ledger days.");
+      return;
+    }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
     const reopenUntilAt = timestamp + 15 * 60 * 1000;
@@ -1107,18 +1105,153 @@ export function StockLedgerModule({
   }
 
   async function masterRefreshStockCalculations() {
-    if (!canMonthControls) {
-      onStatus("Only the owner or admin can run Stock Ledger master calculations.");
+    if (role !== "owner") {
+      onStatus("Only owner can run Stock Ledger master calculations.");
       return;
     }
     if (days.length === 0) {
       onStatus("No Stock Ledger days are available to refresh.");
       return;
     }
-    const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-    onQueueWrite(recalculateStockMonth(workingMonth, days, user, role), "Could not refresh Stock Ledger calculations.");
-    onStatus("Stock Ledger master refresh queued.");
+    const adapter = createStockRecalculationAdapter({
+      monthId,
+      canRun: role === "owner" && days.length > 0 && month?.status !== "closed" && !monthBootstrapPending,
+      disabledReason: "Only owner can run Stock Ledger master refresh on an open month with saved days.",
+      run: async () => {
+        const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
+        const result = await recalculateStockMonth(workingMonth, days, user, role);
+        setMonths((current) => [result.month, ...current.filter((item) => item.id !== result.month.id)].sort((a, b) => b.id.localeCompare(a.id)));
+        setDays(result.days);
+        setSummary(result.summary);
+        return {
+          daysChecked: result.days.length,
+          mismatchesCorrected: result.days.length,
+          monthlySummariesUpdated: 1,
+          message: "Stock Ledger openings now follow previous closings."
+        };
+      }
+    });
+    if (onTriggerMasterRefresh) {
+      await onTriggerMasterRefresh(adapter, "Stock Ledger");
+    } else {
+      onQueueWrite(runMasterRecalculation({ adapter }), "Could not refresh Stock Ledger calculations.");
+      onStatus("Stock Ledger master refresh queued.");
+    }
   }
+
+  const stockEntryAutoSave = useAutoSaveEntry({
+    data: {
+      monthId,
+      selectedDay,
+      selectedAccountId,
+      draft
+    },
+    enabled: true,
+    disabled: !canEdit || !selectedAccount || !previewEntry || monthBootstrapPending || section !== "daily",
+    debounceMs: 900,
+    resetKey: `${monthId}-${selectedDay}-${selectedAccountId}-${selectedDayRecord?.updatedAt ?? ""}`,
+    validate: () => {
+      if (!selectedAccount) return "Select an account.";
+      const hasMovement = Object.values(draft.productQuantities).some((quantity) => quantity !== 0) ||
+        (draft.paymentReceived ?? 0) !== 0 ||
+        Boolean(draft.notes?.trim()) ||
+        Boolean(selectedEntry);
+      if (!hasMovement) return "Enter stock movement before autosave.";
+      return validateStockDraft(draft, products, selectedAccount).errors;
+    },
+    save: async () => {
+      await saveEntry();
+    }
+  });
+
+  const sidebarDayControls = useMemo(() => (
+    <>
+      <p className="text-xs font-semibold uppercase text-slate-500">Day Controls</p>
+      {/* <p className="mt-1 text-sm font-semibold text-white">{dayDate(monthId, selectedDay)}</p> */}
+      <UniversalCalendar
+        moduleKey="stock"
+        monthId={monthId}
+        selectedDay={selectedDay}
+        days={stockCalendarDays}
+        now={now}
+        onSelect={setSelectedDay}
+        variant="mini"
+      />
+      <UniversalDayControlBar
+        moduleKey="stock"
+        selectedDateLabel={dayDate(monthId, selectedDay)}
+        selectedMonthLabel={monthLabel(monthId)}
+        selectedStatus={selectedStockStatus}
+        role={role}
+        density="compact"
+        busy={Boolean(loading) || monthBootstrapPending}
+        autoSaveStatus={section === "daily" ? stockEntryAutoSave.autoSaveStatus : undefined}
+        permissions={{
+          canCloseSelectedDay: Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
+          canReopenSelectedDay: canReopenSelectedDay && month?.status !== "closed" && !monthBootstrapPending,
+          canReopenAllDays: role === "owner" && !monthBootstrapPending && availableDays(monthId, now).length > 0,
+          canClosePreviousDaysExceptToday: role === "owner" && month?.status !== "closed" && !monthBootstrapPending,
+          canRunMasterRefresh: role === "owner" && days.length > 0 && month?.status !== "closed" && !monthBootstrapPending,
+          closeDisabledReason: "This Stock Ledger day cannot be closed.",
+          reopenDisabledReason: "Owner can reopen any day. Admin can reopen current day only.",
+          reopenAllDisabledReason: "Only owner can reopen all Stock Ledger days.",
+          closePreviousDisabledReason: "Only owner can close previous Stock Ledger days.",
+          masterRefreshDisabledReason: "Only owner can run master refresh and the month must be open."
+        }}
+        onCloseSelectedDay={closeSelectedDay}
+        onReopenSelectedDay={reopenSelectedDay}
+        onReopenAllDays={reopenAllStock}
+        onClosePreviousDaysExceptToday={closeAllStock}
+        onRunMasterRefresh={masterRefreshStockCalculations}
+        extraActions={
+          <>
+            <button
+              className="btn-primary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!canEdit || Boolean(loading) || monthBootstrapPending}
+              onClick={() => void saveEntry()}
+            >
+              <Save />
+              Save
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!selectedDayRecord || monthBootstrapPending}
+              onClick={() => selectedDayRecord && exportStockDayXlsx(selectedDayRecord)}
+            >
+              <FileSpreadsheet />
+              Export Daily Excel
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!selectedDayRecord || monthBootstrapPending}
+              onClick={() => selectedDayRecord && exportStockPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}
+            >
+              <FileDown />
+              Export Daily PDF
+            </button>
+          </>
+        }
+      />
+    </>
+  ), [
+    canEdit,
+    canReopenSelectedDay,
+    days.length,
+    loading,
+    month?.status,
+    monthBootstrapPending,
+    monthId,
+    now,
+    role,
+    section,
+    selectedDay,
+    selectedDayRecord,
+    selectedStockStatus,
+    setSelectedDay,
+    stockCalendarDays,
+    stockEntryAutoSave.autoSaveStatus
+  ]);
+  useSidebarDayControls("stock", sidebarDayControls, true);
 
   function metricSummary() {
     return summary ?? {
@@ -1138,8 +1271,8 @@ export function StockLedgerModule({
 
   const metrics = metricSummary();
   const entrySections: Array<[StockSection, string, typeof CalendarDays]> = [
-    ["daily", "Stock Out (Allotment)", ArrowUpRight],
-    ["stockIn", "Stock In (Jazz)", PlusCircle],
+    ["daily", "Stock Issuance", ArrowUpRight],
+    ["stockIn", "Stock Lifting", PlusCircle],
     ["settings", "Stock Settings", Settings]
   ];
   const reportSections: Array<[StockSection, string, typeof CalendarDays]> = [
@@ -1178,7 +1311,7 @@ export function StockLedgerModule({
                 {openSectionGroups.entries ? <ChevronDown /> : <ChevronRight />}
                 Settings & Entries
               </span>
-              <span>{openSectionGroups.entries ? "Close" : "Re-open"}</span>
+              <span>{openSectionGroups.entries ? "Collapse" : "Expand"}</span>
             </button>
             {openSectionGroups.entries && (
               <nav className="mt-2 flex flex-wrap gap-2">
@@ -1202,7 +1335,7 @@ export function StockLedgerModule({
                 {openSectionGroups.reports ? <ChevronDown /> : <ChevronRight />}
                 Reports
               </span>
-              <span>{openSectionGroups.reports ? "Close" : "Re-open"}</span>
+              <span>{openSectionGroups.reports ? "Collapse" : "Expand"}</span>
             </button>
             {openSectionGroups.reports && (
               <nav className="mt-2 flex flex-wrap gap-2">
@@ -1224,83 +1357,6 @@ export function StockLedgerModule({
         <MetricCard label="Due Balance" value={formatMoney(metrics.totalDueBalance)} helper={syncState === "offline" ? "Offline changes are queued." : "Firestore stock summary."} />
         <MetricCard label="Quantity" value={formatMoney(currentInventoryQty)} helper="Current stock balance quantity." />
       </section>
-
-      <section className="panel">
-        <div className="panel-title">
-          <div>
-            <h2>Stock Ledger Calendar & Controls</h2>
-            <p className="flex flex-wrap items-center gap-1.5 text-slate-400 text-sm">
-              <span>{monthLabel(monthId)}</span>
-              <span className="text-slate-700">·</span>
-              <span>{dayDate(monthId, selectedDay)}</span>
-              <span className="text-slate-700">·</span>
-              <span className="text-slate-500 uppercase text-[10px] font-semibold tracking-wider">Month:</span>
-              <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-300">{month?.status ?? "open"}</span>
-              <span className="text-slate-700">·</span>
-              <span className="text-slate-500 uppercase text-[10px] font-semibold tracking-wider">Day:</span>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getDayStatusChipClass(selectedDayStatus)}`}>{selectedDayStatus}</span>
-              {selectedDayRecord && isReopenActive(selectedDayRecord, now) && (
-                <>
-                  <span className="text-slate-700">·</span>
-                  <span className="text-[10px] font-semibold uppercase text-emerald-300 animate-pulse">
-                    Expires {new Date(selectedDayRecord.reopenedUntilAt!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
-          <CalendarDays />
-        </div>
-        <StockCalendar monthId={monthId} monthStatus={month?.status} selectedDay={selectedDay} days={days} onSelect={setSelectedDay} />
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!selectedDayRecord || monthBootstrapPending}
-            onClick={() => selectedDayRecord && exportStockDayXlsx(selectedDayRecord)}
-          >
-            <FileSpreadsheet />
-            Export Daily Excel
-          </button>
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!selectedDayRecord || monthBootstrapPending}
-            onClick={() => selectedDayRecord && exportStockPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}
-          >
-            <FileDown />
-            Export Daily PDF
-          </button>
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!canMonthControls || days.length === 0 || month?.status === "closed" || monthBootstrapPending}
-            onClick={() => void masterRefreshStockCalculations()}
-          >
-            Master Refresh Calculations
-          </button>
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!canReopenSelectedDay || month?.status === "closed" || monthBootstrapPending}
-            onClick={() => void reopenSelectedDay()}
-          >
-            Reopen Selected Day
-          </button>
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!canMonthControls || monthBootstrapPending || availableDays(monthId, now).length === 0}
-            onClick={() => void reopenAllStock()}
-          >
-            Reopen All
-          </button>
-          <button
-            className="btn-secondary w-full sm:w-auto"
-            disabled={!canMonthControls || month?.status === "closed" || monthBootstrapPending}
-            onClick={() => void closeAllStock()}
-          >
-            Close All Except Today
-          </button>
-        </div>
-      </section>
-
-
 
           {/* Selected Date Summary & Stock Flow Dashboard */}
           {/* <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border-slate-800">
@@ -1559,22 +1615,13 @@ export function StockLedgerModule({
 
               {/* Action Buttons Section */}
               <div className="md:col-span-4 flex flex-wrap gap-2.5">
-                <button 
-                  type="button"
-                  className="btn-secondary flex-1" 
-                  disabled={!selectedDayRecord || selectedDayRecord.status === "closed" || monthBootstrapPending} 
-                  onClick={() => void closeSelectedDay()}
-                >
-                  Close Day
-                </button>
-                <button 
-                  type="button"
-                  className="btn-primary flex-1" 
-                  disabled={!canEdit || loading || monthBootstrapPending} 
-                  onClick={() => void saveEntry()}
-                >
-                  <Save className="h-4 w-4 mr-1.5" /> Save Now
-                </button>
+                <span className="flex flex-1 items-center rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  {stockEntryAutoSave.autoSaveStatus === "saving"
+                    ? "Autosaving..."
+                    : stockEntryAutoSave.autoSaveStatus === "error"
+                      ? "Autosave failed"
+                      : "Autosave on"}
+                </span>
               </div>
             </div>
 
@@ -1646,19 +1693,18 @@ export function StockLedgerModule({
                       onClick={() => {
                         const activeId = selectedProductIdInput || activeProducts[0]?.id || "";
                         if (!activeId) return;
-                        setDraft((curr) => {
-                          const prevQty = curr.productQuantities[activeId] ?? 0;
-                          return {
-                            ...curr,
-                            productQuantities: {
-                              ...curr.productQuantities,
-                              [activeId]: prevQty + selectedProductQtyInput
-                            }
-                          };
-                        });
-                        // Reset quantity input and keep or reset the selection nicely
+                        const prevQty = draft.productQuantities[activeId] ?? 0;
+                        const nextDraft = {
+                          ...draft,
+                          productQuantities: {
+                            ...draft.productQuantities,
+                            [activeId]: prevQty + selectedProductQtyInput
+                          }
+                        };
+                        setDraft(nextDraft);
                         setSelectedProductQtyInput(0);
                         setSelectedProductIdInput("");
+                        void saveEntry(nextDraft);
                       }}
                     >
                       <PlusCircle className="mr-1.5 h-4 w-4" />
@@ -1732,11 +1778,11 @@ export function StockLedgerModule({
                                         className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
                                         title="Remove product"
                                         onClick={() => {
-                                          setDraft((curr) => {
-                                            const next = { ...curr.productQuantities };
-                                            delete next[prodId];
-                                            return { ...curr, productQuantities: next };
-                                          });
+                                          const nextQuantities = { ...draft.productQuantities };
+                                          delete nextQuantities[prodId];
+                                          const nextDraft = { ...draft, productQuantities: nextQuantities };
+                                          setDraft(nextDraft);
+                                          void saveEntry(nextDraft);
                                         }}
                                       >
                                         <Trash2 className="h-4 w-4" />
@@ -1824,10 +1870,6 @@ export function StockLedgerModule({
                 </p>
               )}
               <div className="mt-4 flex flex-wrap gap-2">
-                <button className="btn-primary" disabled={!canEdit || loading || monthBootstrapPending} onClick={() => void saveEntry()}>
-                  <Save />
-                  Save Daily Stock Record
-                </button>
                 <button className="btn-secondary" disabled={!summary} onClick={() => summary && exportStockPrintable(summary, days)}>
                   <Printer />
                   Print Stock Report
@@ -1867,7 +1909,7 @@ export function StockLedgerModule({
                   {selectedAccountDayRows.map((row) => {
                     const fullDay = days.find((d) => d.dayNo === row.dayNo);
                     const isReopened = row.status === "closed" && fullDay && isReopenActive(fullDay, now);
-                    const statusLabel = isReopened ? "Re-open" : row.status === "closed" ? "Closed" : "Open";
+                    const statusLabel = isReopened ? "Re-Open" : row.status === "closed" ? "Closed" : "Open";
                     return (
                       <tr key={row.dayNo}>
                         <td className="font-semibold text-slate-200">

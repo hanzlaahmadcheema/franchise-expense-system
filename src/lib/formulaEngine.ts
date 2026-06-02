@@ -10,6 +10,15 @@ function roundAmount(value: number) {
 
 const sum = (nums: number[]) => roundAmount(nums.reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0));
 
+export function parseLedgerNumber(value: unknown): number {
+  if (typeof value === "number") return roundAmount(value);
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/,/g, "").trim());
+    return Number.isFinite(parsed) ? roundAmount(parsed) : 0;
+  }
+  return 0;
+}
+
 function normalizeKey(value: string) {
   return value.trim().toLowerCase();
 }
@@ -33,6 +42,75 @@ function normalizeCommissionCategory(category: string): string {
   return category;
 }
 
+type CreditLike = DailyLedgerInput["credits"][number] & Record<string, unknown>;
+
+function creditCarryKey(row: Pick<CreditLike, "partyId" | "partyName">) {
+  return row.partyId ? `id:${row.partyId}` : `name:${normalizeKey(row.partyName ?? "")}`;
+}
+
+export function resolveCreditClosingBalance(row: Partial<CreditLike>): number {
+  const explicit = [
+    row.closingBalance,
+    row.balance,
+    row.calculatedBalance,
+    row.holdingBalance
+  ];
+  for (const value of explicit) {
+    if (value !== undefined && value !== null && value !== "") return parseLedgerNumber(value);
+  }
+  return roundAmount(
+    parseLedgerNumber(row.opening) +
+    parseLedgerNumber(row.loan ?? row.today) -
+    parseLedgerNumber(row.receive)
+  );
+}
+
+function normalizeCreditRow(row: DailyLedgerInput["credits"][number]): DailyLedgerInput["credits"][number] {
+  const loan = parseLedgerNumber(row.loan ?? row.today);
+  return {
+    ...row,
+    opening: parseLedgerNumber(row.opening),
+    loan,
+    today: loan,
+    receive: parseLedgerNumber(row.receive),
+    balance: resolveCreditClosingBalance(row as CreditLike)
+  };
+}
+
+function applyCreditCarryForward(
+  dayNo: number,
+  rows: DailyLedgerInput["credits"],
+  runningBalances: Map<string, { partyId?: string; partyName: string; balance: number }>
+) {
+  const normalizedRows = rows.map(normalizeCreditRow);
+  const seenKeys = new Set(normalizedRows.map(creditCarryKey));
+  const carriedRows = normalizedRows.map((row) => {
+    const previous = runningBalances.get(creditCarryKey(row));
+    if (!previous) return row;
+    return {
+      ...row,
+      opening: previous.balance,
+      balance: roundAmount(previous.balance + parseLedgerNumber(row.loan ?? row.today) - parseLedgerNumber(row.receive))
+    };
+  });
+
+  for (const [key, previous] of runningBalances.entries()) {
+    if (previous.balance === 0 || seenKeys.has(key)) continue;
+    carriedRows.push({
+      id: `${dayNo}-credit-carry-${key.replace(/[^a-z0-9-]+/gi, "-")}`,
+      partyId: previous.partyId,
+      partyName: previous.partyName,
+      opening: previous.balance,
+      loan: 0,
+      today: 0,
+      receive: 0,
+      balance: previous.balance
+    });
+  }
+
+  return carriedRows;
+}
+
 export function computeDay(day: DailyLedgerInput, openingBalance: number, ownerOpeningBalance = 0): DailyLedgerComputed {
   const issueBalance = roundAmount(sum(day.commissions.map((item) => item.amount)));
   const totalBalance = roundAmount(openingBalance + issueBalance);
@@ -41,10 +119,11 @@ export function computeDay(day: DailyLedgerInput, openingBalance: number, ownerO
   const ownerRows = day.ownerBalances.filter((row) => normalizeKey(row.description ?? row.label ?? "") !== "opening bal");
   let ownerRunningOpening = roundAmount(ownerOpeningBalance || (ownerRows[0]?.opening ?? 0));
   const ownerBalances = ownerRows.map((row) => {
-    const expense = roundAmount(row.expense ?? Math.max(row.amount, 0));
-    const received = roundAmount(row.received ?? Math.max(-row.amount, 0));
+    const amt = Number.isFinite(row.amount) ? (row.amount as number) : 0;
+    const expense = roundAmount(Number.isFinite(row.expense) ? (row.expense as number) : Math.max(amt, 0));
+    const received = roundAmount(Number.isFinite(row.received) ? (row.received as number) : Math.max(-amt, 0));
     const amount = roundAmount(expense - received);
-    const rowOpening = roundAmount(ownerRunningOpening);
+    const rowOpening = roundAmount(Number.isFinite(ownerRunningOpening) ? ownerRunningOpening : 0);
     const balance = roundAmount(rowOpening + amount);
     ownerRunningOpening = balance;
     return {
@@ -60,12 +139,19 @@ export function computeDay(day: DailyLedgerInput, openingBalance: number, ownerO
   });
   const ownerBalanceTotal = roundAmount(ownerBalances.at(-1)?.balance ?? ownerOpeningBalance);
 
-  const creditRows = day.credits.map((row) => ({
-    ...row,
-    loan: row.loan ?? row.today ?? 0,
-    today: row.loan ?? row.today ?? 0,
-    balance: roundAmount(row.opening + (row.loan ?? row.today ?? 0) - row.receive)
-  }));
+  const creditRows = day.credits.map((row) => {
+    const opening = parseLedgerNumber(row.opening);
+    const loan = parseLedgerNumber(row.loan ?? row.today);
+    const receive = parseLedgerNumber(row.receive);
+    return {
+      ...row,
+      opening,
+      loan,
+      today: loan,
+      receive,
+      balance: roundAmount(opening + loan - receive)
+    };
+  });
 
   const creditTotals = {
     opening: roundAmount(sum(creditRows.map((row) => row.opening))),
@@ -101,11 +187,29 @@ export function computeMonth(
   const sorted = [...dailyInputs].sort((a, b) => a.dayNo - b.dayNo);
   let currentOpening = openingBalance;
   let currentOwnerOpening = ownerOpeningBalance;
+  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>();
 
   const days = sorted.map((day) => {
-    const computed = computeDay(day, currentOpening, currentOwnerOpening);
+    const dayWithCarriedCredits = {
+      ...day,
+      credits: applyCreditCarryForward(day.dayNo, day.credits, creditRunningBalances)
+    };
+    const computed = computeDay(dayWithCarriedCredits, currentOpening, currentOwnerOpening);
     currentOpening = computed.returnBalance;
     currentOwnerOpening = computed.ownerBalanceTotal;
+    for (const row of computed.creditRows) {
+      const key = creditCarryKey(row as CreditLike);
+      const balance = resolveCreditClosingBalance(row as CreditLike);
+      if (balance === 0) {
+        creditRunningBalances.delete(key);
+      } else {
+        creditRunningBalances.set(key, {
+          partyId: row.partyId,
+          partyName: row.partyName,
+          balance
+        });
+      }
+    }
     return computed;
   });
 
