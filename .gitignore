@@ -4,7 +4,9 @@ functions/node_modules/
 functions/lib/
 *.tsbuildinfo
 firebase-debug.log
+firestore-debug.log
 firepit-log.txt
+tmp/
 .env
 .env.local
 .env.*.local

@@ -15,6 +15,7 @@ import {
 import type { User } from "firebase/auth";
 import { auth, db } from "../../../lib/firebase";
 import { buildAuditLogDocument, writeAuditLog } from "../../../lib/auditLogService";
+import { LEDGER_CALC_VERSION } from "../../../shared/ledger/ledgerTypes";
 import type { UserRole } from "../../../types/ledger";
 import {
   calculateCurrentStock,
@@ -105,6 +106,79 @@ function monthRef(monthId: string) {
 
 function dayRef(monthId: string, dayNo: number) {
   return doc(monthRef(monthId), "days", String(dayNo));
+}
+
+function ledgerV2StockRawEntries(monthId: string, dayNo: number) {
+  return collection(requireDb(), "ledgerV2", "stock", "months", monthId, "days", String(dayNo), "rawEntries");
+}
+
+async function syncStockLedgerV2RawEntriesInBatch(
+  batch: ReturnType<typeof writeBatch>,
+  day: StockDayRecord,
+  actorUid: string,
+  timestamp: number
+) {
+  const rawCollection = ledgerV2StockRawEntries(day.monthId, day.dayNo);
+  const existingSnap = await getDocs(rawCollection);
+  const rawEntries = [
+    ...day.entries.map((entry) => ({
+      id: `stock-out-${entry.id}`,
+      type: "stockOut",
+      raw: {
+        accountId: entry.accountId,
+        accountName: entry.accountName,
+        accountType: entry.accountType,
+        products: entry.products.map((product) => ({
+          productId: product.productId,
+          productName: product.productName,
+          rate: product.rate,
+          quantity: product.quantity,
+          paymentReceived: product.paymentReceived
+        })),
+        totalPaymentReceived: entry.totalPaymentReceived,
+        notes: entry.notes,
+        source: "user"
+      }
+    })),
+    ...(day.stockIn ?? []).map((record) => ({
+      id: `stock-in-${record.id}`,
+      type: "stockIn",
+      raw: {
+        sourceName: record.sourceName,
+        stockInMode: record.stockInMode,
+        products: record.products.map((product) => ({
+          productId: product.productId,
+          productName: product.productName,
+          rate: product.rate,
+          quantity: product.quantity
+        })),
+        paidAmount: record.paidAmount,
+        notes: record.notes,
+        source: "user"
+      }
+    }))
+  ];
+  const nextIds = new Set(rawEntries.map((entry) => entry.id));
+  for (const entryDoc of existingSnap.docs) {
+    if (!nextIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+  }
+  for (const entry of rawEntries) {
+    batch.set(doc(rawCollection, entry.id), cleanForFirestore({
+      id: entry.id,
+      module: "stock",
+      type: entry.type,
+      monthId: day.monthId,
+      dayNo: day.dayNo,
+      raw: entry.raw,
+      calculated: null,
+      meta: {
+        updatedAt: timestamp,
+        updatedBy: actorUid,
+        status: typeof navigator !== "undefined" && navigator.onLine ? "pending" : "preview",
+        calculationVersion: LEDGER_CALC_VERSION
+      }
+    }), { merge: true });
+  }
 }
 
 function stockDayDateFields(monthId: string, dayNo: number) {
@@ -198,7 +272,7 @@ export function roleCanStock(
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily" || permission === "backup" || permission === "monthControls";
+  if (role === "admin") return permission === "daily";
   return false;
 }
 
@@ -548,6 +622,7 @@ export async function saveStockDay(
       batch.set(doc(dayDocumentRef, "stockIn", record.id), cleanForFirestore(record), { merge: true });
     }
   }
+  await syncStockLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp);
   productBalances.forEach((balance) => {
     batch.set(productBalanceRef(balance.productId), cleanForFirestore(balance satisfies StockProductBalance), { merge: true });
   });

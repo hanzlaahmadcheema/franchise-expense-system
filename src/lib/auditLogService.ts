@@ -34,9 +34,12 @@ export type WriteAuditLogInput = {
   actorRole?: UserRole;
   monthId?: string;
   dayNo?: number;
+  date?: string;
   targetType?: string;
   targetId?: string;
   sourcePath?: string;
+  before?: unknown;
+  after?: unknown;
   createdAt?: number;
 };
 
@@ -77,9 +80,12 @@ export function buildAuditLogDocument(
     actorRole,
     ...(input.monthId ? { monthId: input.monthId } : {}),
     ...(input.dayNo != null ? { dayNo: input.dayNo } : {}),
+    ...(input.date ? { date: input.date } : {}),
     ...(input.targetType ? { targetType: input.targetType } : {}),
     ...(input.targetId ? { targetId: input.targetId } : {}),
-    ...(input.sourcePath ? { sourcePath: input.sourcePath } : {})
+    ...(input.sourcePath ? { sourcePath: input.sourcePath } : {}),
+    ...(input.before !== undefined ? { before: input.before } : {}),
+    ...(input.after !== undefined ? { after: input.after } : {})
   };
 }
 

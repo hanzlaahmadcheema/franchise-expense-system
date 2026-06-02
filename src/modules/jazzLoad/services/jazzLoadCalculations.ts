@@ -321,7 +321,7 @@ export function validateJazzLoadDrafts(
   const seen = new Set<string>();
   for (const draft of drafts) {
     const label = draft.doName || draft.doLine || "DO row";
-    if (!draft.doName.trim()) errors.push("DO name is required.");
+    if (!draft.doName.trim()) errors.push(`Missing DO assignment${draft.doLine ? ` for ${draft.doLine}` : ""}.`);
     const key = draft.doLineId ?? draft.doProfileId ?? normalizeDoKey(draft.doName, draft.doLine);
     if (seen.has(key)) errors.push(`Duplicate DO entry: ${label}.`);
     seen.add(key);

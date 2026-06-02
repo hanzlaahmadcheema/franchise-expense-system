@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { computeMonth } from "./formulaEngine";
+import { buildExpenseCarryForwardSeed, computeMonth } from "./formulaEngine";
 
 test("computeMonth handles carry-forward", () => {
   const result = computeMonth(
@@ -182,4 +182,44 @@ test("computeMonth rebuilds credit openings day-by-day while preserving manual m
   assert.equal(day30Usman?.balance, 11000);
   assert.equal(day30Akhtar?.opening, day29Akhtar?.balance);
   assert.equal(day30Akhtar?.balance, day29Akhtar?.balance);
+});
+
+test("computeMonth seeds a new month from previous final calculated expense balances", () => {
+  const may = computeMonth(
+    [
+      {
+        dayNo: 31,
+        expenses: [{ name: "Expense", description: "Expense", amount: 500 }],
+        commissions: [{ category: "JazzLoad", amount: 2500 }],
+        credits: [{ id: "usman-may", partyId: "usman", partyName: "Usman", opening: 2000, loan: 9000, receive: 0 }],
+        ownerBalances: [{ description: "Cash", opening: 100, amount: 50 }]
+      }
+    ],
+    1000,
+    "2026-05",
+    100
+  );
+  const seed = buildExpenseCarryForwardSeed("2026-05", may);
+  const june = computeMonth(
+    [
+      {
+        dayNo: 1,
+        expenses: [],
+        commissions: [],
+        credits: [{ id: "usman-june", partyId: "usman", partyName: "Usman", opening: 0, loan: 0, receive: 1000 }],
+        ownerBalances: [{ description: "Cash", opening: 0, amount: 25 }]
+      }
+    ],
+    seed?.openingBalance ?? 0,
+    "2026-06",
+    seed?.ownerOpeningBalance ?? 0,
+    seed ?? undefined
+  );
+
+  assert.equal(seed?.openingBalance, 3000);
+  assert.equal(seed?.ownerOpeningBalance, 150);
+  assert.equal(june.days[0].openingBalance, 3000);
+  assert.equal(june.days[0].ownerBalances[0].opening, 150);
+  assert.equal(june.days[0].creditRows[0].opening, 11000);
+  assert.equal(june.days[0].creditRows[0].balance, 10000);
 });

@@ -9,6 +9,14 @@ type InputDay = {
   ownerBalances?: Array<{ label?: string; description?: string; opening?: number; amount: number; expense?: number; received?: number }>;
 };
 
+type ExpenseCarryForwardSeed = {
+  sourceMonthId: string;
+  sourceDayNo: number;
+  openingBalance: number;
+  ownerOpeningBalance: number;
+  creditBalances: Array<{ partyId?: string; partyName: string; balance: number }>;
+};
+
 const sum = (nums: number[]) => nums.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
 
 function roundAmount(value: number) {
@@ -109,11 +117,28 @@ function expenseCategory(item: { category?: string; name?: string; description?:
   return "General";
 }
 
-export function computeMonth(dailyInputs: InputDay[], openingBalance: number, monthId?: string, ownerOpeningBalance = 0) {
+export function computeMonth(
+  dailyInputs: InputDay[],
+  openingBalance: number,
+  monthId?: string,
+  ownerOpeningBalance = 0,
+  carryForwardSeed?: Pick<ExpenseCarryForwardSeed, "creditBalances">
+) {
   const sorted = [...dailyInputs].sort((a, b) => a.dayNo - b.dayNo);
   let currentOpening = Number.isFinite(openingBalance) ? openingBalance : 0;
   let currentOwnerOpening = Number.isFinite(ownerOpeningBalance) ? ownerOpeningBalance : 0;
-  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>();
+  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>(
+    (carryForwardSeed?.creditBalances ?? [])
+      .filter((row) => parseLedgerNumber(row.balance) !== 0)
+      .map((row) => [
+        creditCarryKey(row),
+        {
+          partyId: row.partyId,
+          partyName: row.partyName,
+          balance: parseLedgerNumber(row.balance)
+        }
+      ])
+  );
 
   const days = sorted.map((day) => {
     const issueBalance = sum(day.commissions.map((item) => item.amount));
@@ -272,4 +297,34 @@ export function computeMonth(dailyInputs: InputDay[], openingBalance: number, mo
       commissionMatrix
     }
   };
+}
+
+export function finalExpenseComputedDay(computed: { days: Array<Record<string, unknown>> }) {
+  return computed.days.find((day) => Number(day.dayNo) === 32) ??
+    [...computed.days].filter((day) => Number(day.dayNo) >= 1 && Number(day.dayNo) <= 31).at(-1) ??
+    computed.days.at(-1);
+}
+
+export function buildExpenseCarryForwardSeed(sourceMonthId: string, computed: ReturnType<typeof computeMonth>): ExpenseCarryForwardSeed | null {
+  const finalDay = finalExpenseComputedDay(computed);
+  if (!finalDay) return null;
+  const creditRows = Array.isArray(finalDay.creditRows) ? finalDay.creditRows as Array<Record<string, unknown>> : [];
+  return {
+    sourceMonthId,
+    sourceDayNo: numberValue(finalDay.dayNo),
+    openingBalance: numberValue(finalDay.returnBalance),
+    ownerOpeningBalance: numberValue(finalDay.ownerBalanceTotal),
+    creditBalances: creditRows
+      .filter((row) => parseLedgerNumber(row.balance) !== 0)
+      .map((row) => ({
+        partyId: typeof row.partyId === "string" ? row.partyId : undefined,
+        partyName: String(row.partyName ?? ""),
+        balance: parseLedgerNumber(row.balance)
+      }))
+  };
+}
+
+function numberValue(value: unknown, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.round(parsed) : fallback;
 }

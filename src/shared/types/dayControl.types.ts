@@ -12,7 +12,17 @@ export type UniversalDayStatus =
   | "today"
   | "futureDisabled";
 
-export type AutoSaveStatus = "idle" | "unsaved" | "saving" | "saved" | "pendingSync" | "error" | "readOnly" | "closed";
+export type AutoSaveStatus =
+  | "idle"
+  | "typing"
+  | "unsaved"
+  | "saving"
+  | "saved"
+  | "pendingSync"
+  | "pendingRecalculation"
+  | "error"
+  | "readOnly"
+  | "closed";
 
 export type UniversalDaySnapshot = {
   moduleKey: ModuleKey;

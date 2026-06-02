@@ -64,6 +64,21 @@ export function calculateDueBalance(input: {
   return roundMoney(input.carryForwardBalance + input.totalAmount - input.totalPaymentReceived);
 }
 
+export function resolveStockAccountOpeningDue(
+  account: Pick<StockAccountProfile, "id" | "openingBalance">,
+  previousSummary?: StockMonthlySummary | null
+) {
+  return roundMoney(previousSummary?.accountTotals.find((item) => item.accountId === account.id)?.dueBalance ?? account.openingBalance ?? 0);
+}
+
+export function resolveStockCarryForwardBalance(input: {
+  previousEntryDueBalance?: number;
+  previousMonthDueBalance?: number;
+  accountOpeningBalance?: number;
+}) {
+  return roundMoney(input.previousEntryDueBalance ?? input.previousMonthDueBalance ?? input.accountOpeningBalance ?? 0);
+}
+
 export function calculateDailyAccountSummary(entry: StockDailyAccountEntry) {
   return {
     accountId: entry.accountId,
@@ -259,7 +274,15 @@ function buildStockCarryForwardSeed(
 ) {
   const seed = new Map<string, number>();
   const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
+  const previousDueByAccount = new Map(
+    (previousSummary?.accountTotals ?? []).map((account) => [account.accountId, roundMoney(account.dueBalance)])
+  );
   for (const account of accounts) {
+    const previousDue = previousDueByAccount.get(account.id);
+    if (previousDue !== undefined) {
+      seed.set(account.id, previousDue);
+      continue;
+    }
     const firstEntry = sortedDays.flatMap((day) => day.entries.filter((entry) => entry.accountId === account.id)).at(0);
     if (firstEntry) {
       seed.set(account.id, roundMoney(firstEntry.carryForwardBalance));

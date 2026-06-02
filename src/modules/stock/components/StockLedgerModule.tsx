@@ -12,6 +12,8 @@ import {
   findPreviousEntry,
   productPaymentTrackingEnabled,
   productsSorted,
+  resolveStockAccountOpeningDue,
+  resolveStockCarryForwardBalance,
   validateStockDraft,
   validateStockInDraft,
   calculateJazzPayableLedger,
@@ -41,6 +43,7 @@ import { exportStockDayXlsx, exportStockMonthlyXlsx, exportStockPrintable } from
 import type {
   StockAccountProfile,
   StockAccountType,
+  StockDailyAccountEntry,
   StockDailyAccountDraft,
   StockDayRecord,
   StockMonth,
@@ -171,6 +174,46 @@ function MetricCard({ label, value, helper }: { label: string; value: string; he
       <p className="mt-3 text-xs text-slate-500">{helper}</p>
     </div>
   );
+}
+
+function stockCarryForwardWarnings(
+  days: StockDayRecord[],
+  summary: StockMonthlySummary | null,
+  prevSummary: StockMonthlySummary | null
+) {
+  if (!prevSummary) return [];
+  const warnings: string[] = [];
+  const previousDueByAccount = new Map(prevSummary.accountTotals.map((account) => [account.accountId, account]));
+  const day1 = days.find((day) => day.dayNo === 1);
+  for (const entry of day1?.entries ?? []) {
+    const previous = previousDueByAccount.get(entry.accountId);
+    if (!previous) continue;
+    if (entry.carryForwardBalance !== previous.dueBalance) {
+      warnings.push(`${entry.accountName} due opening ${formatMoney(entry.carryForwardBalance)} should equal previous month closing ${formatMoney(previous.dueBalance)}`);
+    }
+  }
+
+  const previousClosingStock = prevSummary.closingStock ?? {};
+  const openingStock = summary?.openingStock ?? {};
+  for (const [productId, expected] of Object.entries(previousClosingStock)) {
+    const actual = openingStock[productId];
+    if (actual !== undefined && actual !== expected) {
+      warnings.push(`${productId} opening stock ${formatMoney(actual)} should equal previous month closing stock ${formatMoney(expected)}`);
+    }
+  }
+  if (summary?.openingJazzPayable !== undefined && prevSummary.closingJazzPayable !== undefined && summary.openingJazzPayable !== prevSummary.closingJazzPayable) {
+    warnings.push(`Jazz Company payable opening ${formatMoney(summary.openingJazzPayable)} should equal previous month closing payable ${formatMoney(prevSummary.closingJazzPayable)}`);
+  }
+  return warnings;
+}
+
+function stockCarryForwardSourceLabel(input: {
+  previousEntry?: StockDailyAccountEntry;
+  previousMonthDueBalance?: number;
+}) {
+  if (input.previousEntry) return "Locked from previous saved Stock day closing.";
+  if (input.previousMonthDueBalance !== undefined) return "Locked from previous month final closing.";
+  return "Locked from account opening balance.";
 }
 
 function SettingsTable({
@@ -537,6 +580,14 @@ export function StockLedgerModule({
     return prevSummary.accountTotals.find((item) => item.accountId === selectedAccountId)?.dueBalance;
   }, [selectedAccountId, prevSummary]);
   const previousEntry = selectedAccountId ? findPreviousEntry(days, selectedDay, selectedAccountId) : undefined;
+  const selectedCarryForwardBalance = selectedAccount
+    ? resolveStockCarryForwardBalance({
+      previousEntryDueBalance: previousEntry?.dueBalance,
+      previousMonthDueBalance,
+      accountOpeningBalance: selectedAccount.openingBalance
+    })
+    : 0;
+  const selectedCarryForwardSource = stockCarryForwardSourceLabel({ previousEntry, previousMonthDueBalance });
 
   const allStockInRecords = useMemo(() => {
     return days.flatMap((day) => day.stockIn ?? []);
@@ -610,7 +661,7 @@ export function StockLedgerModule({
       }
     }
 
-    const opening = firstEntry ? firstEntry.carryForwardBalance : (selectedAccount.openingBalance ?? 0);
+    const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(selectedAccount, prevSummary);
     const totalQty = entriesPeriod.reduce((sum, entry) => sum + entry.totalQty, 0);
     const totalAmount = entriesPeriod.reduce((sum, entry) => sum + entry.totalAmount, 0);
     const totalPayments = entriesPeriod.reduce((sum, entry) => sum + entry.totalPaymentReceived, 0);
@@ -626,7 +677,7 @@ export function StockLedgerModule({
       closing,
       productTotals: activeProductTotals
     };
-  }, [activeProducts, days, monthId, selectedAccount, selectedAccountId]);
+  }, [activeProducts, days, monthId, prevSummary, selectedAccount, selectedAccountId]);
   const selectedDealerMasterDayRows = useMemo(() => {
     if (!selectedAccountId || !selectedAccount) return [];
     return [...days]
@@ -685,8 +736,15 @@ export function StockLedgerModule({
 
   const canManageSettings = roleCanStock(role, "settings");
   const canEdit = canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
-  const canMonthControls = roleCanStock(role, "monthControls");
-  const canReopenSelectedDay = role === "owner" || (role === "admin" && isLiveDay(monthId, selectedDay, now));
+  const canUseStockBackup = roleCanStock(role, "backup");
+  const canReopenSelectedDay =
+    Boolean(selectedDayRecord && selectedDayRecord.status === "closed") &&
+    month?.status !== "closed" &&
+    (role === "owner" || (role === "admin" && isLiveDay(monthId, selectedDay, now)));
+  const carryForwardWarnings = useMemo(
+    () => stockCarryForwardWarnings(days, summary, prevSummary),
+    [days, prevSummary, summary]
+  );
   const stockCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
@@ -794,10 +852,10 @@ export function StockLedgerModule({
         nextEntry?.products.find((item) => item.productId === product.id)?.quantity ?? 0
       ])),
       paymentReceived: nextEntry?.totalPaymentReceived ?? 0,
-      carryForwardBalance: nextEntry?.carryForwardBalance ?? previousEntry?.dueBalance ?? previousMonthDueBalance ?? selectedAccount?.openingBalance ?? 0,
+      carryForwardBalance: selectedCarryForwardBalance,
       notes: nextEntry?.notes ?? ""
     });
-  }, [activeProducts, previousEntry, previousMonthDueBalance, selectedAccount, selectedAccountId, selectedDayRecord]);
+  }, [activeProducts, selectedAccountId, selectedCarryForwardBalance, selectedDayRecord]);
 
   const previewEntry = selectedAccount ? buildStockEntry({
     id: selectedAccount.id,
@@ -808,11 +866,15 @@ export function StockLedgerModule({
     draft,
     products,
     previous: selectedEntry,
-    carryForwardBalance: draft.carryForwardBalance ?? previousEntry?.dueBalance ?? previousMonthDueBalance ?? selectedAccount.openingBalance ?? 0,
+    carryForwardBalance: selectedCarryForwardBalance,
     createdBy: user.uid
   }) : null;
 
   async function saveEntry(nextDraft = draft) {
+    if (!canEdit) {
+      onStatus("Your role can view Stock Ledger but cannot edit this day.");
+      return;
+    }
     if (!selectedAccount) return;
     const computedPreviewEntry = buildStockEntry({
       id: selectedAccount.id,
@@ -823,7 +885,7 @@ export function StockLedgerModule({
       draft: nextDraft,
       products,
       previous: selectedEntry,
-      carryForwardBalance: nextDraft.carryForwardBalance ?? previousEntry?.dueBalance ?? previousMonthDueBalance ?? selectedAccount.openingBalance ?? 0,
+      carryForwardBalance: selectedCarryForwardBalance,
       createdBy: user.uid
     });
     if (!computedPreviewEntry) return;
@@ -932,6 +994,10 @@ export function StockLedgerModule({
   }, [products, stockInQuantities, stockInMode, stockInPaidAmount, stockInNotes, selectedDay, monthId, user.uid]);
 
   async function saveStockIn() {
+    if (!canEdit) {
+      onStatus("Your role can view Stock Ledger but cannot edit this day.");
+      return;
+    }
     if (!previewStockInRecord) return;
     const validation = validateStockInDraft(
       dayDate(monthId, selectedDay),
@@ -968,6 +1034,10 @@ export function StockLedgerModule({
   }
 
   async function closeSelectedDay() {
+    if (!canEdit) {
+      onStatus("This Stock Ledger day cannot be closed for the current role/status.");
+      return;
+    }
     if (!selectedDayRecord) return;
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
@@ -988,9 +1058,12 @@ export function StockLedgerModule({
   }
 
   async function reopenSelectedDay() {
+    if (!canReopenSelectedDay) {
+      onStatus("Owner can reopen any Stock Ledger day. Admin can reopen the current day only.");
+      return;
+    }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
-    const reopenUntilAt = timestamp + 15 * 60 * 1000;
     const day = selectedDayRecord ?? buildStockDayRecord({
       month: workingMonth,
       dayNo: selectedDay,
@@ -999,7 +1072,19 @@ export function StockLedgerModule({
       createdBy: user.uid,
       timestamp
     });
-    const nextDay = {
+    const liveReopen = isLiveDay(monthId, selectedDay, now);
+    const reopenUntilAt = liveReopen ? undefined : timestamp + 15 * 60 * 1000;
+    const nextDay = liveReopen ? {
+      ...day,
+      status: "open" as const,
+      closedAt: undefined,
+      closedBy: undefined,
+      reopenedAt: timestamp,
+      reopenedBy: user.uid,
+      reopenedUntilAt: undefined,
+      updatedBy: user.uid,
+      updatedAt: timestamp
+    } : {
       ...day,
       status: "closed" as const,
       reopenedAt: timestamp,
@@ -1010,7 +1095,11 @@ export function StockLedgerModule({
     };
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
     onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "reopen-days", reopenUntilAt), "Could not queue stock day reopen.");
-    onStatus(`Reopened stock day ${selectedDay} until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+    onStatus(
+      liveReopen
+        ? `Reopened stock day ${selectedDay} until you close it again.`
+        : `Reopened stock day ${selectedDay} until ${new Date(reopenUntilAt ?? timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
+    );
   }
 
   async function closeAllStock() {
@@ -1187,7 +1276,7 @@ export function StockLedgerModule({
         busy={Boolean(loading) || monthBootstrapPending}
         autoSaveStatus={section === "daily" ? stockEntryAutoSave.autoSaveStatus : undefined}
         permissions={{
-          canCloseSelectedDay: Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
+          canCloseSelectedDay: canEdit && Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
           canReopenSelectedDay: canReopenSelectedDay && month?.status !== "closed" && !monthBootstrapPending,
           canReopenAllDays: role === "owner" && !monthBootstrapPending && availableDays(monthId, now).length > 0,
           canClosePreviousDaysExceptToday: role === "owner" && month?.status !== "closed" && !monthBootstrapPending,
@@ -1238,6 +1327,7 @@ export function StockLedgerModule({
     canReopenSelectedDay,
     days.length,
     loading,
+    masterRefreshStockCalculations,
     month?.status,
     monthBootstrapPending,
     monthId,
@@ -1252,6 +1342,17 @@ export function StockLedgerModule({
     stockEntryAutoSave.autoSaveStatus
   ]);
   useSidebarDayControls("stock", sidebarDayControls, true);
+
+  useEffect(() => {
+    if (section === "settings" && !canManageSettings) {
+      setSection("daily");
+      onStatus("Owner only. Stock Settings are restricted to owner access.");
+    }
+    if (section === "backup" && !canUseStockBackup) {
+      setSection("dashboard");
+      onStatus("Owner only. Stock backup is restricted to owner access.");
+    }
+  }, [canManageSettings, canUseStockBackup, onStatus, section]);
 
   function metricSummary() {
     return summary ?? {
@@ -1270,17 +1371,17 @@ export function StockLedgerModule({
   }
 
   const metrics = metricSummary();
-  const entrySections: Array<[StockSection, string, typeof CalendarDays]> = [
-    ["daily", "Stock Issuance", ArrowUpRight],
-    ["stockIn", "Stock Lifting", PlusCircle],
-    ["settings", "Stock Settings", Settings]
+  const entrySections: Array<{ id: StockSection; label: string; icon: typeof CalendarDays; disabled?: boolean; disabledReason?: string }> = [
+    { id: "daily", label: "Stock Issuance", icon: ArrowUpRight },
+    { id: "stockIn", label: "Stock Lifting", icon: PlusCircle },
+    { id: "settings", label: "Stock Settings", icon: Settings, disabled: !canManageSettings, disabledReason: "Only owner can manage Stock Settings." }
   ];
-  const reportSections: Array<[StockSection, string, typeof CalendarDays]> = [
-    ["dashboard", "Stock Dashboard", BarChart3],
-    ["reportsHub", "Stock Monthly Reports", FileSpreadsheet],
-    ["backup", "Backup / Export", FileDown]
+  const reportSections: Array<{ id: StockSection; label: string; icon: typeof CalendarDays; disabled?: boolean; disabledReason?: string }> = [
+    { id: "dashboard", label: "Stock Dashboard", icon: BarChart3 },
+    { id: "reportsHub", label: "Stock Monthly Reports", icon: FileSpreadsheet },
+    { id: "backup", label: "Backup / Export", icon: FileDown, disabled: !canUseStockBackup, disabledReason: "Only owner can use Stock backup." }
   ];
-  const sectionGroup: StockSectionGroup = entrySections.some(([id]) => id === section) ? "entries" : "reports";
+  const sectionGroup: StockSectionGroup = entrySections.some((item) => item.id === section) ? "entries" : "reports";
   const activeSectionVisible = openSectionGroups[sectionGroup];
 
   function toggleSectionGroup(group: StockSectionGroup) {
@@ -1293,12 +1394,30 @@ export function StockLedgerModule({
   }
 
   function selectGroupedSection(group: StockSectionGroup, nextSection: StockSection) {
+    if (nextSection === "settings" && !canManageSettings) {
+      onStatus("Owner only. Stock Settings are restricted to owner access.");
+      return;
+    }
+    if (nextSection === "backup" && !canUseStockBackup) {
+      onStatus("Owner only. Stock backup is restricted to owner access.");
+      return;
+    }
     setOpenSectionGroups((current) => ({ ...current, [group]: true }));
     setSection(nextSection);
   }
 
   return (
     <section className="space-y-5">
+      {carryForwardWarnings.length > 0 && (role === "owner" || role === "admin") && (
+        <div className="warning">
+          <p>{carryForwardWarnings.length} Stock month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
+          <ul className="mt-2 list-disc pl-5 text-sm">
+            {carryForwardWarnings.slice(0, 5).map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-3 text-slate-100 shadow-xl shadow-black/20">
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2">
@@ -1315,8 +1434,14 @@ export function StockLedgerModule({
             </button>
             {openSectionGroups.entries && (
               <nav className="mt-2 flex flex-wrap gap-2">
-                {entrySections.map(([id, label, Icon]) => (
-                  <button key={id} className={section === id ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => selectGroupedSection("entries", id)}>
+                {entrySections.map(({ id, label, icon: Icon, disabled, disabledReason }) => (
+                  <button
+                    key={id}
+                    className={section === id ? "btn-tab btn-tab-active" : "btn-tab"}
+                    disabled={disabled}
+                    title={disabled ? disabledReason : label}
+                    onClick={() => selectGroupedSection("entries", id)}
+                  >
                     <Icon />
                     {label}
                   </button>
@@ -1339,8 +1464,14 @@ export function StockLedgerModule({
             </button>
             {openSectionGroups.reports && (
               <nav className="mt-2 flex flex-wrap gap-2">
-                {reportSections.map(([id, label, Icon]) => (
-                  <button key={id} className={section === id ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => selectGroupedSection("reports", id)}>
+                {reportSections.map(({ id, label, icon: Icon, disabled, disabledReason }) => (
+                  <button
+                    key={id}
+                    className={section === id ? "btn-tab btn-tab-active" : "btn-tab"}
+                    disabled={disabled}
+                    title={disabled ? disabledReason : label}
+                    onClick={() => selectGroupedSection("reports", id)}
+                  >
                     <Icon />
                     {label}
                   </button>
@@ -1820,24 +1951,15 @@ export function StockLedgerModule({
               <div className="mt-6 border-t border-slate-800 pt-6">
                 <div className="mb-4">
                   <h3 className="text-base font-semibold text-slate-100">Account Recovery & Due Calculations</h3>
-                  <p className="text-xs text-slate-400">Manage outstanding carry forwards and single payment recovery for this daily entry.</p>
+                  <p className="text-xs text-slate-400">Review the locked carry-forward and enter payment recovery for this daily entry.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <label>
                     Carry Forward / Initial Due Balance
-                    {Boolean(previousEntry) ? (
-                      <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/40 p-3 font-semibold text-slate-400">
-                        {formatMoney(draft.carryForwardBalance ?? 0)}
-                      </div>
-                    ) : (
-                      <div className="mt-1">
-                        <NumberInput
-                          value={draft.carryForwardBalance ?? 0}
-                          disabled={!canEdit || monthBootstrapPending}
-                          onChange={(value) => setDraft((current) => ({ ...current, carryForwardBalance: value }))}
-                        />
-                      </div>
-                    )}
+                    <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/40 p-3 font-semibold text-slate-300">
+                      {formatMoney(selectedCarryForwardBalance)}
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500">{selectedCarryForwardSource}</p>
                   </label>
                   <label>
                     Payment Received
@@ -2036,7 +2158,7 @@ export function StockLedgerModule({
         const recoveryRate = totalAllotted > 0 ? ((totalPayments / totalAllotted) * 100).toFixed(1) : "0.0";
         
         const jazzPayable = roundMoney(
-          openingBalances.jazzOpeningPayable + 
+          monthOpeningJazzPayable + 
           allStockInRecords.reduce((sum, r) => sum + r.totalAmount - r.paidAmount, 0)
         );
 
@@ -2455,7 +2577,7 @@ export function StockLedgerModule({
 
                         const sortedDaysWithEntries = [...days].sort((x, y) => x.dayNo - y.dayNo);
                         const firstEntry = sortedDaysWithEntries.flatMap((d) => d.entries.filter((e) => e.accountId === a.id)).at(0);
-                        const opening = firstEntry ? firstEntry.carryForwardBalance : (a.openingBalance ?? 0);
+                        const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(a, prevSummary);
                         const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
                         const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                         const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
@@ -3219,7 +3341,7 @@ export function StockLedgerModule({
                               .flatMap((d) => d.entries.filter((e) => e.accountId === a.id))
                               .at(-1);
 
-                            const opening = firstEntry ? firstEntry.carryForwardBalance : (a.openingBalance ?? 0);
+                            const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(a, prevSummary);
                             const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
                             const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                             const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
@@ -3303,7 +3425,7 @@ export function StockLedgerModule({
                         <p className="text-2xl font-extrabold text-red-400 mt-1">
                           {formatMoney(
                             roundMoney(
-                              openingBalances.jazzOpeningPayable + 
+                              monthOpeningJazzPayable + 
                               allStockInRecords.reduce((sum, r) => sum + r.totalAmount - r.paidAmount, 0)
                             )
                           )}
@@ -3434,7 +3556,8 @@ export function StockLedgerModule({
                             const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                             const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
                             const latestEntry = entriesPeriod.at(-1);
-                            const carry = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
+                            const firstEntry = entriesPeriod.at(0);
+                            const carry = firstEntry?.carryForwardBalance ?? resolveStockAccountOpeningDue(a, prevSummary);
                             const currentDue = latestEntry?.dueBalance ?? carry;
 
                             if (filterDueStatus === "due" && currentDue === 0) return [];
@@ -3657,7 +3780,7 @@ export function StockLedgerModule({
                               type: a.type,
                               totalAmount: entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0),
                               totalPayments: entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0),
-                              currentDue: entriesPeriod.at(-1)?.dueBalance ?? a.openingBalance ?? 0
+                              currentDue: entriesPeriod.at(-1)?.dueBalance ?? resolveStockAccountOpeningDue(a, prevSummary)
                             };
                           });
                         const totals = rows.reduce((acc, row) => ({
@@ -3719,7 +3842,8 @@ export function StockLedgerModule({
                             const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                             const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
                             const latestEntry = entriesPeriod.at(-1);
-                            const prevDue = latestEntry?.carryForwardBalance ?? a.openingBalance ?? 0;
+                            const firstEntry = entriesPeriod.at(0);
+                            const prevDue = firstEntry?.carryForwardBalance ?? resolveStockAccountOpeningDue(a, prevSummary);
                             const currentDue = latestEntry?.dueBalance ?? prevDue;
 
                             if (filterDueStatus === "due" && currentDue === 0) return [];
@@ -3952,48 +4076,60 @@ export function StockLedgerModule({
       )}
 
       {activeSectionVisible && section === "settings" && (
-        <>
-          {!canManageSettings && <p className="warning">Only owner can manage Stock Settings.</p>}
-
-          <SettingsTable
-            title="Products"
-            kind="product"
-            canEdit={canManageSettings}
-            rows={sortedProducts}
-            onSave={(row) => onQueueWrite(upsertStockProduct({
-              ...(row as StockProduct),
-              paymentTrackingEnabled: (row as StockProduct).paymentTrackingEnabled !== false
-            }, user, role), "Could not save stock product.")}
-            onDelete={(id) => onQueueWrite(deleteStockProduct(id, user, role), "Could not delete stock product.")}
-          />
-          <SettingsTable
-            title="CCR/DO Accounts"
-            kind="account"
-            canEdit={canManageSettings}
-            rows={sortedAccounts}
-            onSave={(row) => onQueueWrite(upsertStockAccount(row as StockAccountProfile, user, role), "Could not save stock account.")}
-            onDelete={(id) => onQueueWrite(deleteStockAccount(id, user, role), "Could not delete stock account.")}
-          />
-        </>
+        canManageSettings ? (
+          <>
+            <SettingsTable
+              title="Products"
+              kind="product"
+              canEdit={canManageSettings}
+              rows={sortedProducts}
+              onSave={(row) => onQueueWrite(upsertStockProduct({
+                ...(row as StockProduct),
+                paymentTrackingEnabled: (row as StockProduct).paymentTrackingEnabled !== false
+              }, user, role), "Could not save stock product.")}
+              onDelete={(id) => onQueueWrite(deleteStockProduct(id, user, role), "Could not delete stock product.")}
+            />
+            <SettingsTable
+              title="CCR/DO Accounts"
+              kind="account"
+              canEdit={canManageSettings}
+              rows={sortedAccounts}
+              onSave={(row) => onQueueWrite(upsertStockAccount(row as StockAccountProfile, user, role), "Could not save stock account.")}
+              onDelete={(id) => onQueueWrite(deleteStockAccount(id, user, role), "Could not delete stock account.")}
+            />
+          </>
+        ) : (
+          <section className="panel">
+            <h2>Stock Settings</h2>
+            <p className="warning mt-4">Owner only.</p>
+          </section>
+        )
       )}
 
       {activeSectionVisible && section === "backup" && (
-        <section className="panel">
-          <div className="panel-title"><div><h2>Stock Backup / Export</h2><p>Exports only Stock Ledger settings and stock records.</p></div><FileDown /></div>
-          <div className="flex flex-wrap gap-2">
-            <button className="btn-primary" disabled={!summary} onClick={() => summary && exportStockMonthlyXlsx(summary, days)}><FileSpreadsheet />Export Stock Excel</button>
-            <button className="btn-secondary" disabled={!summary} onClick={() => summary && exportStockPrintable(summary, days)}><Printer />Print</button>
-            <button className="btn-secondary" onClick={() => onQueueWrite(listStockBackup().then((backup) => {
-              const blob = new Blob([JSON.stringify({ exportedAt: Date.now(), stock: backup }, null, 2)], { type: "application/json" });
-              const url = URL.createObjectURL(blob);
-              const link = document.createElement("a");
-              link.href = url;
-              link.download = `stock-backup-${monthId}.json`;
-              link.click();
-              URL.revokeObjectURL(url);
-            }), "Could not export stock backup.")}>Stock JSON Backup</button>
-          </div>
-        </section>
+        canUseStockBackup ? (
+          <section className="panel">
+            <div className="panel-title"><div><h2>Stock Backup / Export</h2><p>Exports only Stock Ledger settings and stock records.</p></div><FileDown /></div>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-primary" disabled={!summary} onClick={() => summary && exportStockMonthlyXlsx(summary, days)}><FileSpreadsheet />Export Stock Excel</button>
+              <button className="btn-secondary" disabled={!summary} onClick={() => summary && exportStockPrintable(summary, days)}><Printer />Print</button>
+              <button className="btn-secondary" onClick={() => onQueueWrite(listStockBackup().then((backup) => {
+                const blob = new Blob([JSON.stringify({ exportedAt: Date.now(), stock: backup }, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = `stock-backup-${monthId}.json`;
+                link.click();
+                URL.revokeObjectURL(url);
+              }), "Could not export stock backup.")}>Stock JSON Backup</button>
+            </div>
+          </section>
+        ) : (
+          <section className="panel">
+            <h2>Stock Backup / Export</h2>
+            <p className="warning mt-4">Owner only.</p>
+          </section>
+        )
       )}
     </section>
   );

@@ -5,8 +5,10 @@ import { statusChipClass, statusLabel } from "../services/dayStatusService";
 
 function autoSaveText(status?: AutoSaveStatus) {
   if (status === "saving") return "Saving...";
+  if (status === "typing") return "Typing...";
   if (status === "saved") return "Saved";
   if (status === "pendingSync") return "Pending sync";
+  if (status === "pendingRecalculation") return "Pending recalculation";
   if (status === "error") return "Error saving";
   if (status === "readOnly") return "Read-only";
   if (status === "closed") return "Closed day";

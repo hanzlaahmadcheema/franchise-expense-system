@@ -9,6 +9,7 @@ import {
   previousEntryForDraftAcrossDays,
   validateJazzLoadDrafts
 } from "./jazzLoadCalculations";
+import { rechainJazzLoadDays } from "./jazzLoadFirestore";
 import type { ActiveJazzLoadRates, JazzLoadDay, JazzLoadRateConfig } from "../types/jazzLoad.types";
 
 const mlRate: JazzLoadRateConfig = {
@@ -245,6 +246,52 @@ describe("jazzLoadCalculations", () => {
     );
 
     expect(found?.closingBalance.baseAmount).toBe(900);
+  });
+
+  it("rechains Day 1 openings from the previous month final Jazz Load balances", () => {
+    const mayFinalEntry = calculateDoRow(
+      { id: "line-1-may", doNameId: "name-a", doLineId: "line-1", doName: "RIZWAN", doLine: "301", openingBase: 500, todayMlIssuanceBase: 1000, paymentReceivedBase: 200 },
+      rates,
+      { createdBy: "u", timestamp: 1 }
+    );
+    const mayFinal: JazzLoadDay = {
+      id: "31",
+      monthId: "2026-05",
+      dayNo: 31,
+      date: "2026-05-31",
+      status: "closed",
+      doEntries: [mayFinalEntry],
+      lifting: calculateDailyLifting({ openingBalance: 3000, mlLifting: 500 }, mayFinalEntry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [mayFinalEntry] }, rates),
+      createdBy: "u",
+      createdAt: 1,
+      updatedAt: 1
+    };
+    const badJuneEntry = calculateDoRow(
+      { id: "line-1-june", doNameId: "name-a", doLineId: "line-1", doName: "RIZWAN", doLine: "301", openingBase: 0, todayMlIssuanceBase: 100, paymentReceivedBase: 50 },
+      rates,
+      { createdBy: "u", timestamp: 2 }
+    );
+    const juneDay: JazzLoadDay = {
+      id: "1",
+      monthId: "2026-06",
+      dayNo: 1,
+      date: "2026-06-01",
+      status: "open",
+      doEntries: [badJuneEntry],
+      lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, badJuneEntry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [badJuneEntry] }, rates),
+      createdBy: "u",
+      createdAt: 2,
+      updatedAt: 2
+    };
+
+    const [repaired] = rechainJazzLoadDays([juneDay], rates, "u", 3, [mayFinal]);
+
+    expect(repaired.doEntries[0].openingBalance.baseAmount).toBe(mayFinalEntry.closingBalance.baseAmount);
+    expect(repaired.doEntries[0].todayMlIssuance.baseAmount).toBe(100);
+    expect(repaired.doEntries[0].paymentReceived.baseAmount).toBe(50);
+    expect(repaired.lifting.openingBalance).toBe(mayFinal.lifting.inHandBalance);
   });
 
   it("carries opening by fixed DO line even when the assigned name changes", () => {

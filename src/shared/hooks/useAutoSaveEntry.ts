@@ -12,6 +12,8 @@ type Options<T> = {
   validate?: (data: T) => ValidationResult;
   save: (data: T) => Promise<void>;
   serialize?: (data: T) => string;
+  savedStatus?: AutoSaveStatus;
+  validationKey?: string | number | boolean | null;
 };
 
 function isValidationOk(result: ValidationResult | undefined) {
@@ -31,13 +33,25 @@ export function useAutoSaveEntry<T>({
   resetKey,
   validate,
   save,
-  serialize = JSON.stringify
+  serialize = JSON.stringify,
+  savedStatus = "pendingRecalculation",
+  validationKey
 }: Options<T>) {
   const [status, setStatus] = useState<AutoSaveStatus>(disabled ? "readOnly" : "saved");
   const [error, setError] = useState("");
   const lastSavedRef = useRef("");
   const inFlightRef = useRef(false);
+  const saveRef = useRef(save);
+  const validateRef = useRef(validate);
   const signature = useMemo(() => serialize(data), [data, serialize]);
+
+  useEffect(() => {
+    saveRef.current = save;
+  }, [save]);
+
+  useEffect(() => {
+    validateRef.current = validate;
+  }, [validate]);
 
   useEffect(() => {
     lastSavedRef.current = signature;
@@ -52,7 +66,7 @@ export function useAutoSaveEntry<T>({
     }
     if (!enabled) return;
     if (signature === lastSavedRef.current) return;
-    const validation = validate?.(data);
+    const validation = validateRef.current?.(data);
     if (!isValidationOk(validation)) {
       const valStr = Array.isArray(validation) ? (validation[0] ?? "") : typeof validation === "string" ? validation : "";
       const isNoMovement = valStr.includes("movement") || valStr.includes("Select");
@@ -60,7 +74,7 @@ export function useAutoSaveEntry<T>({
       setError(valStr || "Validation failed.");
       return;
     }
-    setStatus("unsaved");
+    setStatus("typing");
     const timer = window.setTimeout(() => {
       if (signature === lastSavedRef.current || inFlightRef.current) return;
       inFlightRef.current = true;
@@ -68,10 +82,10 @@ export function useAutoSaveEntry<T>({
       setError("");
       activeSavingCount++;
       window.dispatchEvent(new CustomEvent("autosave-active-count", { detail: activeSavingCount }));
-      void save(data)
+      void saveRef.current(data)
         .then(() => {
           lastSavedRef.current = signature;
-          setStatus(navigator.onLine ? "saved" : "pendingSync");
+          setStatus(navigator.onLine ? savedStatus : "pendingSync");
         })
         .catch((err) => {
           setStatus("error");
@@ -84,11 +98,11 @@ export function useAutoSaveEntry<T>({
         });
     }, debounceMs);
     return () => window.clearTimeout(timer);
-  }, [data, debounceMs, disabled, enabled, save, signature, validate]);
+  }, [data, debounceMs, disabled, enabled, savedStatus, signature, validationKey]);
 
   return {
     autoSaveStatus: status,
     autoSaveError: error,
-    hasPendingAutoSave: status === "unsaved" || status === "saving" || status === "error"
+    hasPendingAutoSave: status === "typing" || status === "unsaved" || status === "saving" || status === "error"
   };
 }

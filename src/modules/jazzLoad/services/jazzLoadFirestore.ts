@@ -16,6 +16,7 @@ import {
 import type { User } from "firebase/auth";
 import { auth, db } from "../../../lib/firebase";
 import { buildAuditLogDocument, writeAuditLog } from "../../../lib/auditLogService";
+import { LEDGER_CALC_VERSION } from "../../../shared/ledger/ledgerTypes";
 import type { UserRole } from "../../../types/ledger";
 import {
   calculateDailyLifting,
@@ -113,6 +114,69 @@ function dayRef(monthId: string, dayNo: number) {
   return doc(monthRef(monthId), "days", String(dayNo));
 }
 
+function ledgerV2JazzLoadRawEntries(monthId: string, dayNo: number) {
+  return collection(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "days", String(dayNo), "rawEntries");
+}
+
+async function syncJazzLoadLedgerV2RawEntriesInBatch(
+  batch: ReturnType<typeof writeBatch>,
+  day: JazzLoadDay,
+  actorUid: string,
+  timestamp: number
+) {
+  const rawCollection = ledgerV2JazzLoadRawEntries(day.monthId, day.dayNo);
+  const existingSnap = await getDocs(rawCollection);
+  const rawEntries = [
+    ...day.doEntries.map((entry) => ({
+      id: `do-${entry.id}`,
+      type: "doEntry",
+      raw: {
+        doProfileId: entry.doProfileId,
+        doNameId: entry.doNameId,
+        doLineId: entry.doLineId,
+        assignmentId: entry.assignmentId,
+        doLineSortOrder: entry.doLineSortOrder,
+        doName: entry.doName,
+        doLine: entry.doLine,
+        todayMlIssuanceBase: entry.todayMlIssuance.baseAmount,
+        paymentReceivedBase: entry.paymentReceived.baseAmount,
+        notes: entry.notes,
+        source: "user"
+      }
+    })),
+    {
+      id: "lifting-main",
+      type: "lifting",
+      raw: {
+        mlLifting: day.lifting.mlLifting,
+        notes: day.notes,
+        source: "user"
+      }
+    }
+  ];
+  const nextIds = new Set(rawEntries.map((entry) => entry.id));
+  for (const entryDoc of existingSnap.docs) {
+    if (!nextIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+  }
+  for (const entry of rawEntries) {
+    batch.set(doc(rawCollection, entry.id), cleanForFirestore({
+      id: entry.id,
+      module: "jazzLoad",
+      type: entry.type,
+      monthId: day.monthId,
+      dayNo: day.dayNo,
+      raw: entry.raw,
+      calculated: null,
+      meta: {
+        updatedAt: timestamp,
+        updatedBy: actorUid,
+        status: typeof navigator !== "undefined" && navigator.onLine ? "pending" : "preview",
+        calculationVersion: LEDGER_CALC_VERSION
+      }
+    }), { merge: true });
+  }
+}
+
 function auditRef(monthId: string, id = `${now()}-${Math.random().toString(36).slice(2, 8)}`) {
   return doc(monthRef(monthId), "audit", id);
 }
@@ -185,7 +249,7 @@ export function roleCanJazzLoad(
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily" || permission === "backup";
+  if (role === "admin") return permission === "daily";
   return false;
 }
 
@@ -716,6 +780,7 @@ export async function saveJazzLoadDay(
   for (const entry of nextDay.doEntries) {
     batch.set(doc(dayRef(month.id, day.dayNo), "doEntries", entry.id), cleanForFirestore(entry), { merge: true });
   }
+  await syncJazzLoadLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp);
   batch.set(doc(monthRef(month.id), "summary", "monthly"), cleanForFirestore(summary), { merge: true });
   batch.set(auditRef(month.id, auditId), cleanForFirestore(audit));
   const summaryText =
@@ -763,18 +828,20 @@ function matchingPreviousEntry(
   return undefined;
 }
 
-function rechainJazzLoadDays(
+export function rechainJazzLoadDays(
   days: JazzLoadDay[],
   activeRates: ActiveJazzLoadRates,
   userId: string,
-  timestamp: number
+  timestamp: number,
+  previousMonthDays: JazzLoadDay[] = []
 ) {
   const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
+  const seedDays = [...previousMonthDays].sort((a, b) => a.dayNo - b.dayNo);
   const recalculatedDays: JazzLoadDay[] = [];
 
   for (const day of sortedDays) {
     const doEntries = day.doEntries.map((entry) => {
-      const previous = matchingPreviousEntry(recalculatedDays, entry);
+      const previous = matchingPreviousEntry([...seedDays, ...recalculatedDays], entry);
       return calculateDoRow(
         {
           id: entry.id,
@@ -795,7 +862,7 @@ function rechainJazzLoadDays(
       );
     });
     const summary = calculateDailySummary({ doEntries }, activeRates, timestamp);
-    const previousDay = recalculatedDays.at(-1);
+    const previousDay = recalculatedDays.at(-1) ?? seedDays.at(-1);
     recalculatedDays.push({
       ...day,
       doEntries,
@@ -820,12 +887,13 @@ export function recalculateJazzLoadMonth(
   days: JazzLoadDay[],
   activeRates: ActiveJazzLoadRates,
   user: User | null,
-  role: UserRole | null
+  role: UserRole | null,
+  options: { previousMonthDays?: JazzLoadDay[] } = {}
 ) {
   if (!activeRates.mlRate) throw new Error("Active Jazz Load Addition Rate is required before recalculating.");
   const currentActor = actor(user, role);
   const timestamp = now();
-  const recalculatedDays = rechainJazzLoadDays(days, activeRates, currentActor.userId, timestamp);
+  const recalculatedDays = rechainJazzLoadDays(days, activeRates, currentActor.userId, timestamp, options.previousMonthDays ?? []);
   const summary = calculateMonthlySummary(month.id, recalculatedDays);
   const batch = writeBatch(requireDb());
   const nextMonth: JazzLoadMonth = {

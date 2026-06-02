@@ -19,11 +19,17 @@ import {
 import { httpsCallable } from "firebase/functions";
 import { auth, db, functions } from "./firebase";
 import { buildAuditLogDocument, writeAuditLog } from "./auditLogService";
-import { computeMonth } from "./formulaEngine";
+import { buildExpenseCarryForwardSeed, computeMonth } from "./formulaEngine";
+import {
+  defaultLedgerReadModeConfig,
+  LEDGER_CALC_VERSION,
+  type LedgerReadModeConfig
+} from "../shared/ledger/ledgerTypes";
 import type {
   AuditEvent,
   AuthorizedEmail,
   DailyLedgerInput,
+  ExpenseCarryForwardSeed,
   MonthComputed,
   MonthRecord,
   MonthStatus,
@@ -41,6 +47,17 @@ function now() {
 export const defaultOwnerOpeningBalance = -85427;
 
 export type FirestoreSnapshotMeta = Pick<SnapshotMetadata, "fromCache" | "hasPendingWrites">;
+
+export type LedgerMismatchReportSummary = {
+  id: string;
+  module: "expense" | "jazzLoad" | "stock";
+  monthId: string;
+  status: "open" | "repaired" | "ignored";
+  issueCount: number;
+  createdAt: number;
+};
+
+export type { LedgerReadModeConfig };
 
 function requireDb() {
   if (!db) throw new Error("Firebase is not configured.");
@@ -100,6 +117,57 @@ export function setAuditActorRole(role: UserRole | null) {
   auditActorRole = role ?? "viewer";
 }
 
+type PermissionDebugPathMode = "client-save" | "callable" | "local-fallback";
+
+type PermissionDebugContext = {
+  module?: "expense" | "jazzLoad" | "stock" | "auth";
+  source?: string;
+  pathMode?: PermissionDebugPathMode;
+};
+
+type SaveMonthRecordOptions = {
+  suppressPerDayAudit?: boolean;
+  onlyWriteEditableDays?: boolean;
+  carryForwardSeed?: ExpenseCarryForwardSeed | null;
+  recalculationWrite?: boolean;
+  debugSource?: string;
+  debugPathMode?: PermissionDebugPathMode;
+};
+
+type ExpenseRecalculationStamp = Pick<
+  DailyLedgerInput,
+  "recalculatedAt" | "recalculatedBy" | "recalculatedByRole" | "recalculationSource"
+>;
+
+function shouldLogPermissionDebug() {
+  if (import.meta.env.DEV) return true;
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("permissionDebug") === "true";
+  } catch {
+    return false;
+  }
+}
+
+function debugPermissionWrite(
+  context: PermissionDebugContext,
+  path: string,
+  operation: "set" | "update" | "delete" | "commit" | "callable"
+) {
+  if (!shouldLogPermissionDebug()) return;
+  const user = auth?.currentUser;
+  console.info("[permission-debug]", {
+    module: context.module ?? "expense",
+    source: context.source ?? "unspecified",
+    pathMode: context.pathMode ?? "client-save",
+    operation,
+    path,
+    role: auditActorRole,
+    uid: user?.uid ?? null,
+    email: user?.email ?? null
+  });
+}
+
 function actor() {
   return {
     actorUid: auth?.currentUser?.uid,
@@ -138,6 +206,7 @@ async function writeExpenseAuditLog(
   };
   if (options?.batch) {
     const log = buildAuditLogDocument(input, actorRole);
+    debugPermissionWrite({ module: "expense", source: "expense-audit-log", pathMode: "client-save" }, `auditLogs/${log.id}`, "set");
     options.batch.set(doc(requireDb(), "auditLogs", log.id), log);
     return;
   }
@@ -157,6 +226,7 @@ async function addAudit(
   const createdAt = now();
   const id = `${createdAt}-${Math.random().toString(36).slice(2, 8)}`;
   const payload = { id, createdAt, ...event, ...actor() };
+  debugPermissionWrite({ module: "expense", source: "expense-audit", pathMode: "client-save" }, `months/${monthId}/audit/${id}`, "set");
   await setDoc(doc(firestore, "months", monthId, "audit", id), payload);
   await writeExpenseAuditLog(monthId, id, createdAt, { ...event, ...actor() }, options);
 }
@@ -172,6 +242,10 @@ export const defaultNotificationSettings: NotificationSettings = {
 
 function notificationConfigRef() {
   return doc(requireDb(), "settings", "notifications", "config", "default");
+}
+
+function ledgerReadModeConfigRef() {
+  return doc(requireDb(), "settings", "ledger", "config", "main");
 }
 
 function snapshotError(handler?: (error: FirestoreError) => void) {
@@ -193,6 +267,51 @@ export function subscribeNotificationSettings(
     },
     snapshotError(onError)
   );
+}
+
+function normalizeLedgerReadModeConfig(data: Partial<LedgerReadModeConfig> | undefined): LedgerReadModeConfig {
+  return {
+    ...defaultLedgerReadModeConfig,
+    ...(data ?? {})
+  };
+}
+
+function assertLedgerCutoverIsReviewed(config: LedgerReadModeConfig) {
+  const hardCutoverEnabled =
+    config.expenseReadMode === "v2" ||
+    config.jazzLoadReadMode === "v2" ||
+    config.stockReadMode === "v2";
+  if (hardCutoverEnabled && !config.verifiedReportId) {
+    throw new Error("ledgerV2 read cutover requires a reviewed verification report id.");
+  }
+}
+
+export function subscribeLedgerReadModeConfig(
+  onNext: (config: LedgerReadModeConfig, metadata: FirestoreSnapshotMeta) => void,
+  onError?: (error: FirestoreError) => void
+) {
+  return onSnapshot(
+    ledgerReadModeConfigRef(),
+    { includeMetadataChanges: true },
+    (snap) => {
+      onNext(normalizeLedgerReadModeConfig(snap.exists() ? snap.data() as Partial<LedgerReadModeConfig> : undefined), snap.metadata);
+    },
+    snapshotError(onError)
+  );
+}
+
+export async function saveLedgerReadModeConfig(config: LedgerReadModeConfig): Promise<void> {
+  assertLedgerCutoverIsReviewed(config);
+  await setDoc(
+    ledgerReadModeConfigRef(),
+    cleanForFirestore({
+      ...normalizeLedgerReadModeConfig(config),
+      updatedAt: now(),
+      updatedBy: auth?.currentUser?.uid ?? "unknown"
+    }),
+    { merge: true }
+  );
+  await writeSettingsAuditLog("Updated ledger read mode feature flags", "ledger-read-mode-update", "ledger", "main");
 }
 
 export async function getNotificationSettings(): Promise<NotificationSettings> {
@@ -487,12 +606,15 @@ export async function ensureDefaultCatalogs() {
   }
 }
 
-export function roleCan(role: UserRole | null, permission: "daily" | "catalogs" | "users" | "ownerControls" | "importBackup" | "read") {
+export function roleCan(
+  role: UserRole | null,
+  permission: "daily" | "catalogs" | "users" | "ownerControls" | "importBackup" | "masterRefresh" | "read"
+) {
   if (!role) return false;
   if (permission === "read") return true;
   if (role === "owner") return true;
   if (role === "admin") {
-    return permission === "daily" || permission === "ownerControls" || permission === "importBackup";
+    return permission === "daily" || permission === "masterRefresh";
   }
   return false;
 }
@@ -507,24 +629,27 @@ function previousMonthId(monthId: string) {
 }
 
 export async function resolveOpeningBalance(monthId: string): Promise<number> {
-  const previousId = previousMonthId(monthId);
-  if (!previousId) return 0;
-  const previousDays = await fetchMonthDays(previousId).catch(() => []);
-  const previousMonth = (await getDoc(doc(requireDb(), "months", previousId))).data() as MonthRecord | undefined;
-  const computed = computeMonth(previousDays, previousMonth?.openingBalance ?? 0, previousId);
-  return computed.days.find((day) => day.dayNo === 32)?.returnBalance ?? 0;
+  return (await resolveExpenseCarryForwardSeed(monthId))?.openingBalance ?? 0;
 }
 
 export async function resolveOwnerOpeningBalance(monthId: string): Promise<number> {
+  return (await resolveExpenseCarryForwardSeed(monthId))?.ownerOpeningBalance ?? defaultOwnerOpeningBalance;
+}
+
+export async function resolveExpenseCarryForwardSeed(monthId: string): Promise<ExpenseCarryForwardSeed | null> {
   const previousId = previousMonthId(monthId);
-  if (!previousId) return defaultOwnerOpeningBalance;
+  if (!previousId) return null;
+  const previousMonthSnap = await getDoc(doc(requireDb(), "months", previousId));
+  const previousMonth = previousMonthSnap.exists() ? previousMonthSnap.data() as MonthRecord : undefined;
   const previousDays = await fetchMonthDays(previousId).catch(() => []);
-  const previousMonth = (await getDoc(doc(requireDb(), "months", previousId))).data() as MonthRecord | undefined;
-  if (!previousMonth && previousDays.length === 0) {
-    return defaultOwnerOpeningBalance;
-  }
-  const computed = computeMonth(previousDays, previousMonth?.openingBalance ?? 0, previousId);
-  return computed.days.at(-1)?.ownerBalanceTotal ?? previousMonth?.ownerOpeningBalance ?? defaultOwnerOpeningBalance;
+  if (!previousMonth && previousDays.length === 0) return null;
+  const computed = computeMonth(
+    previousDays,
+    previousMonth?.openingBalance ?? 0,
+    previousId,
+    previousMonth?.ownerOpeningBalance ?? defaultOwnerOpeningBalance
+  );
+  return buildExpenseCarryForwardSeed(previousId, computed);
 }
 
 export async function listMonths(): Promise<MonthRecord[]> {
@@ -561,7 +686,8 @@ export function subscribeMonthRecord(
 async function syncDaySubcollection<T extends { id: string }>(
   dayRef: ReturnType<typeof doc>,
   name: "expenses" | "commissions" | "credits" | "ownerBalances",
-  rows: T[]
+  rows: T[],
+  debugContext?: PermissionDebugContext
 ) {
   const existingSnap = await getDocs(collection(dayRef, name));
   const nextIds = new Set(rows.map((row) => row.id));
@@ -569,11 +695,18 @@ async function syncDaySubcollection<T extends { id: string }>(
   await Promise.all(
     existingSnap.docs
       .filter((itemDoc) => !nextIds.has(itemDoc.id))
-      .map((itemDoc) => deleteDoc(itemDoc.ref))
+      .map((itemDoc) => {
+        debugPermissionWrite(debugContext ?? { module: "expense", source: "sync-day-subcollection", pathMode: "client-save" }, itemDoc.ref.path, "delete");
+        return deleteDoc(itemDoc.ref);
+      })
   );
 
   await Promise.all(
-    rows.map((row) => setDoc(doc(dayRef, name, row.id), cleanForFirestore(row), { merge: true }))
+    rows.map((row) => {
+      const rowRef = doc(dayRef, name, row.id);
+      debugPermissionWrite(debugContext ?? { module: "expense", source: "sync-day-subcollection", pathMode: "client-save" }, rowRef.path, "set");
+      return setDoc(rowRef, cleanForFirestore(row), { merge: true });
+    })
   );
 }
 
@@ -581,38 +714,165 @@ async function syncCreditSubcollectionInBatch(
   batch: ReturnType<typeof writeBatch>,
   dayRef: ReturnType<typeof doc>,
   credits: DailyLedgerInput["credits"],
-  merge = true
+  merge = true,
+  debugContext?: PermissionDebugContext
 ) {
   const existingSnap = await getDocs(collection(dayRef, "credits"));
   const nextIds = new Set(credits.map((credit) => credit.id));
   for (const creditDoc of existingSnap.docs) {
-    if (!nextIds.has(creditDoc.id)) batch.delete(creditDoc.ref);
+    if (!nextIds.has(creditDoc.id)) {
+      debugPermissionWrite(debugContext ?? { module: "expense", source: "sync-credit-batch", pathMode: "client-save" }, creditDoc.ref.path, "delete");
+      batch.delete(creditDoc.ref);
+    }
   }
   for (const credit of credits) {
-    batch.set(doc(dayRef, "credits", credit.id), cleanForFirestore(credit), { merge });
+    const creditRef = doc(dayRef, "credits", credit.id);
+    debugPermissionWrite(debugContext ?? { module: "expense", source: "sync-credit-batch", pathMode: "client-save" }, creditRef.path, "set");
+    batch.set(creditRef, cleanForFirestore(credit), { merge });
+  }
+}
+
+function ledgerV2ExpenseRawEntriesPath(monthId: string, dayNo: number) {
+  return collection(requireDb(), "ledgerV2", "expense", "months", monthId, "days", String(dayNo), "rawEntries");
+}
+
+function expenseRawEntryPayload(input: {
+  id: string;
+  type: "expense" | "commission" | "credit" | "ownerBalance";
+  monthId: string;
+  dayNo: number;
+  raw: Record<string, unknown>;
+  timestamp: number;
+}) {
+  return cleanForFirestore({
+    id: input.id,
+    module: "expense",
+    type: input.type,
+    monthId: input.monthId,
+    dayNo: input.dayNo,
+    raw: input.raw,
+    calculated: null,
+    meta: {
+      updatedAt: input.timestamp,
+      updatedBy: auth?.currentUser?.uid ?? "unknown",
+      status: typeof navigator !== "undefined" && navigator.onLine ? "pending" : "preview",
+      calculationVersion: LEDGER_CALC_VERSION
+    }
+  });
+}
+
+async function syncExpenseLedgerV2RawEntriesInBatch(
+  batch: ReturnType<typeof writeBatch>,
+  monthId: string,
+  day: DailyLedgerInput,
+  timestamp: number,
+  debugContext?: PermissionDebugContext
+) {
+  const rawEntries = [
+    ...day.expenses.map((expense) => ({
+      id: `expense-${expense.id}`,
+      type: "expense" as const,
+      raw: {
+        name: expense.name,
+        description: expense.description,
+        amount: expense.amount,
+        categoryId: expense.categoryId,
+        category: expense.category
+      }
+    })),
+    ...day.commissions.map((commission) => ({
+      id: `commission-${commission.id}`,
+      type: "commission" as const,
+      raw: {
+        categoryId: commission.categoryId,
+        category: commission.category,
+        amount: commission.amount
+      }
+    })),
+    ...day.credits.map((credit) => ({
+      id: `credit-${credit.id}`,
+      type: "credit" as const,
+      raw: {
+        partyId: credit.partyId,
+        partyNameSnapshot: credit.partyName,
+        loan: credit.loan ?? credit.today ?? 0,
+        receive: credit.receive,
+        manualAdjustment: 0,
+        notes: undefined,
+        source: "user"
+      }
+    })),
+    ...day.ownerBalances.map((ownerBalance) => ({
+      id: `owner-${ownerBalance.id}`,
+      type: "ownerBalance" as const,
+      raw: {
+        description: ownerBalance.description,
+        label: ownerBalance.label,
+        expense: ownerBalance.expense ?? Math.max(ownerBalance.amount, 0),
+        received: ownerBalance.received ?? Math.max(-ownerBalance.amount, 0),
+        amount: ownerBalance.amount
+      }
+    }))
+  ];
+  const rawCollection = ledgerV2ExpenseRawEntriesPath(monthId, day.dayNo);
+  const existingSnap = await getDocs(rawCollection);
+  const nextIds = new Set(rawEntries.map((entry) => entry.id));
+  for (const entryDoc of existingSnap.docs) {
+    if (!nextIds.has(entryDoc.id)) {
+      debugPermissionWrite(debugContext ?? { module: "expense", source: "expense-ledger-v2-raw-sync", pathMode: "client-save" }, entryDoc.ref.path, "delete");
+      batch.delete(entryDoc.ref);
+    }
+  }
+  for (const entry of rawEntries) {
+    const entryRef = doc(rawCollection, entry.id);
+    debugPermissionWrite(debugContext ?? { module: "expense", source: "expense-ledger-v2-raw-sync", pathMode: "client-save" }, entryRef.path, "set");
+    batch.set(
+      entryRef,
+      expenseRawEntryPayload({
+        id: entry.id,
+        type: entry.type,
+        monthId,
+        dayNo: day.dayNo,
+        raw: entry.raw,
+        timestamp
+      }),
+      { merge: true }
+    );
   }
 }
 
 export async function upsertDay(
   monthId: string,
   day: DailyLedgerInput,
-  options?: { suppressPerDayAudit?: boolean }
+  options?: {
+    suppressPerDayAudit?: boolean;
+    debugSource?: string;
+    debugPathMode?: PermissionDebugPathMode;
+    recalculationStamp?: ExpenseRecalculationStamp;
+  }
 ): Promise<void> {
   const firestore = requireDb();
   const dayRef = doc(firestore, "months", monthId, "days", String(day.dayNo));
+  const debugContext = {
+    module: "expense" as const,
+    source: options?.debugSource ?? "upsert-day",
+    pathMode: options?.debugPathMode ?? "client-save"
+  };
+  debugPermissionWrite(debugContext, dayRef.path, "set");
   await setDoc(
     dayRef,
     cleanForFirestore({
       ...day,
+      ...(options?.recalculationStamp ?? {}),
       updatedAt: now()
     }),
     { merge: true }
   );
 
-  await syncDaySubcollection(dayRef, "expenses", day.expenses);
-  await syncDaySubcollection(dayRef, "commissions", day.commissions);
-  await syncDaySubcollection(dayRef, "credits", day.credits);
-  await syncDaySubcollection(dayRef, "ownerBalances", day.ownerBalances);
+  await syncDaySubcollection(dayRef, "expenses", day.expenses, debugContext);
+  await syncDaySubcollection(dayRef, "commissions", day.commissions, debugContext);
+  await syncDaySubcollection(dayRef, "credits", day.credits, debugContext);
+  await syncDaySubcollection(dayRef, "ownerBalances", day.ownerBalances, debugContext);
   if (!options?.suppressPerDayAudit) {
     await addAudit(
       monthId,
@@ -753,8 +1013,51 @@ export function subscribeMonthDays(
   );
 }
 
+export function subscribeLedgerMismatchReports(
+  module: "expense" | "jazzLoad" | "stock",
+  monthId: string,
+  onNext: (reports: LedgerMismatchReportSummary[], metadata: FirestoreSnapshotMeta) => void,
+  onError?: (error: FirestoreError) => void
+) {
+  return onSnapshot(
+    collection(requireDb(), "ledgerV2", module, "months", monthId, "mismatchReports"),
+    { includeMetadataChanges: true },
+    (snap) => {
+      onNext(
+        snap.docs
+          .map((entry) => {
+            const data = entry.data() as {
+              module?: "expense" | "jazzLoad" | "stock";
+              monthId?: string;
+              status?: "open" | "repaired" | "ignored";
+              issues?: unknown[];
+              createdAt?: number;
+            };
+            return {
+              id: entry.id,
+              module,
+              monthId: data.monthId ?? monthId,
+              status: data.status ?? "open",
+              issueCount: Array.isArray(data.issues) ? data.issues.length : 0,
+              createdAt: data.createdAt ?? 0
+            };
+          })
+          .filter((report) => report.status === "open" && report.issueCount > 0)
+          .sort((a, b) => b.createdAt - a.createdAt),
+        snap.metadata
+      );
+    },
+    snapshotError(onError)
+  );
+}
+
 export async function recalculateMonth(monthId: string): Promise<void> {
   const fn = httpsCallable(requireFunctions(), "recalculateMonth");
+  debugPermissionWrite(
+    { module: "expense", source: "master-refresh-callable", pathMode: "callable" },
+    `functions/recalculateMonth(${monthId})`,
+    "callable"
+  );
   await fn({ monthId });
 }
 
@@ -809,7 +1112,14 @@ export async function saveDayAndRecalculate(
   await ensureMonth(monthId, openingBalance);
   await upsertDay(monthId, day);
   const days = await fetchMonthDays(monthId);
-  const computed = computeMonth(days, openingBalance, monthId, ownerOpeningBalance);
+  const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
+  const computed = computeMonth(
+    days,
+    carryForwardSeed?.openingBalance ?? openingBalance,
+    monthId,
+    carryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance,
+    carryForwardSeed ?? undefined
+  );
   await updateHomeSummary(monthId, computed.homeSummary);
   return computed;
 }
@@ -826,10 +1136,18 @@ export async function queueDayAndSummaryWrite(
   const monthRef = doc(firestore, "months", month.id);
   const dayRef = doc(monthRef, "days", String(day.dayNo));
   const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+  const debugContext = {
+    module: "expense" as const,
+    source: `queue-day-and-summary-write:${auditAction}`,
+    pathMode: "client-save" as const
+  };
 
+  debugPermissionWrite(debugContext, monthRef.path, "set");
   batch.set(monthRef, cleanForFirestore({ ...month, updatedAt: timestamp, createdAt: month.createdAt ?? timestamp }), { merge: true });
+  debugPermissionWrite(debugContext, dayRef.path, "set");
   batch.set(dayRef, cleanForFirestore({ ...day, updatedAt: timestamp }), { merge: true });
   if (auditAction === "lock-day") {
+    debugPermissionWrite(debugContext, dayRef.path, "set");
     batch.set(
       dayRef,
       {
@@ -845,18 +1163,35 @@ export async function queueDayAndSummaryWrite(
       { merge: true }
     );
   }
-  for (const expense of day.expenses) batch.set(doc(dayRef, "expenses", expense.id), cleanForFirestore(expense), { merge: true });
-  for (const commission of day.commissions) batch.set(doc(dayRef, "commissions", commission.id), cleanForFirestore(commission), { merge: true });
-  await syncCreditSubcollectionInBatch(batch, dayRef, day.credits);
-  for (const ownerBalance of day.ownerBalances) batch.set(doc(dayRef, "ownerBalances", ownerBalance.id), cleanForFirestore(ownerBalance), { merge: true });
-  batch.set(doc(monthRef, "summary", "home"), cleanForFirestore(computed.homeSummary), { merge: true });
+  for (const expense of day.expenses) {
+    const expenseRef = doc(dayRef, "expenses", expense.id);
+    debugPermissionWrite(debugContext, expenseRef.path, "set");
+    batch.set(expenseRef, cleanForFirestore(expense), { merge: true });
+  }
+  for (const commission of day.commissions) {
+    const commissionRef = doc(dayRef, "commissions", commission.id);
+    debugPermissionWrite(debugContext, commissionRef.path, "set");
+    batch.set(commissionRef, cleanForFirestore(commission), { merge: true });
+  }
+  await syncCreditSubcollectionInBatch(batch, dayRef, day.credits, true, debugContext);
+  for (const ownerBalance of day.ownerBalances) {
+    const ownerBalanceRef = doc(dayRef, "ownerBalances", ownerBalance.id);
+    debugPermissionWrite(debugContext, ownerBalanceRef.path, "set");
+    batch.set(ownerBalanceRef, cleanForFirestore(ownerBalance), { merge: true });
+  }
+  await syncExpenseLedgerV2RawEntriesInBatch(batch, month.id, day, timestamp, debugContext);
+  const summaryRef = doc(monthRef, "summary", "home");
+  debugPermissionWrite(debugContext, summaryRef.path, "set");
+  batch.set(summaryRef, cleanForFirestore(computed.homeSummary), { merge: true });
   const auditDetail = auditAction === "lock-day" ? `Closed day ${day.dayNo}` : `Saved day ${day.dayNo}`;
   const auditEvent = {
     action: auditAction,
     detail: auditDetail,
     ...actor()
   } as Omit<AuditEvent, "id" | "createdAt">;
-  batch.set(doc(monthRef, "audit", auditId), {
+  const auditRef = doc(monthRef, "audit", auditId);
+  debugPermissionWrite(debugContext, auditRef.path, "set");
+  batch.set(auditRef, {
     id: auditId,
     createdAt: timestamp,
     ...auditEvent
@@ -865,7 +1200,37 @@ export async function queueDayAndSummaryWrite(
     batch,
     dayNo: day.dayNo
   });
+  const rawAuditLog = buildAuditLogDocument(
+    {
+      id: `${auditId}-raw`,
+      createdAt: timestamp,
+      module: "expense",
+      action: "RAW_ENTRY_SAVED",
+      summary: `Saved raw Expense entries for day ${day.dayNo}`,
+      monthId: month.id,
+      dayNo: day.dayNo,
+      date: day.date,
+      targetType: "day",
+      targetId: `${month.id}/${day.dayNo}`,
+      sourcePath: `ledgerV2/expense/months/${month.id}/days/${day.dayNo}/rawEntries`,
+      actorUid: actor().actorUid,
+      actorEmail: actor().actorEmail,
+      after: {
+        expenses: day.expenses.length,
+        commissions: day.commissions.length,
+        credits: day.credits.length,
+        ownerBalances: day.ownerBalances.length
+      }
+    },
+    auditActorRole
+  );
+  if (rawAuditLog.actorUid) {
+    const rawAuditRef = doc(firestore, "auditLogs", rawAuditLog.id);
+    debugPermissionWrite(debugContext, rawAuditRef.path, "set");
+    batch.set(rawAuditRef, rawAuditLog);
+  }
 
+  debugPermissionWrite(debugContext, "batch:queueDayAndSummaryWrite", "commit");
   return batch.commit();
 }
 
@@ -909,7 +1274,14 @@ export async function lockDayAndRecalculate(
     { merge: true }
   );
   const days = await fetchMonthDays(monthId);
-  const computed = computeMonth(days, openingBalance, monthId, ownerOpeningBalance);
+  const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
+  const computed = computeMonth(
+    days,
+    carryForwardSeed?.openingBalance ?? openingBalance,
+    monthId,
+    carryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance,
+    carryForwardSeed ?? undefined
+  );
   await updateHomeSummary(monthId, computed.homeSummary);
   await addAudit(monthId, {
     action: "lock-day",
@@ -1169,17 +1541,32 @@ export async function commitWorkbookImport(preview: WorkbookImportPreview): Prom
 export async function saveMonthRecord(
   month: MonthRecord,
   days: DailyLedgerInput[],
-  options?: { suppressPerDayAudit?: boolean; onlyWriteEditableDays?: boolean }
+  options?: SaveMonthRecordOptions
 ): Promise<MonthComputed> {
   const firestore = requireDb();
-  const computed = computeMonth(days, month.openingBalance, month.id, month.ownerOpeningBalance ?? 0);
+  const computed = computeMonth(days, month.openingBalance, month.id, month.ownerOpeningBalance ?? 0, options?.carryForwardSeed ?? undefined);
   const batch = writeBatch(firestore);
   const monthRef = doc(firestore, "months", month.id);
+  const timestamp = now();
+  const debugContext = {
+    module: "expense" as const,
+    source: options?.debugSource ?? "save-month-record",
+    pathMode: options?.debugPathMode ?? "client-save"
+  };
+  const recalculationStamp: ExpenseRecalculationStamp | undefined = options?.recalculationWrite
+    ? cleanForFirestore({
+        recalculatedAt: timestamp,
+        recalculatedBy: auth?.currentUser?.uid,
+        recalculatedByRole: auditActorRole,
+        recalculationSource: options.debugSource ?? "master-refresh-local-fallback"
+      })
+    : undefined;
+  debugPermissionWrite(debugContext, monthRef.path, "set");
   batch.set(
     monthRef,
     {
       ...cleanForFirestore(month),
-      updatedAt: now()
+      updatedAt: timestamp
     },
     { merge: true }
   );
@@ -1201,23 +1588,38 @@ export async function saveMonthRecord(
       continue;
     }
     const dayRef = doc(monthRef, "days", String(day.dayNo));
-    batch.set(dayRef, cleanForFirestore({ ...day, updatedAt: now() }), { merge: true });
+    debugPermissionWrite(debugContext, dayRef.path, "set");
+    batch.set(dayRef, cleanForFirestore({ ...day, ...(recalculationStamp ?? {}), updatedAt: timestamp }), { merge: true });
     for (const expense of day.expenses) {
-      batch.set(doc(dayRef, "expenses", expense.id), cleanForFirestore(expense));
+      const expenseRef = doc(dayRef, "expenses", expense.id);
+      debugPermissionWrite(debugContext, expenseRef.path, "set");
+      batch.set(expenseRef, cleanForFirestore(expense));
     }
     for (const commission of day.commissions) {
-      batch.set(doc(dayRef, "commissions", commission.id), cleanForFirestore(commission));
+      const commissionRef = doc(dayRef, "commissions", commission.id);
+      debugPermissionWrite(debugContext, commissionRef.path, "set");
+      batch.set(commissionRef, cleanForFirestore(commission));
     }
-    await syncCreditSubcollectionInBatch(batch, dayRef, day.credits, false);
+    await syncCreditSubcollectionInBatch(batch, dayRef, day.credits, false, debugContext);
     for (const ownerBalance of day.ownerBalances) {
-      batch.set(doc(dayRef, "ownerBalances", ownerBalance.id), cleanForFirestore(ownerBalance));
+      const ownerBalanceRef = doc(dayRef, "ownerBalances", ownerBalance.id);
+      debugPermissionWrite(debugContext, ownerBalanceRef.path, "set");
+      batch.set(ownerBalanceRef, cleanForFirestore(ownerBalance));
     }
   }
-  batch.set(doc(monthRef, "summary", "home"), cleanForFirestore(computed.homeSummary), { merge: true });
+  const summaryRef = doc(monthRef, "summary", "home");
+  debugPermissionWrite(debugContext, summaryRef.path, "set");
+  batch.set(summaryRef, cleanForFirestore(computed.homeSummary), { merge: true });
+  debugPermissionWrite(debugContext, "batch:saveMonthRecord", "commit");
   await batch.commit();
 
   const daysToUpsert = options?.onlyWriteEditableDays ? days.filter(isEditable) : days;
-  await Promise.all(daysToUpsert.map((day) => upsertDay(month.id, day, { suppressPerDayAudit: options?.suppressPerDayAudit })));
+  await Promise.all(daysToUpsert.map((day) => upsertDay(month.id, day, {
+    suppressPerDayAudit: options?.suppressPerDayAudit,
+    debugSource: `${debugContext.source}:upsert`,
+    debugPathMode: debugContext.pathMode,
+    recalculationStamp
+  })));
   return computed;
 }
 

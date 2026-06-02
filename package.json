@@ -9,7 +9,12 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "reconcile": "node scripts/reconcile.mjs"
+    "test:emulator:rules": "firebase emulators:exec --only firestore \"vitest run src/shared/ledger/firestoreRules.integration.test.ts\"",
+    "test:emulator:callables": "npm --prefix functions run build && FUNCTIONS_EMULATOR_ORIGIN=http://127.0.0.1:5001 firebase emulators:exec --only firestore,functions,auth \"vitest run src/shared/ledger/callableRecalculation.integration.test.ts\"",
+    "reconcile": "node scripts/reconcile.mjs",
+    "ledger:migrate": "node scripts/ledger-v2-migration.mjs",
+    "ledger:dry-run:may2026": "node scripts/ledger-v2-migration.mjs --month 2026-05 --dry-run --output-report tmp/ledger-v2-2026-05-report.json --backup-file tmp/ledger-v2-2026-05-backup.json",
+    "ledger:inspect:may2026": "node scripts/inspect-ledger-v2-report.mjs --report tmp/ledger-v2-2026-05-report.json --backup tmp/ledger-v2-2026-05-backup.json --output tmp/ledger-v2-2026-05-inspection.json --strict"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
@@ -25,6 +30,7 @@
   "devDependencies": {
     "@testing-library/react": "^16.0.1",
     "@testing-library/user-event": "^14.5.2",
+    "@firebase/rules-unit-testing": "^4.0.1",
     "@types/node": "^22.7.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

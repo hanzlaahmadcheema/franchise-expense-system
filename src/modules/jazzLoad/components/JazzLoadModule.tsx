@@ -39,6 +39,10 @@ import {
   type FirestoreSnapshotMeta
 } from "../services/jazzLoadFirestore";
 import { exportJazzLoadPrintable, exportJazzLoadXlsx } from "../services/jazzLoadReports";
+import {
+  getJazzLoadSaveState,
+  type JazzLoadSaveBlockReason
+} from "../services/jazzLoadSaveState";
 import type {
   ActiveJazzLoadRates,
   JazzLoadDoAssignment,
@@ -74,6 +78,36 @@ type JazzLoadPopup = {
   kind: "success" | "warning" | "error";
   text: string;
 };
+
+function shouldLogJazzLoadSaveDebug() {
+  if (import.meta.env.DEV) return true;
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("jazzLoadSaveDebug") === "true" ||
+      window.localStorage.getItem("permissionDebug") === "true";
+  } catch {
+    return false;
+  }
+}
+
+function debugJazzLoadSaveBlock(input: {
+  source: "autosave" | "manual-save" | "save-guard";
+  reason: JazzLoadSaveBlockReason | "Permission denied";
+  detail: string;
+  role: UserRole | null;
+  monthId: string;
+  dayNo: number;
+  selectedDayLive: boolean;
+  selectedDayFuture: boolean;
+}) {
+  if (!shouldLogJazzLoadSaveDebug()) return;
+  console.info("[jazz-load-save-debug]", input);
+}
+
+function normalizeSaveError(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return /permission|insufficient/i.test(message) ? "Permission denied" : message;
+}
 
 type Props = {
   user: User;
@@ -197,6 +231,26 @@ function MetricCard({ label, value, helper }: { label: string; value: string; he
   );
 }
 
+function jazzCarryForwardWarnings(days: JazzLoadDay[], previousMonthDays: JazzLoadDay[]) {
+  const day1 = days.find((day) => day.dayNo === 1);
+  const previousFinalDay = [...previousMonthDays].sort((a, b) => a.dayNo - b.dayNo).at(-1);
+  if (!day1 || !previousFinalDay) return [];
+  const warnings: string[] = [];
+  if (day1.lifting.openingBalance !== previousFinalDay.lifting.inHandBalance) {
+    warnings.push(`lifting opening ${formatCurrency(day1.lifting.openingBalance)} should equal previous month in-hand ${formatCurrency(previousFinalDay.lifting.inHandBalance)}`);
+  }
+  for (const entry of day1.doEntries) {
+    const previous = latestEntryForDraft(previousMonthDays, entry);
+    if (!previous) continue;
+    const expected = previous.closingBalance.baseAmount;
+    const actual = entry.openingBalance.baseAmount;
+    if (actual !== expected) {
+      warnings.push(`${entry.doName}${entry.doLine ? ` ${entry.doLine}` : ""} opening ${formatCurrency(actual)} should equal previous month closing ${formatCurrency(expected)}`);
+    }
+  }
+  return warnings;
+}
+
 function asDraft(entry: JazzLoadDay["doEntries"][number]): JazzLoadDoEntryDraft {
   return {
     id: entry.id,
@@ -296,6 +350,7 @@ export function JazzLoadModule({
   const selectedDayFuture = isFutureJazzDay(monthId, selectedDay, now);
   const selectedDayLive = monthId === currentMonthId(now) && selectedDay === now.getDate();
   const selectedDayCorrectionActive = Boolean(selectedDayRecord?.reopenedUntilAt && getMillis(selectedDayRecord.reopenedUntilAt) > now.getTime());
+  const selectedDayClosed = selectedDayRecord?.status === "closed" && !selectedDayCorrectionActive;
   const activeRates: ActiveJazzLoadRates = useMemo(
     () => ({
       mlRate: activeRateFor(rates, "ml_addition"),
@@ -305,12 +360,13 @@ export function JazzLoadModule({
     [rates]
   );
   const canRead = roleCanJazzLoad(role, "read");
+  const canWriteDaily = roleCanJazzLoad(role, "daily");
   const canEditDaily =
-    roleCanJazzLoad(role, "daily") &&
+    canWriteDaily &&
     !selectedDayFuture &&
     currentMonth?.status !== "closed" &&
     (role === "owner" || selectedDayLive) &&
-    (selectedDayLive || selectedDayRecord?.status !== "closed" || selectedDayCorrectionActive);
+    !selectedDayClosed;
   const jazzCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
@@ -519,6 +575,10 @@ export function JazzLoadModule({
   const previewSummary = calculateDailySummary({ doEntries: previewEntries }, activeRates);
   const previewLifting = calculateDailyLifting({ openingBalance: liftingOpening, mlLifting }, previewSummary.issuanceMl);
   const localSummary = summary ?? calculateMonthlySummary(monthId, days);
+  const carryForwardWarnings = useMemo(
+    () => jazzCarryForwardWarnings(days, previousMonthDays),
+    [days, previousMonthDays]
+  );
   const validation = validateJazzLoadDrafts(
     drafts.map((draft) => ({
       ...draft,
@@ -526,24 +586,40 @@ export function JazzLoadModule({
     })),
     activeRates
   );
+  const saveState = getJazzLoadSaveState({
+    role,
+    canWriteDaily,
+    selectedDayFuture,
+    selectedDayLive,
+    monthClosed: currentMonth?.status === "closed",
+    dayClosed: selectedDayClosed,
+    hasDrafts: drafts.length > 0,
+    activeRates,
+    validation
+  });
+
+  useEffect(() => {
+    if (section === "settings" && !canManageSettings) {
+      setSection("daily");
+      onStatus("Owner only. Jazz Load Settings are restricted to owner access.");
+    }
+    if (section === "backup" && !canBackup) {
+      setSection("daily");
+      onStatus("Owner only. Jazz Load backup is restricted to owner access.");
+    }
+  }, [canBackup, canManageSettings, onStatus, section]);
 
   const warningMessage = !currentMonth
     ? ""
     : syncState === "offline"
       ? "Offline mode: Jazz Load changes will sync when this device reconnects."
-      : !activeRates.mlRate || !activeRates.commission1Rate || !activeRates.commission2Rate
+      : saveState.reason === "No active rate"
         ? (canManageSettings
-            ? "Owner must configure active Jazz Load Addition, Commission 1 Adjustment, and Commission 2 Payment rates before financial entry."
-            : "Jazz Load calculation settings are unavailable until the owner configures them.")
-        : isFutureJazzDay(monthId, selectedDay, now)
-          ? "Future Jazz Load days are disabled and cannot create records."
-          : currentMonth.status === "closed"
-            ? "This Jazz Load month is closed. Reopen it before editing."
-            : selectedDayRecord?.status === "closed" && !selectedDayCorrectionActive
-              ? `Day ${selectedDay} is closed. Reopen it to edit.`
-              : !validation.valid && canEditDaily
-                ? validation.errors[0] ?? ""
-                : "";
+          ? "Owner must configure active Jazz Load Addition, Commission 1 Adjustment, and Commission 2 Payment rates before financial entry."
+          : "No active rate.")
+        : saveState.reason
+          ? saveState.detail
+          : "";
 
   useEffect(() => {
     if (!warningMessage) {
@@ -644,24 +720,36 @@ export function JazzLoadModule({
     options: {
       silent?: boolean;
       nextDrafts?: JazzLoadDoEntryDraft[];
+      source?: "autosave" | "manual-save";
+      throwOnError?: boolean;
     } = {}
   ) {
-    if (selectedDayFuture) {
-      if (!options.silent) pushPopup("warning", "Future Jazz Load days are disabled and cannot create records.");
-      return;
-    }
-    if (!roleCanJazzLoad(role, "daily")) {
-      if (!options.silent) pushPopup("error", "Your role can view Jazz Load but cannot save daily entries.");
-      return;
-    }
-    if (role === "admin" && !selectedDayLive) {
-      if (!options.silent) pushPopup("error", "Admins can only edit the current running day.");
-      return;
-    }
     const currentDrafts = options.nextDrafts ?? drafts;
     const workingValidation = validateJazzLoadDrafts(currentDrafts, activeRates);
-    if (!workingValidation.valid) {
-      if (!options.silent) pushPopup("error", workingValidation.errors[0] ?? "Fix Jazz Load validation errors before saving.");
+    const workingSaveState = getJazzLoadSaveState({
+      role,
+      canWriteDaily,
+      selectedDayFuture,
+      selectedDayLive,
+      monthClosed: currentMonth?.status === "closed",
+      dayClosed: selectedDayClosed,
+      hasDrafts: currentDrafts.length > 0,
+      activeRates,
+      validation: workingValidation
+    });
+    if (!workingSaveState.canSave) {
+      debugJazzLoadSaveBlock({
+        source: options.source ?? "save-guard",
+        reason: workingSaveState.reason ?? "Invalid input",
+        detail: workingSaveState.detail,
+        role,
+        monthId,
+        dayNo: selectedDay,
+        selectedDayLive,
+        selectedDayFuture
+      });
+      if (!options.silent) pushPopup(workingSaveState.reason === "Day closed" || workingSaveState.reason === "Selected date is future" ? "warning" : "error", workingSaveState.detail);
+      if (options.throwOnError) throw new Error(workingSaveState.detail);
       return;
     }
     const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
@@ -703,12 +791,34 @@ export function JazzLoadModule({
       reopenedUntilAt: nextStatus === "open" ? selectedDayRecord?.reopenedUntilAt : undefined
     };
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), day].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(
-      saveJazzLoadDay(month, day, days, user, role, status === "closed" ? "close-day" : "save-day"),
-      "Could not queue Jazz Load day save."
-    );
-    if (!options.silent) {
-      pushPopup("success", status === "closed" ? `Closed Jazz Load day ${selectedDay} locally.` : `Saved Jazz Load day ${selectedDay} locally.`);
+    const write = saveJazzLoadDay(month, day, days, user, role, status === "closed" ? "close-day" : "save-day")
+      .catch((err) => {
+        const message = normalizeSaveError(err);
+        if (message === "Permission denied") {
+          debugJazzLoadSaveBlock({
+            source: options.source ?? "save-guard",
+            reason: "Permission denied",
+            detail: message,
+            role,
+            monthId,
+            dayNo: selectedDay,
+            selectedDayLive,
+            selectedDayFuture
+          });
+        }
+        throw new Error(message);
+      });
+    onQueueWrite(write, "Could not queue Jazz Load day save.");
+    try {
+      await write;
+      lastSavedRef.current = autosaveSignature;
+      if (!options.silent) {
+        pushPopup("success", status === "closed" ? `Closed Jazz Load day ${selectedDay} locally.` : `Saved Jazz Load day ${selectedDay} locally.`);
+      }
+    } catch (err) {
+      const message = normalizeSaveError(err);
+      if (!options.silent) pushPopup("error", message);
+      if (options.throwOnError) throw new Error(message);
     }
   }
 
@@ -719,18 +829,36 @@ export function JazzLoadModule({
       return;
     }
     if (!window.confirm(`Reopen Jazz Load day ${selectedDay}?`)) return;
-    const reopened = {
+    const timestamp = Date.now();
+    const reopened = selectedDayLive ? {
+      ...selectedDayRecord,
+      status: "open" as const,
+      closedAt: undefined,
+      closedBy: undefined,
+      reopenedAt: timestamp,
+      reopenedBy: user.uid,
+      reopenedUntilAt: undefined,
+      updatedBy: user.uid,
+      updatedAt: timestamp
+    } : {
       ...selectedDayRecord,
       status: "closed" as const,
-      reopenedAt: Date.now(),
+      reopenedAt: timestamp,
       reopenedBy: user.uid,
-      reopenedUntilAt: Date.now() + 15 * 60 * 1000
+      reopenedUntilAt: timestamp + 15 * 60 * 1000,
+      updatedBy: user.uid,
+      updatedAt: timestamp
     };
     const month = currentMonth;
     if (!month) return;
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), reopened].sort((a, b) => a.dayNo - b.dayNo));
     onQueueWrite(saveJazzLoadDay(month, reopened, days, user, role, "reopen-day"), "Could not queue Jazz Load day reopen.");
-    pushPopup("success", `Jazz Load day ${selectedDay} opened for a 15-minute correction window.`);
+    pushPopup(
+      "success",
+      selectedDayLive
+        ? `Jazz Load day ${selectedDay} reopened until you close it again.`
+        : `Jazz Load day ${selectedDay} opened for a 15-minute correction window.`
+    );
   }
 
   async function reopenMonthDays(scope: "selected" | "all") {
@@ -857,7 +985,7 @@ export function JazzLoadModule({
       disabledReason: "Only owner can run Jazz Load master refresh on an open month with saved days.",
       run: async () => {
         const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
-        const result = await recalculateJazzLoadMonth(month, days, activeRates, user, role);
+        const result = await recalculateJazzLoadMonth(month, days, activeRates, user, role, { previousMonthDays });
         setDays(result.days);
         setSummary(result.summary);
         return {
@@ -1045,7 +1173,7 @@ export function JazzLoadModule({
     }]);
     onQueueWrite(upsertJazzLoadDoAssignment(assignment, user, role), "Could not queue DO assignment.");
     const nextDrafts = drafts.map((draft) => {
-      if (draft.id === line.id) {
+      if (draft.doLineId === line.id || draft.id === line.id || draft.id === `${selectedDate}-${line.id}`) {
         return {
           ...draft,
           doNameId: name.id,
@@ -1055,7 +1183,7 @@ export function JazzLoadModule({
       return draft;
     });
     setDrafts(nextDrafts);
-    void saveDay("open", { silent: true, nextDrafts });
+    void saveDay("open", { silent: true, nextDrafts, source: "autosave" });
     pushPopup("success", `Assigned ${name.name} to line ${line.line} for ${selectedDate}.`);
   }
 
@@ -1074,18 +1202,58 @@ export function JazzLoadModule({
     [dayNotes, drafts, liftingOpening, mlLifting, monthId, selectedDay, selectedDayRecord?.reopenedUntilAt, selectedDayRecord?.status]
   );
 
-  const { autoSaveStatus } = useAutoSaveEntry({
+  useEffect(() => {
+    if (!saveState.reason) return;
+    debugJazzLoadSaveBlock({
+      source: "autosave",
+      reason: saveState.reason,
+      detail: saveState.detail,
+      role,
+      monthId,
+      dayNo: selectedDay,
+      selectedDayLive,
+      selectedDayFuture
+    });
+  }, [monthId, role, saveState.detail, saveState.reason, selectedDay, selectedDayFuture, selectedDayLive]);
+
+  const { autoSaveStatus, autoSaveError } = useAutoSaveEntry({
     data: autosaveSignature,
     enabled: true,
-    disabled: !canEditDaily || selectedDayFuture || drafts.length === 0 || !activeRates.mlRate || !activeRates.commission1Rate || !activeRates.commission2Rate,
+    disabled: saveState.reason === "Day closed" ||
+      saveState.reason === "Read-only role" ||
+      saveState.reason === "Selected date is future",
     debounceMs: 900,
     resetKey: `${monthId}-${selectedDay}-${selectedDayRecord?.updatedAt ?? ""}`,
-    validate: () => validation.valid || validation.errors,
+    validate: () => saveState.canSave || [saveState.detail],
+    validationKey: saveState.canSave ? "can-save" : saveState.detail,
+    savedStatus: "saved",
     save: async () => {
-      await saveDay("open", { silent: true });
-      lastSavedRef.current = autosaveSignature;
+      await saveDay("open", { silent: true, source: "autosave", throwOnError: true });
     }
   });
+  const manualSaveState = getJazzLoadSaveState({
+    role,
+    canWriteDaily,
+    selectedDayFuture,
+    selectedDayLive,
+    monthClosed: currentMonth?.status === "closed",
+    dayClosed: selectedDayClosed,
+    hasDrafts: drafts.length > 0,
+    activeRates,
+    validation,
+    saving: autoSaveStatus === "saving" || loading
+  });
+  const manualSaveDisabled = !manualSaveState.canSave;
+  const manualSaveDisabledReason = manualSaveState.detail || "Save unavailable.";
+  const autoSaveChipText = saveState.reason
+    ? `Autosave blocked: ${saveState.detail}`
+    : autoSaveStatus === "saving"
+      ? "Autosaving..."
+      : autoSaveStatus === "error"
+        ? `Autosave failed${autoSaveError ? `: ${autoSaveError}` : ""}`
+        : autoSaveStatus === "typing" || autoSaveStatus === "unsaved"
+          ? "Unsaved"
+          : "Saved";
 
   const sidebarDayControls = useMemo(() => (
     <>
@@ -1111,12 +1279,16 @@ export function JazzLoadModule({
         autoSaveStatus={autoSaveStatus}
         permissions={{
           canCloseSelectedDay: canEditDaily && validation.valid,
-          canReopenSelectedDay: role === "owner" && !selectedDayFuture && currentMonth?.status !== "closed",
+          canReopenSelectedDay:
+            Boolean(selectedDayRecord && selectedDayRecord.status === "closed") &&
+            !selectedDayFuture &&
+            currentMonth?.status !== "closed" &&
+            (role === "owner" || (role === "admin" && selectedDayLive)),
           canReopenAllDays: role === "owner" && currentMonth?.status !== "closed" && availableJazzLoadDayNumbers(monthId, now).length > 1,
           canClosePreviousDaysExceptToday: role === "owner" && currentMonth?.status !== "closed" && availableJazzLoadDayNumbers(monthId, now).length > 1,
           canRunMasterRefresh: role === "owner" && days.length > 0 && currentMonth?.status !== "closed",
           closeDisabledReason: "This Jazz Load day cannot be closed for the current role/status.",
-          reopenDisabledReason: "Only owner can reopen Jazz Load days.",
+          reopenDisabledReason: "Owner can reopen any Jazz Load day. Admin can reopen the current day only.",
           reopenAllDisabledReason: "Only owner can reopen all Jazz Load days.",
           closePreviousDisabledReason: "Only owner can close previous Jazz Load days.",
           masterRefreshDisabledReason: "Only owner can run master refresh and the month must be open."
@@ -1133,8 +1305,9 @@ export function JazzLoadModule({
           <>
             <button
               className="btn-primary !h-9 w-full !justify-start !px-2 text-xs"
-              disabled={!canEditDaily || !validation.valid || loading}
-              onClick={() => void saveDay("open")}
+              disabled={manualSaveDisabled}
+              title={manualSaveDisabled ? manualSaveDisabledReason : "Save Jazz Load day"}
+              onClick={() => void saveDay("open", { source: "manual-save" })}
             >
               <Save />
               Save
@@ -1160,6 +1333,9 @@ export function JazzLoadModule({
     days.length,
     jazzCalendarDays,
     loading,
+    masterRefreshCalculations,
+    manualSaveDisabled,
+    manualSaveDisabledReason,
     monthId,
     now,
     recalculating,
@@ -1200,6 +1376,16 @@ export function JazzLoadModule({
           </div>
         </div>
       )}
+      {carryForwardWarnings.length > 0 && (role === "owner" || role === "admin") && (
+        <div className="warning">
+          <p>{carryForwardWarnings.length} Jazz Load month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
+          <ul className="mt-2 list-disc pl-5 text-sm">
+            {carryForwardWarnings.slice(0, 5).map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-300">Separate Module</p>
@@ -1218,12 +1404,18 @@ export function JazzLoadModule({
             { id: "daily", label: "Daily Entry", icon: Save, show: true },
             { id: "dashboard", label: "Dashboard", icon: BarChart3, show: true },
             { id: "reports", label: "Reports", icon: FileSpreadsheet, show: true },
-            { id: "settings", label: "Settings", icon: Settings, show: canManageSettings },
-            { id: "backup", label: "Backup", icon: FileDown, show: canBackup }
-          ] as Array<{ id: JazzLoadSection; label: string; icon: typeof BarChart3; show: boolean }>
+            { id: "settings", label: "Settings", icon: Settings, show: true, disabled: !canManageSettings, disabledReason: "Only owner can manage Jazz Load Settings." },
+            { id: "backup", label: "Backup", icon: FileDown, show: true, disabled: !canBackup, disabledReason: "Only owner can use Jazz Load backup." }
+          ] as Array<{ id: JazzLoadSection; label: string; icon: typeof BarChart3; show: boolean; disabled?: boolean; disabledReason?: string }>
         ).map(({ id, label, icon: Icon, show }) =>
           show ? (
-            <button key={id} className={section === id ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => setSection(id)}>
+            <button
+              key={id}
+              className={`${section === id ? "btn-tab btn-tab-active" : "btn-tab"}`}
+              disabled={id === "settings" ? !canManageSettings : id === "backup" ? !canBackup : false}
+              title={id === "settings" && !canManageSettings ? "Only owner can manage Jazz Load Settings." : id === "backup" && !canBackup ? "Only owner can use Jazz Load backup." : label}
+              onClick={() => setSection(id)}
+            >
               <Icon />
               {label}
             </button>
@@ -1263,8 +1455,8 @@ export function JazzLoadModule({
                 <p>Open a date from the calendar. Future days are disabled and do not create records.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="btn-chip">
-                  {autoSaveStatus === "saving" ? "Autosaving..." : autoSaveStatus === "error" ? "Autosave failed" : "Autosave on"}
+                <span className="btn-chip" title={saveState.reason ? saveState.detail : autoSaveError || undefined}>
+                  {autoSaveChipText}
                 </span>
               </div>
             </div>
@@ -1351,8 +1543,8 @@ export function JazzLoadModule({
                         </td>
                         <td>
                           <NumberInput
-                            value={selectedDay === 1 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0}
-                            disabled={!canEditDaily || selectedDay !== 1}
+                            value={selectedDay === 1 && previousMonthDays.length === 0 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0}
+                            disabled={!canEditDaily || selectedDay !== 1 || previousMonthDays.length > 0}
                             onChange={(value) => setDraft(index, { openingBase: value })}
                           />
                         </td>
@@ -1565,7 +1757,7 @@ export function JazzLoadModule({
         </section>
       )}
 
-      {section === "settings" && (
+      {section === "settings" && canManageSettings && (
         <section className="panel mt-4">
           <div className="panel-title">
             <div>
@@ -1663,21 +1855,28 @@ export function JazzLoadModule({
       )}
 
       {section === "backup" && (
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h3>Jazz Load Backup / Export</h3>
-              <p>Backup stores Jazz Load in its own JSON group, separate from normal expenses.</p>
+        canBackup ? (
+          <section className="panel">
+            <div className="panel-title">
+              <div>
+                <h3>Jazz Load Backup / Export</h3>
+                <p>Backup stores Jazz Load in its own JSON group, separate from normal expenses.</p>
+              </div>
             </div>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button className="btn-secondary" disabled={!canBackup || loading} onClick={onExportBackup}><FileDown /> Export Full Backup</button>
-            <label className={`file-button ${!canBackup || loading ? "pointer-events-none opacity-50" : ""}`}>
-              Import Full Backup
-              <input type="file" accept=".json" disabled={!canBackup || loading} onChange={(event) => onImportBackup(event.target.files?.[0] ?? null)} />
-            </label>
-          </div>
-        </section>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button className="btn-secondary" disabled={loading} onClick={onExportBackup}><FileDown /> Export Full Backup</button>
+              <label className={`file-button ${loading ? "pointer-events-none opacity-50" : ""}`}>
+                Import Full Backup
+                <input type="file" accept=".json" disabled={loading} onChange={(event) => onImportBackup(event.target.files?.[0] ?? null)} />
+              </label>
+            </div>
+          </section>
+        ) : (
+          <section className="panel">
+            <h3>Jazz Load Backup / Export</h3>
+            <p className="warning mt-4">Owner only.</p>
+          </section>
+        )
       )}
     </section>
   );

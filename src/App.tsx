@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
   signOut,
@@ -20,7 +21,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Bell,
-  Save,
   Shield,
   Sun,
   Tags,
@@ -35,6 +35,7 @@ import type {
   AuthorizedEmail,
   CatalogItem,
   DailyLedgerInput,
+  ExpenseCarryForwardSeed,
   MonthComputed,
   MonthRecord,
   NotificationSettings,
@@ -43,7 +44,7 @@ import type {
   WorkbookImportPreview
 } from "./types/ledger";
 import type { JazzLoadMonth } from "./modules/jazzLoad/types/jazzLoad.types";
-import { computeMonth } from "./lib/formulaEngine";
+import { computeMonth, resolveCreditClosingBalance } from "./lib/formulaEngine";
 import {
   exportDailyPdf,
   exportDailyXlsx,
@@ -65,6 +66,7 @@ import { MasterCalculationRefreshModal } from "./shared/dayControls/MasterCalcul
 import { UniversalDayControlBar } from "./shared/dayControls/UniversalDayControlBar";
 import { runMasterRecalculation } from "./shared/services/masterRecalculationService";
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot, UniversalDayStatus } from "./shared/types/dayControl.types";
+import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
 import { listJazzLoadBackup, restoreJazzLoadBackup, roleCanJazzLoad, setJazzLoadMonthStatus, subscribeJazzLoadMonths } from "./modules/jazzLoad/services/jazzLoadFirestore";
 import {
@@ -83,6 +85,7 @@ import {
   reopenMonthDaysFor15Minutes,
   reopenPreviousDayFor15Minutes,
   recalculateMonth,
+  resolveExpenseCarryForwardSeed,
   resolveOpeningBalance,
   resolveOwnerOpeningBalance,
   roleCan,
@@ -97,6 +100,8 @@ import {
   writeExpenseBackupRestoreAudit,
   subscribeAuthorizedEmails,
   subscribeCatalogItems,
+  subscribeLedgerMismatchReports,
+  subscribeLedgerReadModeConfig,
   subscribeMonthDays,
   subscribeMonthRecord,
   subscribeMonths,
@@ -109,6 +114,14 @@ import {
 
 type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
 type ExpenseSection = "daily-entry" | "previous-records" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
+
+const ownerOnlyViews = new Set<View>(["users", "import", "backup", "audit-logs"]);
+const ownerOnlyExpenseSections = new Set<ExpenseSection>(["expense-categories", "credit-parties", "commission-categories"]);
+
+function canAccessView(role: UserRole | null, view: View) {
+  if (!role) return false;
+  return role === "owner" || !ownerOnlyViews.has(view);
+}
 
 type BackupPackage = {
   exportedAt: number;
@@ -127,6 +140,66 @@ function emptyDay(dayNo: number): DailyLedgerInput {
     credits: [],
     ownerBalances: []
   };
+}
+
+function creditSeedKey(row: { partyId?: string; partyName: string }) {
+  return row.partyId ? `id:${row.partyId}` : `name:${row.partyName.trim().toLowerCase()}`;
+}
+
+function previousDayFromExpenseSeed(seed: ExpenseCarryForwardSeed | null): DailyLedgerInput | undefined {
+  if (!seed || seed.creditBalances.length === 0) return undefined;
+  return {
+    ...emptyDay(seed.sourceDayNo),
+    label: `${seed.sourceMonthId} final`,
+    credits: seed.creditBalances.map((row) => ({
+      id: `${seed.sourceMonthId}-${seed.sourceDayNo}-${creditSeedKey(row).replace(/[^a-z0-9-]+/gi, "-")}`,
+      partyId: row.partyId,
+      partyName: row.partyName,
+      opening: row.balance,
+      loan: 0,
+      today: 0,
+      receive: 0,
+      balance: row.balance
+    }))
+  };
+}
+
+function expenseCarryForwardWarnings(
+  month: MonthRecord | undefined,
+  days: DailyLedgerInput[],
+  seed: ExpenseCarryForwardSeed | null
+) {
+  if (!month || !seed) return [];
+  const warnings: string[] = [];
+  if (month.openingBalance !== seed.openingBalance) {
+    warnings.push(`cash opening ${month.openingBalance.toLocaleString()} should equal ${seed.sourceMonthId} closing ${seed.openingBalance.toLocaleString()}`);
+  }
+  if ((month.ownerOpeningBalance ?? 0) !== seed.ownerOpeningBalance) {
+    warnings.push(`owner opening ${(month.ownerOpeningBalance ?? 0).toLocaleString()} should equal ${seed.sourceMonthId} owner closing ${seed.ownerOpeningBalance.toLocaleString()}`);
+  }
+  const day1 = days.find((day) => day.dayNo === 1);
+  if (!day1) return warnings;
+
+  const expectedCredits = new Map(seed.creditBalances.map((row) => [creditSeedKey(row), row]));
+  for (const row of day1.credits) {
+    const expected = expectedCredits.get(creditSeedKey(row));
+    if (!expected) continue;
+    const actual = Number(row.opening ?? 0);
+    if (actual !== expected.balance) {
+      warnings.push(`${row.partyName} credit opening ${actual.toLocaleString()} should equal ${seed.sourceMonthId} closing ${expected.balance.toLocaleString()}`);
+    }
+  }
+  const existingCreditKeys = new Set(day1.credits.map(creditSeedKey));
+  for (const row of seed.creditBalances) {
+    if (row.balance !== 0 && !existingCreditKeys.has(creditSeedKey(row))) {
+      warnings.push(`${row.partyName} credit opening is missing; expected ${row.balance.toLocaleString()} from ${seed.sourceMonthId}`);
+    }
+  }
+  const firstOwner = day1.ownerBalances.find((row) => (row.amount ?? 0) !== 0 || (row.expense ?? 0) !== 0 || (row.received ?? 0) !== 0);
+  if (firstOwner && (firstOwner.opening ?? seed.ownerOpeningBalance) !== seed.ownerOpeningBalance) {
+    warnings.push(`Day 1 owner opening ${(firstOwner.opening ?? 0).toLocaleString()} should equal ${seed.sourceMonthId} owner closing ${seed.ownerOpeningBalance.toLocaleString()}`);
+  }
+  return warnings;
 }
 
 type SaveDayOptions = {
@@ -198,6 +271,19 @@ function LoadingPopup({ message }: { message: string }) {
           <div className="loading-bar h-full rounded-full bg-emerald-400" />
         </div>
       </div>
+    </div>
+  );
+}
+
+function TopActivityProgress({ active, label }: { active: boolean; label: string }) {
+  if (!active) return null;
+  return (
+    <div
+      className="fixed left-0 right-0 top-0 z-[80] h-1 overflow-hidden bg-slate-950/30 backdrop-blur-[1px]"
+      role="progressbar"
+      aria-label={label || "Loading"}
+    >
+      <div className="loading-bar h-full rounded-full bg-emerald-400 shadow-[0_0_16px_rgba(52,211,153,0.65)]" />
     </div>
   );
 }
@@ -965,6 +1051,62 @@ function currency(value: number) {
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+function LedgerShadowStatusPanel({
+  config,
+  role
+}: {
+  config: LedgerReadModeConfig;
+  role: UserRole;
+}) {
+  const metrics = config.shadowMetrics;
+  const before = metrics?.day30DuplicateCreditRawEntriesBefore ?? 0;
+  const after = metrics?.day30DuplicateCreditRawEntriesAfter ?? 0;
+  const updatedAt = config.updatedAt ? new Date(config.updatedAt).toLocaleString() : null;
+
+  return (
+    <section className="mb-4 rounded-xl border border-sky-400/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-50">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-wide text-sky-200">Expense v2 Shadow</p>
+          <h2 className="mt-1 text-base font-semibold text-white">
+            {formatMonth(config.monthId ?? "2026-05")} shadow verification is active
+          </h2>
+          <p className="mt-1 text-xs text-sky-100/80">
+            UI source of truth remains v1. Hard v2 reads are disabled for {role}.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs font-semibold">
+          <span className="rounded-lg border border-sky-300/30 bg-sky-950/40 px-2.5 py-1">{config.status ?? "shadow_verified"}</span>
+          <span className="rounded-lg border border-sky-300/30 bg-sky-950/40 px-2.5 py-1">hard v2 off</span>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+        <div className="rounded-lg border border-sky-300/20 bg-slate-950/30 px-3 py-2">
+          <p className="text-xs text-sky-100/70">v1 vs v2 diffs</p>
+          <p className="text-lg font-semibold text-white">{currency(metrics?.v1VsV2Diffs ?? 0)}</p>
+        </div>
+        <div className="rounded-lg border border-sky-300/20 bg-slate-950/30 px-3 py-2">
+          <p className="text-xs text-sky-100/70">stored vs recomputed</p>
+          <p className="text-lg font-semibold text-white">{currency(metrics?.storedV2VsRecomputedV2Diffs ?? 0)}</p>
+        </div>
+        <div className="rounded-lg border border-sky-300/20 bg-slate-950/30 px-3 py-2">
+          <p className="text-xs text-sky-100/70">Day 30 credit raw</p>
+          <p className="text-lg font-semibold text-white">{currency(before)} to {currency(after)}</p>
+        </div>
+        <div className="rounded-lg border border-sky-300/20 bg-slate-950/30 px-3 py-2">
+          <p className="text-xs text-sky-100/70">invariant failures</p>
+          <p className="text-lg font-semibold text-white">{currency(metrics?.invariantFailures ?? 0)}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-col gap-1 text-xs text-sky-100/75 md:flex-row md:flex-wrap md:gap-x-4">
+        <span>Apply report: {config.verifiedReportId ?? "not set"}</span>
+        <span>Shadow report: {config.shadowReportId ?? "not set"}</span>
+        {updatedAt && <span>Updated: {updatedAt}</span>}
+      </div>
+    </section>
+  );
+}
+
 function RecordsView({
   monthId,
   selectedDay,
@@ -1273,20 +1415,63 @@ function FirebaseMissing() {
 function AuthPanel({
   message,
   busy,
+  onEmailSubmit,
   onGoogleSubmit
 }: {
   message: string;
   busy: boolean;
+  onEmailSubmit: (email: string, password: string) => Promise<void>;
   onGoogleSubmit: () => Promise<void>;
 }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  function handleEmailFormSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void onEmailSubmit(email, password);
+  }
+
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">
       <section className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/40">
         <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
         <p className="mt-4 text-sm text-slate-400">
-          Sign in with an authorized Google account.
+          Sign in with an authorized account.
         </p>
+        <form className="mt-5 space-y-3" onSubmit={handleEmailFormSubmit}>
+          <label className="block text-sm text-slate-300">
+            Email
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+              type="email"
+              autoComplete="email"
+              value={email}
+              disabled={busy}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+          </label>
+          <label className="block text-sm text-slate-300">
+            Password
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              disabled={busy}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <button className="btn-primary !w-full" disabled={busy || !email.trim() || !password} type="submit">
+            {busy && <LoadingIcon label="Signing in" />}
+            Sign in
+          </button>
+        </form>
+        <div className="my-5 flex items-center gap-3 text-xs uppercase text-slate-500">
+          <span className="h-px flex-1 bg-slate-800" />
+          Google
+          <span className="h-px flex-1 bg-slate-800" />
+        </div>
         <button className="btn-primary mt-5 !w-full" disabled={busy} onClick={() => void onGoogleSubmit()}>
           {busy && <LoadingIcon label="Signing in with Google" />}
           Continue with Google
@@ -1318,6 +1503,7 @@ function App() {
   const [jazzLoadMonths, setJazzLoadMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
+  const [expenseCarryForwardSeed, setExpenseCarryForwardSeed] = useState<ExpenseCarryForwardSeed | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
   const [importMonthId, setImportMonthId] = useState(initialDate.monthId);
   const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
@@ -1325,6 +1511,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("Loading application data...");
   const [isAutosaving, setIsAutosaving] = useState(false);
+  const [pageActivityLoading, setPageActivityLoading] = useState(false);
   const [monthEmailing, setMonthEmailing] = useState(false);
   const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
   const [bulkClosingDays, setBulkClosingDays] = useState(false);
@@ -1335,6 +1522,8 @@ function App() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [authorizedEmails, setAuthorizedEmails] = useState<AuthorizedEmail[]>([]);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
+  const [ledgerReadModeConfig, setLedgerReadModeConfig] = useState<LedgerReadModeConfig>(defaultLedgerReadModeConfig);
+  const [expenseMismatchCount, setExpenseMismatchCount] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
@@ -1342,7 +1531,6 @@ function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
-  const [expenseManualSave, setExpenseManualSave] = useState<(() => Promise<boolean>) | null>(null);
   const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
   const [pwaNotice, setPwaNotice] = useState<PwaNotice>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1356,10 +1544,6 @@ function App() {
   const pendingWritesRef = useRef(false);
   const syncErrorRef = useRef(false);
   const queuedWriteCountRef = useRef(0);
-
-  const handleExpenseManualSaveReady = useCallback((save: (() => Promise<boolean>) | null) => {
-    setExpenseManualSave(() => save);
-  }, []);
 
   function confirmLeavePendingChanges() {
     return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
@@ -1513,6 +1697,20 @@ function App() {
     }
   }
 
+  async function handleEmailAuth(email: string, password: string) {
+    const firebaseAuth = auth;
+    if (!firebaseAuth) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+    } catch (err) {
+      setAuthMessage(err instanceof Error ? err.message : "Could not sign in with email and password.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function refreshMonthList() {
     const records = await listMonths();
     setMonths(records);
@@ -1558,6 +1756,38 @@ function App() {
     );
     return unsubscribe;
   }, [user, role]);
+
+  useEffect(() => {
+    if (!user || (role !== "owner" && role !== "admin")) {
+      setExpenseMismatchCount(0);
+      return;
+    }
+    const unsubscribe = subscribeLedgerMismatchReports(
+      "expense",
+      monthId,
+      (reports, metadata) => {
+        setExpenseMismatchCount(reports.reduce((total, report) => total + report.issueCount, 0));
+        applySnapshotMetadata(metadata);
+      },
+      (err) => handleFirestoreError(err.message)
+    );
+    return unsubscribe;
+  }, [monthId, role, user]);
+
+  useEffect(() => {
+    if (!user || !role) {
+      setLedgerReadModeConfig(defaultLedgerReadModeConfig);
+      return;
+    }
+    const unsubscribe = subscribeLedgerReadModeConfig(
+      (config, metadata) => {
+        setLedgerReadModeConfig(config);
+        applySnapshotMetadata(metadata);
+      },
+      (err) => handleFirestoreError(err.message)
+    );
+    return unsubscribe;
+  }, [role, user]);
 
   useEffect(() => {
     if (!user || !role) return;
@@ -1637,7 +1867,7 @@ function App() {
                 setOwnerOpeningBalance(created.ownerOpeningBalance ?? resolvedOwnerOpening);
                 setMonthStatusState(created.status);
                 setDays([]);
-                setComputed(computeMonth([], created.openingBalance, created.id, created.ownerOpeningBalance ?? resolvedOwnerOpening));
+                setComputed(computeMonth([], created.openingBalance, created.id, created.ownerOpeningBalance ?? resolvedOwnerOpening, expenseCarryForwardSeed ?? undefined));
                 handleQueuedWrite(saveMonthRecord(created, []), `Could not create ${formatMonth(monthId)}.`);
                 setStatus(`Created ${formatMonth(monthId)} locally. Firestore will sync when online.`);
               })
@@ -1693,8 +1923,30 @@ function App() {
   }, [monthId, role, user]);
 
   useEffect(() => {
-    setComputed(computeMonth(days, openingBalance, monthId, ownerOpeningBalance));
-  }, [days, monthId, openingBalance, ownerOpeningBalance]);
+    if (!user || !role) {
+      setExpenseCarryForwardSeed(null);
+      return;
+    }
+    let cancelled = false;
+    setExpenseCarryForwardSeed(null);
+    void resolveExpenseCarryForwardSeed(monthId)
+      .then((seed) => {
+        if (!cancelled) setExpenseCarryForwardSeed(seed);
+      })
+      .catch(() => {
+        if (!cancelled) setExpenseCarryForwardSeed(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [monthId, role, user]);
+
+  const calculatedOpeningBalance = expenseCarryForwardSeed?.openingBalance ?? openingBalance;
+  const calculatedOwnerOpeningBalance = expenseCarryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
+
+  useEffect(() => {
+    setComputed(computeMonth(days, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined));
+  }, [calculatedOpeningBalance, calculatedOwnerOpeningBalance, days, expenseCarryForwardSeed, monthId]);
 
   const selectedDayInput = useMemo(
     () => days.find((day) => day.dayNo === selectedDay) ?? emptyDay(selectedDay),
@@ -1703,16 +1955,18 @@ function App() {
 
   const previousDayInput = useMemo(
     () =>
-      [...days]
+      selectedDay === 1
+        ? previousDayFromExpenseSeed(expenseCarryForwardSeed)
+        : [...days]
         .filter((day) => day.dayNo < selectedDay && day.dayNo !== 32 && day.credits.length > 0)
         .sort((a, b) => b.dayNo - a.dayNo)[0],
-    [days, selectedDay]
+    [days, expenseCarryForwardSeed, selectedDay]
   );
 
   const selectedOpening = useMemo(() => {
     const previous = computed?.days.find((day) => day.dayNo === selectedDay - 1);
-    return selectedDay === 1 ? openingBalance : previous?.returnBalance ?? openingBalance;
-  }, [computed?.days, openingBalance, selectedDay]);
+    return selectedDay === 1 ? calculatedOpeningBalance : previous?.returnBalance ?? calculatedOpeningBalance;
+  }, [calculatedOpeningBalance, computed?.days, selectedDay]);
 
   useEffect(() => {
     const nextDay = clampSelectedDay(selectedDay, monthId, now);
@@ -1739,7 +1993,7 @@ function App() {
   function currentMonthRecord(): MonthRecord {
     return (
       months.find((month) => month.id === monthId) ??
-      createMonth(monthId, openingBalance, ownerOpeningBalance)
+      createMonth(monthId, calculatedOpeningBalance, calculatedOwnerOpeningBalance)
     );
   }
 
@@ -1755,7 +2009,7 @@ function App() {
       throw new Error(message);
     }
     const nextDays = replaceDay(days, day);
-    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setDays(nextDays);
     setComputed(nextComputed);
     handleQueuedWrite(
@@ -1785,7 +2039,7 @@ function App() {
       reopenedByRole: undefined
     };
     const nextDays = replaceDay(days, lockedDay);
-    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setDays(nextDays);
     setComputed(nextComputed);
     handleQueuedWrite(
@@ -1797,8 +2051,8 @@ function App() {
 
   async function sendDailyEmail(day: DailyLedgerInput) {
     if (!roleCan(role, "ownerControls")) {
-      setStatus("Email reports are restricted to owner or admin access.");
-      throw new Error("Email reports are restricted to owner or admin access.");
+      setStatus("Email reports are restricted to owner access.");
+      throw new Error("Email reports are restricted to owner access.");
     }
     setStatus(`Sending email report for ${day.label ?? `Day ${day.dayNo}`}...`);
     await sendManualActivityEmail(monthId, day.dayNo);
@@ -1807,7 +2061,7 @@ function App() {
 
   async function sendMonthEmail() {
     if (!roleCan(role, "ownerControls")) {
-      setStatus("Email reports are restricted to owner or admin access.");
+      setStatus("Email reports are restricted to owner access.");
       return;
     }
     setMonthEmailing(true);
@@ -1956,7 +2210,7 @@ function App() {
       return;
     }
     const nextDays = nextClosedDays.reduce((updatedDays, day) => replaceDay(updatedDays, day), days);
-    const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+    const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setBulkClosingDays(true);
     setDays(nextDays);
     setComputed(nextComputed);
@@ -1995,7 +2249,7 @@ function App() {
   async function commitImport() {
     if (!importPreview) return;
     if (!roleCan(role, "importBackup")) {
-      setStatus("Workbook import is restricted to owner or admin access.");
+      setStatus("Workbook import is restricted to owner access.");
       return;
     }
     setLoadingMessage(`Saving ${importPreview.fileName} to Firestore...`);
@@ -2019,31 +2273,63 @@ function App() {
   }
 
   async function recalc() {
-    if (role !== "owner") {
-      setStatus("Manual recalculation is restricted to owner access.");
+    if (!roleCan(role, "masterRefresh")) {
+      setStatus("Manual recalculation is restricted to owner/admin access.");
       return;
     }
     const adapter = createExpenseRecalculationAdapter({
       monthId,
-      canRun: role === "owner",
-      disabledReason: "Only owner can run Expense master refresh.",
+      canRun: roleCan(role, "masterRefresh"),
+      disabledReason: "Only owner/admin can run Expense master refresh.",
       run: async (emit) => {
+        emit({ step: "Resolving previous month final balances..." });
+        const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
+        const repairedOpeningBalance = carryForwardSeed?.openingBalance ?? openingBalance;
+        const repairedOwnerOpeningBalance = carryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
+        const repairedMonth = {
+          ...(months.find((month) => month.id === monthId) ?? createMonth(monthId, repairedOpeningBalance, repairedOwnerOpeningBalance)),
+          openingBalance: repairedOpeningBalance,
+          ownerOpeningBalance: repairedOwnerOpeningBalance
+        };
+        setExpenseCarryForwardSeed(carryForwardSeed);
+        setOpeningBalance(repairedOpeningBalance);
+        setOwnerOpeningBalance(repairedOwnerOpeningBalance);
         emit({ step: "Saving latest local month state..." });
         await saveMonthRecord(
-          months.find((month) => month.id === monthId) ?? createMonth(monthId, openingBalance, ownerOpeningBalance),
+          repairedMonth,
           days,
-          { onlyWriteEditableDays: true }
+          {
+            onlyWriteEditableDays: true,
+            carryForwardSeed,
+            debugSource: "master-refresh-save-latest",
+            debugPathMode: "client-save"
+          }
         );
         emit({ step: "Recalculating daily balances..." });
+        let usedLocalFallback = false;
         try {
           await recalculateMonth(monthId);
         } catch (err) {
           console.warn("Cloud recalculation failed/unavailable on Spark plan. Falling back to local client-side recalculation:", err);
           emit({ step: "Recalculating daily balances (local fallback)..." });
+          const fallbackComputed = computeMonth(days, repairedOpeningBalance, monthId, repairedOwnerOpeningBalance, carryForwardSeed ?? undefined);
+          const computedByDay = new Map(fallbackComputed.days.map((day) => [day.dayNo, day]));
+          const repairedDays = days.map((day) => {
+            const computedDay = computedByDay.get(day.dayNo);
+            return computedDay ? { ...day, credits: computedDay.creditRows, ownerBalances: computedDay.ownerBalances } : day;
+          });
+          await saveMonthRecord(repairedMonth, repairedDays, {
+            suppressPerDayAudit: true,
+            carryForwardSeed,
+            recalculationWrite: true,
+            debugSource: "master-refresh-local-fallback",
+            debugPathMode: "local-fallback"
+          });
+          usedLocalFallback = true;
         }
         emit({ step: "Loading recalculated records..." });
         const nextDays = await fetchMonthDays(monthId);
-        const nextComputed = computeMonth(nextDays, openingBalance, monthId, ownerOpeningBalance);
+        const nextComputed = computeMonth(nextDays, repairedOpeningBalance, monthId, repairedOwnerOpeningBalance, carryForwardSeed ?? undefined);
         setDays(nextDays);
         setComputed(nextComputed);
         await refreshMonthList();
@@ -2052,7 +2338,9 @@ function App() {
           daysChecked: nextDays.length,
           mismatchesCorrected: nextDays.length,
           monthlySummariesUpdated: 1,
-          message: "Day openings now follow the previous closing balance."
+          message: usedLocalFallback
+            ? "Day openings now follow the previous closing balance using local fallback repair."
+            : "Day openings now follow the previous closing balance."
         };
       }
     });
@@ -2141,7 +2429,7 @@ function App() {
 
   async function toggleClosed() {
     if (!roleCan(role, "ownerControls")) {
-      setStatus("Closing and reopening months is restricted to owner or admin access.");
+      setStatus("Closing and reopening months is restricted to owner access.");
       return;
     }
     const nextStatus = monthStatus === "open" ? "closed" : "open";
@@ -2185,7 +2473,7 @@ function App() {
 
   async function exportBackup() {
     if (!roleCan(role, "importBackup")) {
-      setStatus("Backup export is restricted to owner or admin access.");
+      setStatus("Backup export is restricted to owner access.");
       return;
     }
     setLoadingMessage("Preparing backup package...");
@@ -2212,7 +2500,7 @@ function App() {
   async function importBackup(file: File | null) {
     if (!file) return;
     if (!roleCan(role, "importBackup")) {
-      setStatus("Backup restore is restricted to owner or admin access.");
+      setStatus("Backup restore is restricted to owner access.");
       return;
     }
     setLoadingMessage(`Importing backup ${file.name}...`);
@@ -2236,11 +2524,18 @@ function App() {
     }
   }
 
-  const lockedExpenseSections: ExpenseSection[] = ["expense-categories", "credit-parties", "commission-categories"];
+  useEffect(() => {
+    if (!role) return;
+    if (!canAccessView(role, view)) {
+      setView("dashboard");
+      setStatus("Owner only. This section is restricted to owner access.");
+    }
+  }, [role, view]);
 
   useEffect(() => {
-    if (role === "admin" && lockedExpenseSections.includes(expenseSection)) {
+    if (role !== "owner" && ownerOnlyExpenseSections.has(expenseSection)) {
       setExpenseSection("daily-entry");
+      setStatus("Owner only. Expense settings are restricted to owner access.");
     }
   }, [expenseSection, role]);
 
@@ -2271,18 +2566,37 @@ function App() {
     });
   }, [days, monthId, now]);
   const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? (selectedDay === 32 ? "closed" : "missing");
+  const topActivityActive = loading || isAutosaving || syncState === "syncing" || pageActivityLoading || authBusy || !authReady;
+  const topActivityLabel = loading
+    ? loadingMessage
+    : isAutosaving
+      ? "Saving changes..."
+      : syncState === "syncing"
+        ? "Syncing changes..."
+        : pageActivityLoading
+          ? "Loading data..."
+          : authBusy || !authReady
+            ? "Checking access..."
+            : "";
 
   if (!isFirebaseConfigured) return <FirebaseMissing />;
   if (!authReady || !user || !role) {
     return (
-      <AuthPanel
-        message={authMessage || authStatus}
-        busy={authBusy || !authReady}
-        onGoogleSubmit={handleGoogleAuth}
-      />
+      <>
+        <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
+        <AuthPanel
+          message={authMessage || authStatus}
+          busy={authBusy || !authReady}
+          onEmailSubmit={handleEmailAuth}
+          onGoogleSubmit={handleGoogleAuth}
+        />
+      </>
     );
   }
 
+  const currentExpenseMonth = months.find((month) => month.id === monthId);
+  const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed);
+  const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
   const isClosed = monthStatus === "closed";
   const selectedDayLocked = isSelectedLiveDay ? false : !selectedDayReopenActive;
   const canEditDaily = roleCan(role, "daily") && !isClosed;
@@ -2326,6 +2640,18 @@ function App() {
   const accessLabel = roleLabel(role);
   const displayName = userDisplayName(user);
   const displayId = userSimpleId(user);
+  const v2ShadowModules = [
+    ledgerReadModeConfig.expenseReadMode === "v2-shadow" ? "Expense" : null,
+    ledgerReadModeConfig.jazzLoadReadMode === "v2-shadow" ? "Jazz Load" : null,
+    ledgerReadModeConfig.stockReadMode === "v2-shadow" ? "Stock" : null
+  ].filter((item): item is string => Boolean(item));
+  const shadowAllowedRoles = ledgerReadModeConfig.enabledForRoles ?? ["owner", "admin"];
+  const showExpenseV2ShadowPanel =
+    Boolean(role) &&
+    ledgerReadModeConfig.expenseReadMode === "v2-shadow" &&
+    ledgerReadModeConfig.hardV2Allowed !== true &&
+    shadowAllowedRoles.includes(role as UserRole) &&
+    (ledgerReadModeConfig.monthId ?? monthId) === monthId;
   const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[6rem_minmax(0,1fr)]";
   const monthChoices = Array.from(
     new Map([liveDate.monthId, monthId, ...months.map((month) => month.id)].map((id) => [id, months.find((month) => month.id === id)?.status ?? (id === liveDate.monthId ? "current" : "new")]))
@@ -2363,6 +2689,10 @@ function App() {
     catalog: "expenseCategories" | "creditParties" | "commissionCategories",
     item: CatalogItem
   ) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage Expense settings.");
+      return;
+    }
     handleQueuedWrite(upsertCatalogItem(catalog, { ...item, active: true }), `Could not queue ${item.name}.`);
     setStatus(`${item.name} saved locally. Firestore will sync automatically.`);
   }
@@ -2371,11 +2701,19 @@ function App() {
     catalog: "expenseCategories" | "creditParties" | "commissionCategories",
     itemId: string
   ) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage Expense settings.");
+      return;
+    }
     handleQueuedWrite(deleteCatalogItem(catalog, itemId), `Could not queue ${itemId} delete.`);
     setStatus(`${itemId} deleted locally. Firestore will sync automatically.`);
   }
 
   async function saveUserRole(uid: string, updates: Pick<UserProfile, "role" | "active">) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage users.");
+      return;
+    }
     handleQueuedWrite(
       Promise.all([
         updateUserProfile(uid, updates),
@@ -2387,6 +2725,10 @@ function App() {
   }
 
   async function removeUserProfile(profile: UserProfile) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage users.");
+      return;
+    }
     if (profile.uid === user?.uid) {
       setStatus("You cannot delete your own signed-in user profile.");
       return;
@@ -2402,6 +2744,10 @@ function App() {
   }
 
   async function saveAuthorizedEmail(email: string, nextRole: UserRole, active = true) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage authorized emails.");
+      return;
+    }
     handleQueuedWrite(
       Promise.all([
         upsertAuthorizedEmail(email, nextRole, active),
@@ -2413,6 +2759,10 @@ function App() {
   }
 
   async function removeAuthorizedEmail(entry: AuthorizedEmail) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage authorized emails.");
+      return;
+    }
     if (entry.id === emailKey(user?.email ?? "")) {
       setStatus("You cannot delete your own authorized email.");
       return;
@@ -2433,6 +2783,10 @@ function App() {
   }
 
   async function saveNotifications(settings: NotificationSettings) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage notification settings.");
+      return;
+    }
     handleQueuedWrite(saveNotificationSettings(settings), "Could not queue notification settings.");
     setNotificationSettings(settings);
     setStatus("Notification settings saved locally. Firestore will sync automatically.");
@@ -2477,18 +2831,28 @@ function App() {
         role={role}
         density="compact"
         busy={loading || bulkReopening !== null || bulkClosingDays}
-        autoSaveStatus={selectedDayLocked ? "closed" : hasPendingDayChanges ? "unsaved" : "saved"}
+        autoSaveStatus={
+          selectedDayLocked
+            ? "closed"
+            : syncState === "offline" || syncState === "syncing"
+              ? "pendingSync"
+              : hasPendingDayChanges
+                ? "typing"
+                : expenseMismatchCount + expenseOpeningMismatchCount > 0
+                  ? "pendingRecalculation"
+                  : "saved"
+        }
         permissions={{
           canCloseSelectedDay: expenseSection === "daily-entry" && canCloseSelectedDay && Boolean(user),
           canReopenSelectedDay: expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
           canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
           canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
-          canRunMasterRefresh: Boolean(user) && role === "owner",
+          canRunMasterRefresh: Boolean(user) && roleCan(role, "masterRefresh"),
           closeDisabledReason: selectedDayLocked ? "This day is already closed." : "This day cannot be closed for your role.",
           reopenDisabledReason: "Only owner can reopen previous days. Admin can reopen the current day only.",
           reopenAllDisabledReason: "Only owner can reopen all days.",
           closePreviousDisabledReason: "Only owner can close previous days.",
-          masterRefreshDisabledReason: "Only owner can run master refresh."
+          masterRefreshDisabledReason: "Only owner/admin can run master refresh."
         }}
         onCloseSelectedDay={() => {
           if (!window.confirm(`Close ${selectedDayInput.label ?? `Day ${selectedDay}`}?`)) return;
@@ -2506,14 +2870,6 @@ function App() {
         onRunMasterRefresh={recalc}
         extraActions={
           <>
-            <button
-              className="btn-primary !h-9 w-full !justify-start !px-2 text-xs"
-              disabled={expenseSection !== "daily-entry" || !expenseManualSave || loading}
-              onClick={() => void expenseManualSave?.()}
-            >
-              <Save />
-              Save
-            </button>
             <button
               className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
               disabled={!computed || !selectedDayComputed}
@@ -2548,11 +2904,7 @@ function App() {
     <SidebarDayControlsProvider>
     <main className={`min-h-screen ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
-      {isAutosaving && (
-        <div className="fixed left-0 right-0 top-0 z-[60] h-1 overflow-hidden bg-slate-950/20 backdrop-blur-[1px]">
-          <div className="loading-bar h-full rounded-full bg-emerald-400" />
-        </div>
-      )}
+      <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
       <MasterCalculationRefreshModal
         state={masterRefreshModal}
         onClose={() => setMasterRefreshModal({ open: false, title: "", progress: [] })}
@@ -2582,7 +2934,7 @@ function App() {
             </label>
             <label>
               Opening Balance
-              <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+              <input type="text" value={calculatedOpeningBalance.toLocaleString()} disabled readOnly />
             </label>
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2">
@@ -2685,7 +3037,7 @@ function App() {
                   </label>
                   {/* <label className="mt-3">
                     Opening Balance
-                    <input type="text" value={openingBalance.toLocaleString()} disabled readOnly />
+                    <input type="text" value={calculatedOpeningBalance.toLocaleString()} disabled readOnly />
                   </label> */}
                   <div className="mt-4 flex flex-col gap-2">
                     <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
@@ -2746,6 +3098,29 @@ function App() {
             </div>
           )}
           {showOfflineOwnerWarning && <p className="warning">Owner will see updates after this machine reconnects.</p>}
+          {expenseMismatchCount > 0 && (
+            <p className="warning">
+              {expenseMismatchCount} Expense balance mismatch{expenseMismatchCount === 1 ? "" : "es"} detected. Run Master Calculation Refresh before treating this month as final.
+            </p>
+          )}
+          {expenseOpeningMismatchCount > 0 && (role === "owner" || role === "admin") && (
+            <div className="warning">
+              <p>{expenseOpeningMismatchCount} Expense month-to-month opening mismatch{expenseOpeningMismatchCount === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair June openings from May final projections.</p>
+              <ul className="mt-2 list-disc pl-5 text-sm">
+                {expenseCarryForwardWarningList.slice(0, 5).map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {showExpenseV2ShadowPanel && role && (
+            <LedgerShadowStatusPanel config={ledgerReadModeConfig} role={role} />
+          )}
+          {!showExpenseV2ShadowPanel && (role === "owner" || role === "admin") && v2ShadowModules.length > 0 && (
+            <p className="warning">
+              ledgerV2 shadow read verification is active for {v2ShadowModules.join(", ")}. The UI is still reading v1 until the reviewed verification report enables cutover.
+            </p>
+          )}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
           {selectedDayLocked && (
             <p className="warning">
@@ -2836,8 +3211,8 @@ function App() {
                     entryMonth={selectedDateParts.entryMonth}
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
-                    ownerOpeningBalance={ownerOpeningBalance}
-                    previousOwnerClosingBalance={computed?.days.find((day) => day.dayNo === selectedDay - 1)?.ownerBalanceTotal ?? ownerOpeningBalance}
+                    ownerOpeningBalance={calculatedOwnerOpeningBalance}
+                    previousOwnerClosingBalance={computed?.days.find((day) => day.dayNo === selectedDay - 1)?.ownerBalanceTotal ?? calculatedOwnerOpeningBalance}
                     dateLabel={dateLabel}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
@@ -2859,7 +3234,6 @@ function App() {
                     canSendEmail={false}
                     onCreateCatalog={saveCatalog}
                     onPendingStateChange={setHasPendingDayChanges}
-                    onManualSaveReady={handleExpenseManualSaveReady}
                   />
                 </>
               )}
@@ -2940,7 +3314,7 @@ function App() {
             />
           )}
 
-          {view === "audit-logs" && role === "owner" && <AuditLogsView months={months} />}
+          {view === "audit-logs" && role === "owner" && <AuditLogsView months={months} onActivityChange={setPageActivityLoading} />}
 
           {view === "users" && (
             <UserManager

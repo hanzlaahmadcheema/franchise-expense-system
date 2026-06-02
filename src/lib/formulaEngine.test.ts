@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeMonth, resolveCreditClosingBalance } from "./formulaEngine";
+import { buildExpenseCarryForwardSeed, computeMonth, resolveCreditClosingBalance } from "./formulaEngine";
 
 describe("formulaEngine", () => {
   it("resolves credit closing balances from supported saved field shapes", () => {
@@ -273,5 +273,53 @@ describe("formulaEngine", () => {
     expect(month.days[0].returnBalance).toBe(1400);
     expect(month.days[0].creditRows[0].balance).toBe(65);
     expect(month.days[0].ownerBalances[0].balance).toBe(25);
+  });
+
+  it("seeds a new month from previous final calculated expense balances", () => {
+    const may = computeMonth(
+      [
+        {
+          dayNo: 31,
+          expenses: [{ id: "e1", name: "Expense", description: "Expense", amount: 500 }],
+          commissions: [{ id: "c1", category: "JazzLoad", amount: 2500 }],
+          credits: [{ id: "usman-may", partyId: "usman", partyName: "Usman", opening: 2000, loan: 9000, receive: 0 }],
+          ownerBalances: [{ id: "owner-may", description: "Cash", opening: 100, amount: 50 }]
+        }
+      ],
+      1000,
+      "2026-05",
+      100
+    );
+    const seed = buildExpenseCarryForwardSeed("2026-05", may);
+    const june = computeMonth(
+      [
+        {
+          dayNo: 1,
+          expenses: [],
+          commissions: [],
+          credits: [{ id: "usman-june", partyId: "usman", partyName: "Usman", opening: 0, loan: 0, receive: 1000 }],
+          ownerBalances: [{ id: "owner-june", description: "Cash", opening: 0, amount: 25 }]
+        }
+      ],
+      seed?.openingBalance ?? 0,
+      "2026-06",
+      seed?.ownerOpeningBalance ?? 0,
+      seed ?? undefined
+    );
+
+    expect(seed).toMatchObject({
+      sourceMonthId: "2026-05",
+      sourceDayNo: 31,
+      openingBalance: 3000,
+      ownerOpeningBalance: 150
+    });
+    expect(june.days[0].openingBalance).toBe(3000);
+    expect(june.days[0].ownerBalances[0].opening).toBe(150);
+    expect(june.days[0].creditRows[0]).toMatchObject({
+      partyId: "usman",
+      opening: 11000,
+      receive: 1000,
+      balance: 10000
+    });
   });
 });

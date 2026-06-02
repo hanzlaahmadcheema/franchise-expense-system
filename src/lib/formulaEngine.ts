@@ -1,6 +1,7 @@
 import {
   type DailyLedgerComputed,
   type DailyLedgerInput,
+  type ExpenseCarryForwardSeed,
   type MonthComputed
 } from "../types/ledger";
 
@@ -182,12 +183,24 @@ export function computeMonth(
   dailyInputs: DailyLedgerInput[],
   openingBalance: number,
   monthId?: string,
-  ownerOpeningBalance = 0
+  ownerOpeningBalance = 0,
+  carryForwardSeed?: Pick<ExpenseCarryForwardSeed, "creditBalances">
 ): MonthComputed {
   const sorted = [...dailyInputs].sort((a, b) => a.dayNo - b.dayNo);
   let currentOpening = openingBalance;
   let currentOwnerOpening = ownerOpeningBalance;
-  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>();
+  const creditRunningBalances = new Map<string, { partyId?: string; partyName: string; balance: number }>(
+    (carryForwardSeed?.creditBalances ?? [])
+      .filter((row) => parseLedgerNumber(row.balance) !== 0)
+      .map((row) => [
+        creditCarryKey(row),
+        {
+          partyId: row.partyId,
+          partyName: row.partyName,
+          balance: parseLedgerNumber(row.balance)
+        }
+      ])
+  );
 
   const days = sorted.map((day) => {
     const dayWithCarriedCredits = {
@@ -279,5 +292,32 @@ export function computeMonth(
       })),
       commissionMatrix
     }
+  };
+}
+
+export function finalExpenseComputedDay(computed: Pick<MonthComputed, "days">): DailyLedgerComputed | undefined {
+  return computed.days.find((day) => day.dayNo === 32) ??
+    [...computed.days].filter((day) => day.dayNo >= 1 && day.dayNo <= 31).at(-1) ??
+    computed.days.at(-1);
+}
+
+export function buildExpenseCarryForwardSeed(
+  sourceMonthId: string,
+  computed: MonthComputed
+): ExpenseCarryForwardSeed | null {
+  const finalDay = finalExpenseComputedDay(computed);
+  if (!finalDay) return null;
+  return {
+    sourceMonthId,
+    sourceDayNo: finalDay.dayNo,
+    openingBalance: finalDay.returnBalance,
+    ownerOpeningBalance: finalDay.ownerBalanceTotal,
+    creditBalances: finalDay.creditRows
+      .filter((row) => parseLedgerNumber(row.balance) !== 0)
+      .map((row) => ({
+        partyId: row.partyId,
+        partyName: row.partyName,
+        balance: parseLedgerNumber(row.balance)
+      }))
   };
 }

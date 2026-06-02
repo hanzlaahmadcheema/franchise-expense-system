@@ -7,9 +7,11 @@ import {
   calculateJazzPayableLedger,
   calculateJazzCompanyBalance,
   calculateCurrentStock,
-  recalculateStockMonthEntries
+  recalculateStockMonthEntries,
+  resolveStockAccountOpeningDue,
+  resolveStockCarryForwardBalance
 } from "./stockCalculations";
-import type { StockAccountProfile, StockDayRecord, StockProduct } from "../types/stock.types";
+import type { StockAccountProfile, StockDayRecord, StockMonthlySummary, StockProduct } from "../types/stock.types";
 
 const product: StockProduct = {
   id: "sim",
@@ -137,6 +139,51 @@ describe("stock calculations", () => {
 
   it("keeps due formula centralized", () => {
     expect(calculateDueBalance({ carryForwardBalance: 100, totalAmount: 500, totalPaymentReceived: 350 })).toBe(250);
+  });
+
+  it("locks stock carry-forward to previous closing sources before account opening", () => {
+    expect(resolveStockCarryForwardBalance({
+      previousEntryDueBalance: 450,
+      previousMonthDueBalance: 300,
+      accountOpeningBalance: 100
+    })).toBe(450);
+
+    expect(resolveStockCarryForwardBalance({
+      previousMonthDueBalance: 300,
+      accountOpeningBalance: 100
+    })).toBe(300);
+
+    expect(resolveStockCarryForwardBalance({
+      accountOpeningBalance: 100
+    })).toBe(100);
+  });
+
+  it("uses previous monthly account due as the locked opening due", () => {
+    const previousSummary: StockMonthlySummary = {
+      monthId: "2026-05",
+      totalQty: 0,
+      totalAmount: 0,
+      totalPaymentReceived: 0,
+      totalDueBalance: 850,
+      productTotals: [],
+      accountTotals: [{
+        accountId: account.id,
+        accountName: account.name,
+        accountType: account.type,
+        totalQty: 0,
+        totalAmount: 0,
+        totalPaymentReceived: 0,
+        dueBalance: 850,
+        activeDays: 1
+      }],
+      paymentTotals: [],
+      dayRows: [],
+      missingDays: [],
+      updatedAt: 1
+    };
+
+    expect(resolveStockAccountOpeningDue({ ...account, openingBalance: 100 }, previousSummary)).toBe(850);
+    expect(resolveStockAccountOpeningDue({ ...account, id: "new-account", openingBalance: 100 }, previousSummary)).toBe(100);
   });
 
   it("builds account, product, payment, day and missing-day summaries", () => {
@@ -348,6 +395,76 @@ describe("stock calculations", () => {
     expect(recalculated[0].entries[0].carryForwardBalance).toBe(57432);
     expect(recalculated[0].entries[0].dueBalance).toBe(57552);
     expect(recalculated[1].entries[0].carryForwardBalance).toBe(57552);
+  });
+
+  it("seeds a new month account due from previous monthly summary before first saved opening", () => {
+    const openingAccount: StockAccountProfile = {
+      ...account,
+      openingBalance: 0
+    };
+    const day1Entry = buildStockEntry({
+      id: openingAccount.id,
+      date: "June 1, 2026",
+      monthId: "2026-06",
+      dayNo: 1,
+      account: openingAccount,
+      draft: {
+        accountId: openingAccount.id,
+        productQuantities: { sim: 1 },
+        paymentReceived: 20
+      },
+      products: [product],
+      carryForwardBalance: 0,
+      createdBy: "u1",
+      timestamp: 10
+    });
+    const day: StockDayRecord = {
+      id: "1",
+      date: "June 1, 2026",
+      monthId: "2026-06",
+      dayNo: 1,
+      status: "open",
+      entries: [day1Entry],
+      summary: {
+        accountCount: 1,
+        totalQty: day1Entry.totalQty,
+        totalAmount: day1Entry.totalAmount,
+        totalPaymentReceived: day1Entry.totalPaymentReceived,
+        totalDueBalance: day1Entry.dueBalance
+      },
+      createdBy: "u1",
+      createdAt: 10,
+      updatedAt: 10
+    };
+    const previousSummary = {
+      monthId: "2026-05",
+      totalQty: 0,
+      totalAmount: 0,
+      totalPaymentReceived: 0,
+      totalDueBalance: 500,
+      productTotals: [],
+      accountTotals: [{
+        accountId: openingAccount.id,
+        accountName: openingAccount.name,
+        accountType: openingAccount.type,
+        totalQty: 0,
+        totalAmount: 0,
+        totalPaymentReceived: 0,
+        dueBalance: 500,
+        activeDays: 1
+      }],
+      paymentTotals: [],
+      dayRows: [],
+      missingDays: [],
+      updatedAt: 1
+    };
+
+    const recalculated = recalculateStockMonthEntries([day], [openingAccount], previousSummary);
+
+    expect(recalculated[0].entries[0].carryForwardBalance).toBe(500);
+    expect(recalculated[0].entries[0].dueBalance).toBe(600);
+    expect(recalculated[0].entries[0].totalAmount).toBe(120);
+    expect(recalculated[0].entries[0].totalPaymentReceived).toBe(20);
   });
 
   describe("Jazz Stock In & Current Balance calculations", () => {

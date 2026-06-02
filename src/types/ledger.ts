@@ -89,6 +89,10 @@ export type DailyLedgerInput = {
   reopenedAt?: number;
   reopenedBy?: string;
   reopenedByRole?: UserRole;
+  recalculatedAt?: number;
+  recalculatedBy?: string;
+  recalculatedByRole?: UserRole;
+  recalculationSource?: string;
   updatedAt?: number;
   expenses: ExpenseItem[];
   commissions: CommissionItem[];
@@ -154,6 +158,20 @@ export type MonthComputed = {
       rowTotal: number;
     }>;
   };
+};
+
+export type ExpenseCarryForwardCreditBalance = {
+  partyId?: string;
+  partyName: string;
+  balance: number;
+};
+
+export type ExpenseCarryForwardSeed = {
+  sourceMonthId: string;
+  sourceDayNo: number;
+  openingBalance: number;
+  ownerOpeningBalance: number;
+  creditBalances: ExpenseCarryForwardCreditBalance[];
 };
 
 export type MonthRecord = {
@@ -230,9 +248,12 @@ export type SystemAuditLog = {
   actorRole: UserRole;
   monthId?: string;
   dayNo?: number;
+  date?: string;
   targetType?: string;
   targetId?: string;
   sourcePath?: string;
+  before?: unknown;
+  after?: unknown;
 };
 
 export type AuditLogFilters = {
@@ -256,6 +277,23 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "master-refresh-started",
     "master-refresh-completed",
     "master-refresh-failed",
+    "RAW_ENTRY_SAVED",
+    "FORWARD_RECALC_STARTED",
+    "FORWARD_RECALC_COMPLETED",
+    "FORWARD_RECALC_FAILED",
+    "BALANCE_MISMATCH_DETECTED",
+    "BALANCE_MISMATCH_REPAIRED",
+    "DAY_CLOSED",
+    "DAY_REOPENED",
+    "ALL_DAYS_REOPENED",
+    "PREVIOUS_DAYS_CLOSED",
+    "MASTER_REFRESH_STARTED",
+    "MASTER_REFRESH_COMPLETED",
+    "MASTER_REFRESH_FAILED",
+    "MIGRATION_STARTED",
+    "MIGRATION_COMPLETED",
+    "MIGRATION_FAILED",
+    "BACKUP_CREATED",
     "auto-save-success",
     "auto-save-failed",
     "close-month",
@@ -275,6 +313,19 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "master-refresh-started",
     "master-refresh-completed",
     "master-refresh-failed",
+    "RAW_ENTRY_SAVED",
+    "FORWARD_RECALC_STARTED",
+    "FORWARD_RECALC_COMPLETED",
+    "FORWARD_RECALC_FAILED",
+    "BALANCE_MISMATCH_DETECTED",
+    "BALANCE_MISMATCH_REPAIRED",
+    "DAY_CLOSED",
+    "DAY_REOPENED",
+    "ALL_DAYS_REOPENED",
+    "PREVIOUS_DAYS_CLOSED",
+    "MASTER_REFRESH_STARTED",
+    "MASTER_REFRESH_COMPLETED",
+    "MASTER_REFRESH_FAILED",
     "auto-save-success",
     "auto-save-failed"
   ],
@@ -288,6 +339,19 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "master-refresh-started",
     "master-refresh-completed",
     "master-refresh-failed",
+    "RAW_ENTRY_SAVED",
+    "FORWARD_RECALC_STARTED",
+    "FORWARD_RECALC_COMPLETED",
+    "FORWARD_RECALC_FAILED",
+    "BALANCE_MISMATCH_DETECTED",
+    "BALANCE_MISMATCH_REPAIRED",
+    "DAY_CLOSED",
+    "DAY_REOPENED",
+    "ALL_DAYS_REOPENED",
+    "PREVIOUS_DAYS_CLOSED",
+    "MASTER_REFRESH_STARTED",
+    "MASTER_REFRESH_COMPLETED",
+    "MASTER_REFRESH_FAILED",
     "auto-save-success",
     "auto-save-failed"
   ],
@@ -306,5 +370,18 @@ export const AUDIT_LOG_ACTIONS: Record<AuditLogModule, readonly string[]> = {
     "authorized-email-delete",
     "user-bootstrap"
   ],
-  system: ["recalculate", "manual-email", "export-report", "master-refresh-started", "master-refresh-completed", "master-refresh-failed"]
+  system: [
+    "recalculate",
+    "manual-email",
+    "export-report",
+    "master-refresh-started",
+    "master-refresh-completed",
+    "master-refresh-failed",
+    "MIGRATION_STARTED",
+    "MIGRATION_COMPLETED",
+    "MIGRATION_FAILED",
+    "BACKUP_CREATED",
+    "BALANCE_MISMATCH_DETECTED",
+    "BALANCE_MISMATCH_REPAIRED"
+  ]
 };

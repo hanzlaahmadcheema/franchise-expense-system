@@ -14,6 +14,7 @@ import {
 
 type Props = {
   months: MonthRecord[];
+  onActivityChange?: (active: boolean) => void;
 };
 
 function formatTimestamp(value: number) {
@@ -48,7 +49,7 @@ const MODULE_OPTIONS: Array<{ value: "" | AuditLogModule; label: string }> = [
   { value: "system", label: "System" }
 ];
 
-export function AuditLogsView({ months }: Props) {
+export function AuditLogsView({ months, onActivityChange }: Props) {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [logs, setLogs] = useState<SystemAuditLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -77,6 +78,11 @@ export function AuditLogsView({ months }: Props) {
     }),
     [action, actorUid, fromDate, module, monthId, search, toDate]
   );
+
+  useEffect(() => {
+    onActivityChange?.(loading || loadingMore);
+    return () => onActivityChange?.(false);
+  }, [loading, loadingMore, onActivityChange]);
 
   const actionOptions = useMemo(() => {
     if (!module) {

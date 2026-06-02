@@ -45,7 +45,9 @@ const actionConfigKey: Record<string, keyof NotificationSettings | null> = {
   "manual-month": "enabled"
 };
 
-const db = getFirestore();
+function db() {
+  return getFirestore();
+}
 
 function currency(value: number) {
   return new Intl.NumberFormat("en", { maximumFractionDigits: 0 }).format(Number.isFinite(value) ? value : 0);
@@ -73,17 +75,17 @@ function escapeHtml(value: unknown) {
 }
 
 async function loadSettings(): Promise<NotificationSettings> {
-  const snap = await db.doc("settings/notifications/config/default").get();
+  const snap = await db().doc("settings/notifications/config/default").get();
   return { ...defaultSettings, ...(snap.exists ? snap.data() : {}) } as NotificationSettings;
 }
 
 async function loadOwnerRecipients() {
-  const snap = await db.collection("authorizedEmails").where("role", "==", "owner").where("active", "==", true).get();
+  const snap = await db().collection("authorizedEmails").where("role", "==", "owner").where("active", "==", true).get();
   return snap.docs.map((doc) => String(doc.data().email ?? doc.id)).filter((email) => email.includes("@"));
 }
 
 async function loadMonthReport(monthId: string) {
-  const monthRef = db.collection("months").doc(monthId);
+  const monthRef = db().collection("months").doc(monthId);
   const [monthSnap, daySnap] = await Promise.all([
     monthRef.get(),
     monthRef.collection("days").orderBy("dayNo", "asc").get()
@@ -245,7 +247,7 @@ export async function sendAuditNotification(
   const settingKey = actionConfigKey[action];
   if (!settingKey) return { status: "skipped", reason: "unsupported-action" };
 
-  const logRef = db.collection("notificationLogs").doc(`${monthId}_${auditId}`);
+  const logRef = db().collection("notificationLogs").doc(`${monthId}_${auditId}`);
   const createResult = await logRef.create({
     monthId,
     auditId,
