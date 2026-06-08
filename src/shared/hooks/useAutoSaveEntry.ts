@@ -41,6 +41,9 @@ export function useAutoSaveEntry<T>({
   const [error, setError] = useState("");
   const lastSavedRef = useRef("");
   const inFlightRef = useRef(false);
+  const enabledRef = useRef(enabled);
+  const disabledRef = useRef(Boolean(disabled));
+  const generationRef = useRef(0);
   const saveRef = useRef(save);
   const validateRef = useRef(validate);
   const signature = useMemo(() => serialize(data), [data, serialize]);
@@ -52,6 +55,12 @@ export function useAutoSaveEntry<T>({
   useEffect(() => {
     validateRef.current = validate;
   }, [validate]);
+
+  useEffect(() => {
+    enabledRef.current = enabled;
+    disabledRef.current = Boolean(disabled);
+    generationRef.current += 1;
+  }, [disabled, enabled, resetKey]);
 
   useEffect(() => {
     lastSavedRef.current = signature;
@@ -75,8 +84,15 @@ export function useAutoSaveEntry<T>({
       return;
     }
     setStatus("typing");
+    const generation = generationRef.current;
     const timer = window.setTimeout(() => {
-      if (signature === lastSavedRef.current || inFlightRef.current) return;
+      if (
+        generation !== generationRef.current ||
+        disabledRef.current ||
+        !enabledRef.current ||
+        signature === lastSavedRef.current ||
+        inFlightRef.current
+      ) return;
       inFlightRef.current = true;
       setStatus("saving");
       setError("");

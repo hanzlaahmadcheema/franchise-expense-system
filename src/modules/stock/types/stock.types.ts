@@ -121,8 +121,12 @@ export type StockDayRecord = {
   updatedAt: number;
   closedAt?: number;
   closedBy?: string;
+  lockedAt?: number;
+  lockedBy?: string;
+  lockedByRole?: UserRole;
   reopenedAt?: number;
   reopenedBy?: string;
+  reopenedByRole?: UserRole;
   reopenedUntilAt?: number;
   recalculatedAt?: number;
 };

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -29,6 +29,7 @@ import {
   Cell,
   Pie,
   PieChart,
+  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis
@@ -59,22 +60,6 @@ function compactMoney(value: number) {
 
 function tooltipMoney(value: unknown) {
   return money(Number(value ?? 0));
-}
-
-function useChartWidth() {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(720);
-
-  useEffect(() => {
-    if (!ref.current) return;
-    const observer = new ResizeObserver(([entry]) => {
-      setWidth(Math.max(280, Math.floor(entry.contentRect.width)));
-    });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, []);
-
-  return { ref, width };
 }
 
 function MetricCard({
@@ -123,17 +108,6 @@ export function HomeDashboard({ month, monthId }: Props) {
   const [stockSummary, setStockSummary] = useState<StockMonthlySummary | null>(null);
 
   const [chartsReady, setChartsReady] = useState(false);
-  const flowChart = useChartWidth();
-  const expenseChart = useChartWidth();
-  const commissionChart = useChartWidth();
-
-  // Jazz Load Charts
-  const jlFlowChart = useChartWidth();
-
-  // Stock Charts
-  const stFlowChart = useChartWidth();
-  const stProductsChart = useChartWidth();
-
   // Subscribe to summaries
   useEffect(() => {
     if (!activeMonthId) return;
@@ -524,12 +498,13 @@ export function HomeDashboard({ month, monthId }: Props) {
           <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
             <h3 className="text-lg font-semibold text-white">Module Volume Contribution</h3>
             <p className="text-sm text-slate-400">Comparison of total operations volume by module</p>
-            <div className="mt-5 h-64 min-w-0 sm:h-72" ref={flowChart.ref}>
+            <div className="mt-5 h-64 min-w-0 sm:h-72">
               {chartsReady && (
-                <BarChart data={consolidatedContributionData} width={flowChart.width} height={flowChart.width < 520 ? 256 : 288}>
+                <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                <BarChart data={consolidatedContributionData} margin={{ top: 8, right: 4, left: -16, bottom: 0 }}>
                   <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
-                  <XAxis dataKey="name" stroke="#64748b" tickLine={false} />
-                  <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
+                  <XAxis dataKey="name" stroke="#64748b" tickLine={false} interval={0} tick={{ fontSize: 11 }} />
+                  <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} width={54} tick={{ fontSize: 11 }} />
                   <Tooltip
                     contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                     formatter={tooltipMoney}
@@ -540,6 +515,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                     ))}
                   </Bar>
                 </BarChart>
+                </ResponsiveContainer>
               )}
             </div>
           </div>
@@ -608,8 +584,9 @@ export function HomeDashboard({ month, monthId }: Props) {
                     </div>
                     <ArrowDownRight className="h-5 w-5 text-slate-500" />
                   </div>
-                  <div className="h-64 min-w-0 sm:h-80" ref={flowChart.ref}>
+                  <div className="h-64 min-w-0 sm:h-80">
                     {chartsReady && (
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                       <AreaChart
                         data={month.homeSummary.dayRows.map((row) => ({
                           period: row.label ?? row.dayNo,
@@ -618,8 +595,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                           balance: row.returnBalance,
                           credit: row.creditBalance
                         }))}
-                        width={flowChart.width}
-                        height={flowChart.width < 520 ? 256 : 320}
+                        margin={{ top: 8, right: 4, left: -16, bottom: 0 }}
                       >
                         <defs>
                           <linearGradient id="issue" x1="0" x2="0" y1="0" y2="1">
@@ -632,8 +608,8 @@ export function HomeDashboard({ month, monthId }: Props) {
                           </linearGradient>
                         </defs>
                         <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
-                        <XAxis dataKey="period" stroke="#64748b" tickLine={false} />
-                        <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} width={48} />
+                        <XAxis dataKey="period" stroke="#64748b" tickLine={false} minTickGap={18} tick={{ fontSize: 11 }} />
+                        <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} width={54} tick={{ fontSize: 11 }} />
                         <Tooltip
                           contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                           formatter={tooltipMoney}
@@ -642,6 +618,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                         <Area dataKey="expense" stroke="#fb7185" fill="url(#expense)" strokeWidth={2} />
                         <Area dataKey="balance" stroke="#60a5fa" fill="transparent" strokeWidth={2} />
                       </AreaChart>
+                      </ResponsiveContainer>
                     )}
                   </div>
                 </div>
@@ -649,9 +626,10 @@ export function HomeDashboard({ month, monthId }: Props) {
                 <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
                   <h3 className="text-lg font-semibold text-white">Expense Mix</h3>
                   <p className="text-sm text-slate-400">Top expense categories</p>
-                  <div className="mt-5 h-64 min-w-0 sm:h-72" ref={expenseChart.ref}>
+                  <div className="mt-5 h-64 min-w-0 sm:h-72">
                     {chartsReady && (
-                      <PieChart width={expenseChart.width} height={expenseChart.width < 520 ? 256 : 288}>
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+                      <PieChart>
                         <Pie
                           data={month.homeSummary.expenseByCategory.slice(0, 6).map((row) => ({
                             name: row.category,
@@ -671,6 +649,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                           formatter={tooltipMoney}
                         />
                       </PieChart>
+                      </ResponsiveContainer>
                     )}
                   </div>
                   <div className="space-y-2">
@@ -694,27 +673,27 @@ export function HomeDashboard({ month, monthId }: Props) {
                 <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
                   <h3 className="text-lg font-semibold text-white">Commission Breakdown</h3>
                   <p className="text-sm text-slate-400">Category totals across the month</p>
-                  <div className="mt-5 h-64 min-w-0 sm:h-72" ref={commissionChart.ref}>
+                  <div className="mt-5 h-64 min-w-0 sm:h-72">
                     {chartsReady && (
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                       <BarChart
                         data={[...expenseCommissionTotals.entries()]
                           .map(([name, value]) => ({ name, value }))
                           .filter((row) => row.value !== 0)
                           .sort((a, b) => b.value - a.value)}
                         layout="vertical"
-                        margin={{ left: 8 }}
-                        width={commissionChart.width}
-                        height={commissionChart.width < 520 ? 256 : 288}
+                        margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
                       >
                         <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
-                        <XAxis type="number" stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
-                        <YAxis dataKey="name" type="category" stroke="#94a3b8" tickLine={false} width={110} />
+                        <XAxis type="number" stroke="#64748b" tickFormatter={compactMoney} tickLine={false} tick={{ fontSize: 11 }} />
+                        <YAxis dataKey="name" type="category" stroke="#94a3b8" tickLine={false} width={92} tick={{ fontSize: 11 }} />
                         <Tooltip
                           contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                           formatter={tooltipMoney}
                         />
                         <Bar dataKey="value" radius={[0, 8, 8, 0]} fill="#34d399" />
                       </BarChart>
+                      </ResponsiveContainer>
                     )}
                   </div>
                 </div>
@@ -812,12 +791,12 @@ export function HomeDashboard({ month, monthId }: Props) {
               <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
                 <h3 className="text-lg font-semibold text-white">Daily Flow (Jazz Load)</h3>
                 <p className="text-sm text-slate-400">Daily Issuance vs Payments</p>
-                <div className="mt-5 h-64 min-w-0 sm:h-80" ref={jlFlowChart.ref}>
+                <div className="mt-5 h-64 min-w-0 sm:h-80">
                   {chartsReady && (
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                     <AreaChart
                       data={jazzLoadSummary.dayRows}
-                      width={jlFlowChart.width}
-                      height={jlFlowChart.width < 520 ? 256 : 320}
+                      margin={{ top: 8, right: 4, left: -16, bottom: 0 }}
                     >
                       <defs>
                         <linearGradient id="jlIssuance" x1="0" x2="0" y1="0" y2="1">
@@ -830,8 +809,8 @@ export function HomeDashboard({ month, monthId }: Props) {
                         </linearGradient>
                       </defs>
                       <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
-                      <XAxis dataKey="dayNo" stroke="#64748b" tickLine={false} tickFormatter={(v) => `Day ${v}`} />
-                      <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
+                      <XAxis dataKey="dayNo" stroke="#64748b" tickLine={false} tickFormatter={(v) => `Day ${v}`} minTickGap={18} tick={{ fontSize: 11 }} />
+                      <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} width={54} tick={{ fontSize: 11 }} />
                       <Tooltip
                         contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                         formatter={tooltipMoney}
@@ -839,6 +818,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                       <Area dataKey="issuanceBase" stroke="#06b6d4" fill="url(#jlIssuance)" strokeWidth={2} name="Issuance" />
                       <Area dataKey="paymentBase" stroke="#10b981" fill="url(#jlPayment)" strokeWidth={2} name="Payment Rec." />
                     </AreaChart>
+                    </ResponsiveContainer>
                   )}
                 </div>
               </div>
@@ -940,12 +920,12 @@ export function HomeDashboard({ month, monthId }: Props) {
               <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
                 <h3 className="text-lg font-semibold text-white">Daily Flow (Stock Ledger)</h3>
                 <p className="text-sm text-slate-400">Daily Sales Value vs Payments Received</p>
-                <div className="mt-5 h-64 min-w-0 sm:h-80" ref={stFlowChart.ref}>
+                <div className="mt-5 h-64 min-w-0 sm:h-80">
                   {chartsReady && (
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                     <AreaChart
                       data={stockSummary.dayRows}
-                      width={stFlowChart.width}
-                      height={stFlowChart.width < 520 ? 256 : 320}
+                      margin={{ top: 8, right: 4, left: -16, bottom: 0 }}
                     >
                       <defs>
                         <linearGradient id="stSales" x1="0" x2="0" y1="0" y2="1">
@@ -958,8 +938,8 @@ export function HomeDashboard({ month, monthId }: Props) {
                         </linearGradient>
                       </defs>
                       <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
-                      <XAxis dataKey="dayNo" stroke="#64748b" tickLine={false} tickFormatter={(v) => `Day ${v}`} />
-                      <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
+                      <XAxis dataKey="dayNo" stroke="#64748b" tickLine={false} tickFormatter={(v) => `Day ${v}`} minTickGap={18} tick={{ fontSize: 11 }} />
+                      <YAxis stroke="#64748b" tickFormatter={compactMoney} tickLine={false} width={54} tick={{ fontSize: 11 }} />
                       <Tooltip
                         contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                         formatter={tooltipMoney}
@@ -967,6 +947,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                       <Area dataKey="totalAmount" stroke="#f97316" fill="url(#stSales)" strokeWidth={2} name="Sales Value" />
                       <Area dataKey="totalPaymentReceived" stroke="#10b981" fill="url(#stPayment)" strokeWidth={2} name="Payments Rec." />
                     </AreaChart>
+                    </ResponsiveContainer>
                   )}
                 </div>
               </div>
@@ -974,26 +955,29 @@ export function HomeDashboard({ month, monthId }: Props) {
               {/* Side by side Product Breakdown & Account Balances */}
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                 {/* Product Breakdown Chart */}
-                <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/20" ref={stProductsChart.ref}>
+                <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20 sm:p-5">
                   <h3 className="text-lg font-semibold text-white">Product Sales Breakdown</h3>
                   <p className="text-sm text-slate-400 mb-4">Total revenue share per product</p>
+                  <div className="h-72 min-w-0">
                   {chartsReady && (
+                    <ResponsiveContainer width="100%" height="100%" minWidth={0}>
                     <BarChart
                       data={stockSummary.productTotals.slice(0, 8).sort((a, b) => b.amount - a.amount)}
                       layout="vertical"
-                      width={stProductsChart.width - 20}
-                      height={288}
+                      margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
                     >
                       <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" horizontal={false} />
-                      <XAxis type="number" stroke="#64748b" tickFormatter={compactMoney} tickLine={false} />
-                      <YAxis dataKey="productName" type="category" stroke="#94a3b8" tickLine={false} width={100} />
+                      <XAxis type="number" stroke="#64748b" tickFormatter={compactMoney} tickLine={false} tick={{ fontSize: 11 }} />
+                      <YAxis dataKey="productName" type="category" stroke="#94a3b8" tickLine={false} width={92} tick={{ fontSize: 11 }} />
                       <Tooltip
                         contentStyle={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 12 }}
                         formatter={tooltipMoney}
                       />
                       <Bar dataKey="amount" radius={[0, 8, 8, 0]} fill="#f97316" name="Revenue" />
                     </BarChart>
+                    </ResponsiveContainer>
                   )}
+                  </div>
                 </div>
 
                 {/* Top Customer Accounts List */}

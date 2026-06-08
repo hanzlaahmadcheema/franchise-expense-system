@@ -18,12 +18,15 @@ describe("universal daily workflow structure", () => {
     expect(`${app}\n${jazz}\n${stock}`).not.toMatch(/<(DayCalendar|JazzLoadCalendar|StockCalendar)\b/);
   });
 
-  it("keeps daily entry saves on autosave instead of module save buttons", () => {
+  it("keeps autosave and provides an explicit verified fallback in every daily module", () => {
     const dailyEntry = source("src/components/DailyEntryForm.tsx");
     const jazz = source("src/modules/jazzLoad/components/JazzLoadModule.tsx");
     const stock = source("src/modules/stock/components/StockLedgerModule.tsx");
 
-    expect(`${dailyEntry}\n${jazz}\n${stock}`).not.toContain("Save Now");
+    expect(dailyEntry).toContain("Save Now & Verify");
+    expect(jazz).toContain("Save Now & Verify");
+    expect(stock).toContain("Save Now & Verify");
+    expect(`${dailyEntry}\n${jazz}\n${stock}`).toContain("SaveProgressDialog");
     expect(stock).not.toContain("Save Daily Stock Record");
   });
 });

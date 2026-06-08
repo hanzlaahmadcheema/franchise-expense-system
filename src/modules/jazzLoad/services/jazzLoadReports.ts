@@ -131,6 +131,7 @@ export function exportJazzLoadXlsx(summary: JazzLoadMonthlySummary, days: JazzLo
 }
 
 export function exportJazzLoadPrintable(summary: JazzLoadMonthlySummary) {
+  const classic = window.localStorage.getItem("uiMode") === "classic";
   const rows = summary.dayRows
     .map(
       (row) =>
@@ -140,9 +141,9 @@ export function exportJazzLoadPrintable(summary: JazzLoadMonthlySummary) {
   const win = window.open("", "_blank", "noopener,noreferrer");
   if (!win) throw new Error("Popup blocked. Allow popups to print the report.");
   win.document.write(`<!doctype html><html><head><title>Jazz Load ${summary.monthId}</title><style>
-    body{font-family:Arial,sans-serif;margin:24px;color:#0f172a}
+    body{font-family:Arial,sans-serif;margin:24px;color:#0f172a;font-size:${classic ? "16px" : "14px"}}
     table{width:100%;border-collapse:collapse;margin-top:18px}
-    th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}
+    th,td{border:${classic ? "2px" : "1px"} solid #cbd5e1;padding:${classic ? "11px" : "8px"};text-align:left}
     th{background:#e2e8f0}
   </style></head><body>
     <h1>${BRAND_NAME}</h1>

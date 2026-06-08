@@ -20,6 +20,7 @@ export type JazzLoadSaveStateInput = {
   canWriteDaily: boolean;
   selectedDayFuture: boolean;
   selectedDayLive: boolean;
+  adminCanEditSelectedDay?: boolean;
   monthClosed: boolean;
   dayClosed: boolean;
   hasDrafts: boolean;
@@ -53,8 +54,8 @@ export function getJazzLoadSaveState(input: JazzLoadSaveStateInput): JazzLoadSav
   if (input.saving) return { canSave: false, reason: "Save already in progress", detail: "Save already in progress." };
   if (input.selectedDayFuture) return { canSave: false, reason: "Selected date is future", detail: "Future Jazz Load days are disabled." };
   if (!input.canWriteDaily) return { canSave: false, reason: "Read-only role", detail: "Read-only role." };
-  if (input.role === "admin" && !input.selectedDayLive) {
-    return { canSave: false, reason: "Read-only role", detail: "Admins can only edit the current Jazz Load day." };
+  if (input.role === "admin" && !input.selectedDayLive && !input.adminCanEditSelectedDay) {
+    return { canSave: false, reason: "Read-only role", detail: "Admins can only edit the current Jazz Load day or an owner-reopened previous day while it is manually open." };
   }
   if (input.monthClosed) return { canSave: false, reason: "Day closed", detail: "This Jazz Load month is closed." };
   if (input.dayClosed) return { canSave: false, reason: "Day closed", detail: "Day closed." };

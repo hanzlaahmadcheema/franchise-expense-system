@@ -102,4 +102,33 @@ describe("useAutoSaveEntry", () => {
     expect(save).toHaveBeenCalledWith({ amount: 25 });
     expect(result.current.autoSaveStatus).toBe("saved");
   });
+
+  it("cancels a pending autosave immediately when the day becomes closed", async () => {
+    vi.useFakeTimers();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const { result, rerender } = renderHook(
+      ({ amount, disabled }) => useAutoSaveEntry({
+        data: { amount },
+        enabled: true,
+        disabled,
+        debounceMs: 100,
+        savedStatus: "saved",
+        save
+      }),
+      { initialProps: { amount: 0, disabled: false } }
+    );
+
+    rerender({ amount: 50, disabled: false });
+    await act(async () => Promise.resolve());
+    expect(result.current.autoSaveStatus).toBe("typing");
+
+    rerender({ amount: 50, disabled: true });
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+      await Promise.resolve();
+    });
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.current.autoSaveStatus).toBe("readOnly");
+  });
 });

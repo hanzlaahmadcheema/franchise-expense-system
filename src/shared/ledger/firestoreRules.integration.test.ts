@@ -6,7 +6,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { doc, setDoc, writeBatch } from "firebase/firestore";
+import { deleteField, doc, getDoc, setDoc, writeBatch } from "firebase/firestore";
 
 const describeIfEmulator = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
 
@@ -323,7 +323,7 @@ describeIfEmulator("ledgerV2 Firestore rules", () => {
   it("blocks admin previous-day reopen but allows owner previous-day reopen", async () => {
     const ownerDb = authedDb("owner");
     const adminDb = authedDb("admin");
-    const reopenUntilAt = Date.now() + 5 * 60 * 1000;
+    const reopenedAt = Date.now();
 
     await assertFails(setDoc(doc(adminDb, "months", "2026-05", "days", "2"), {
       dayNo: 2,
@@ -331,7 +331,8 @@ describeIfEmulator("ledgerV2 Firestore rules", () => {
       entryMonth: 5,
       entryDay: 2,
       lockedAt: Date.now(),
-      reopenedUntilAt: reopenUntilAt
+      reopenedAt,
+      reopenedByRole: "admin"
     }, { merge: true }));
 
     await assertSucceeds(setDoc(doc(ownerDb, "months", "2026-05", "days", "2"), {
@@ -340,8 +341,57 @@ describeIfEmulator("ledgerV2 Firestore rules", () => {
       entryMonth: 5,
       entryDay: 2,
       lockedAt: Date.now(),
-      reopenedUntilAt: reopenUntilAt
+      reopenedAt,
+      reopenedByRole: "owner"
     }, { merge: true }));
+  });
+
+  it("allows admin to edit an owner-reopened previous Expense day while preserving close/reopen metadata", async () => {
+    const ownerDb = authedDb("owner");
+    const adminDb = authedDb("admin");
+    const viewerDb = authedDb("viewer");
+    const reopenedAt = Date.now();
+
+    await assertFails(setDoc(doc(adminDb, "months", "2026-05", "days", "2", "expenses", "admin-before-reopen"), {
+      id: "admin-before-reopen",
+      name: "Repair",
+      amount: 50
+    }));
+
+    await assertSucceeds(setDoc(doc(ownerDb, "months", "2026-05", "days", "2"), {
+      dayNo: 2,
+      entryYear: 2026,
+      entryMonth: 5,
+      entryDay: 2,
+      reopenedAt,
+      reopenedByRole: "owner"
+    }, { merge: true }));
+
+    const batch = writeBatch(adminDb);
+    batch.set(doc(adminDb, "months", "2026-05", "days", "2"), {
+      dayNo: 2,
+      entryYear: 2026,
+      entryMonth: 5,
+      entryDay: 2,
+      reopenedAt,
+      reopenedByRole: "owner",
+      updatedAt: Date.now()
+    }, { merge: true });
+    batch.set(doc(adminDb, "months", "2026-05", "days", "2", "expenses", "admin-repair"), {
+      id: "admin-repair",
+      name: "Repair",
+      amount: 50
+    }, { merge: true });
+    batch.set(doc(adminDb, "ledgerV2", "expense", "months", "2026-05", "days", "2", "rawEntries", "admin-repair"), {
+      raw: { amount: 50 }
+    }, { merge: true });
+    await assertSucceeds(batch.commit());
+
+    await assertFails(setDoc(doc(viewerDb, "months", "2026-05", "days", "2", "expenses", "viewer-repair"), {
+      id: "viewer-repair",
+      name: "Viewer Repair",
+      amount: 50
+    }));
   });
 
   it("allows admin to close the current Expense day while syncing child rows", async () => {
@@ -382,6 +432,110 @@ describeIfEmulator("ledgerV2 Firestore rules", () => {
     }, { merge: true });
 
     await assertSucceeds(batch.commit());
+  });
+
+  it.each(["owner", "admin"] as const)("allows %s to close the current Jazz Load day and keeps it closed", async (uid) => {
+    const today = new Date();
+    const liveDayId = String(today.getDate());
+    const db = authedDb(uid);
+    const lockedAt = Date.now();
+
+    await assertSucceeds(setDoc(doc(db, "jazzLoadMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      status: "closed",
+      lockedAt,
+      lockedBy: uid,
+      lockedByRole: uid,
+      closedAt: lockedAt,
+      closedBy: uid,
+      reopenedUntilAt: deleteField(),
+      reopenedAt: deleteField(),
+      reopenedBy: deleteField(),
+      reopenedByRole: deleteField()
+    }, { merge: true }));
+
+    await assertFails(setDoc(doc(db, "jazzLoadMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      status: "open",
+      updatedAt: Date.now()
+    }, { merge: true }));
+
+    const snapshot = await getDoc(doc(db, "jazzLoadMonths", "2026-05", "days", liveDayId));
+    expect(snapshot.data()?.status).toBe("closed");
+  });
+
+  it.each(["owner", "admin"] as const)("allows %s to close the current Stock day and blocks stale autosave", async (uid) => {
+    const today = new Date();
+    const liveDayId = String(today.getDate());
+    const db = authedDb(uid);
+    const lockedAt = Date.now();
+
+    await assertSucceeds(setDoc(doc(db, "stockMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      entryYear: today.getFullYear(),
+      entryMonth: today.getMonth() + 1,
+      entryDay: today.getDate(),
+      status: "closed",
+      lockedAt,
+      lockedBy: uid,
+      lockedByRole: uid,
+      closedAt: lockedAt,
+      closedBy: uid,
+      reopenedUntilAt: deleteField(),
+      reopenedAt: deleteField(),
+      reopenedBy: deleteField(),
+      reopenedByRole: deleteField()
+    }, { merge: true }));
+
+    await assertFails(setDoc(doc(db, "stockMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      entryYear: today.getFullYear(),
+      entryMonth: today.getMonth() + 1,
+      entryDay: today.getDate(),
+      status: "open",
+      updatedAt: Date.now()
+    }, { merge: true }));
+  });
+
+  it("blocks viewer close and requires an explicit valid reopen", async () => {
+    const today = new Date();
+    const liveDayId = String(today.getDate());
+    const viewerDb = authedDb("viewer");
+    const adminDb = authedDb("admin");
+    const lockedAt = Date.now();
+
+    await assertFails(setDoc(doc(viewerDb, "jazzLoadMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      status: "closed",
+      lockedAt,
+      lockedBy: "viewer",
+      lockedByRole: "viewer"
+    }, { merge: true }));
+
+    await assertSucceeds(setDoc(doc(adminDb, "jazzLoadMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      status: "closed",
+      lockedAt,
+      lockedBy: "admin",
+      lockedByRole: "admin",
+      closedAt: lockedAt,
+      closedBy: "admin"
+    }, { merge: true }));
+
+    const reopenedAt = lockedAt + 1;
+    await assertSucceeds(setDoc(doc(adminDb, "jazzLoadMonths", "2026-05", "days", liveDayId), {
+      dayNo: today.getDate(),
+      status: "open",
+      lockedAt: deleteField(),
+      lockedBy: deleteField(),
+      lockedByRole: deleteField(),
+      closedAt: deleteField(),
+      closedBy: deleteField(),
+      reopenedAt,
+      reopenedBy: "admin",
+      reopenedByRole: "admin",
+      reopenedUntilAt: deleteField()
+    }, { merge: true }));
   });
 
   it("blocks admin previous-day v2 raw writes", async () => {

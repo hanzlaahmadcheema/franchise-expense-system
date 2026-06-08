@@ -86,9 +86,79 @@ service cloud.firestore {
     }
 
     function isReopenedDayData(data) {
-      return "reopenedUntilAt" in data &&
+      return (
+        "reopenedAt" in data &&
+        data.reopenedAt != null
+      ) ||
+      (
+        "reopenedUntilAt" in data &&
         data.reopenedUntilAt != null &&
-        data.reopenedUntilAt > request.time.toMillis();
+        data.reopenedUntilAt > request.time.toMillis()
+      );
+    }
+
+    function isAdminEditableReopenedDayData(data) {
+      return isReopenedDayData(data) &&
+        (!("reopenedByRole" in data) || data.reopenedByRole == "owner");
+    }
+
+    function reopenMetadataUnchanged(beforeData, afterData) {
+      return !afterData.diff(beforeData).affectedKeys().hasAny([
+        "reopenedUntilAt",
+        "reopenedAt",
+        "reopenedBy",
+        "reopenedByRole"
+      ]);
+    }
+
+    function reopenMetadataCleared(data) {
+      return (!("reopenedUntilAt" in data) || data.reopenedUntilAt == null) &&
+        (!("reopenedAt" in data) || data.reopenedAt == null) &&
+        (!("reopenedBy" in data) || data.reopenedBy == null) &&
+        (!("reopenedByRole" in data) || data.reopenedByRole == null);
+    }
+
+    function isCanonicalCloseData(data) {
+      return "lockedAt" in data &&
+        "lockedBy" in data &&
+        data.lockedAt != null &&
+        data.lockedBy == request.auth.uid &&
+        data.lockedAt >= request.time.toMillis() - 120000 &&
+        data.lockedAt <= request.time.toMillis() + 120000 &&
+        reopenMetadataCleared(data);
+    }
+
+    function isOpenOperationalDayData(data) {
+      return data.status == "open" &&
+        (
+          !("lockedAt" in data) ||
+          data.lockedAt == null ||
+          isReopenedDayData(data)
+        );
+    }
+
+    function isExplicitReopenTransition(beforeData, afterData) {
+      return beforeData.status == "closed" &&
+        afterData.status == "open" &&
+        "reopenedAt" in afterData &&
+        afterData.reopenedAt != null &&
+        afterData.reopenedAt >= request.time.toMillis() - 120000 &&
+        afterData.reopenedAt <= request.time.toMillis() + 120000 &&
+        afterData.reopenedBy == request.auth.uid &&
+        afterData.reopenedByRole == userDoc().data.role &&
+        (!("lockedAt" in beforeData) || beforeData.lockedAt == null || afterData.reopenedAt > beforeData.lockedAt) &&
+        (!("reopenedUntilAt" in afterData) || afterData.reopenedUntilAt == null);
+    }
+
+    function lockMetadataUnchanged(beforeData, afterData) {
+      return !afterData.diff(beforeData).affectedKeys().hasAny([
+        "lockedAt",
+        "lockedBy",
+        "lockedByRole",
+        "closedAt",
+        "closedBy",
+        "status"
+      ]);
     }
 
     function isEditableDayData(data) {
@@ -110,13 +180,39 @@ service cloud.firestore {
         );
     }
 
+    function canEditExistingExpenseDay(monthId) {
+      return canManageDayData(monthId, request.resource.data) && isEditableDayData(resource.data);
+    }
+
+    function canAdminEditReopenedExpenseDay(monthId, dayId) {
+      return exists(/databases/$(database)/documents/months/$(monthId)) &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+        isAdmin() &&
+        dayId != "32" &&
+        isAdminEditableReopenedDayData(resource.data) &&
+        reopenMetadataUnchanged(resource.data, request.resource.data) &&
+        lockMetadataUnchanged(resource.data, request.resource.data) &&
+        request.resource.data.dayNo == resource.data.dayNo;
+    }
+
+    function canAdminEditReopenedExpenseRows(monthId, dayId) {
+      return exists(/databases/$(database)/documents/months/$(monthId)) &&
+        exists(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)) &&
+        get(/databases/$(database)/documents/months/$(monthId)).data.status == "open" &&
+        isAdmin() &&
+        dayId != "32" &&
+        isAdminEditableReopenedDayData(get(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data);
+    }
+
     function canReopenPreviousDay(dayId) {
-      return !("reopenedUntilAt" in request.resource.data) ? false :
-        isOwner() &&
-          dayId != "32" &&
-          request.resource.data.dayNo == resource.data.dayNo &&
-          request.resource.data.reopenedUntilAt > request.time.toMillis() &&
-          request.resource.data.reopenedUntilAt <= (request.time + duration.value(15, "m")).toMillis();
+      return isOwner() &&
+        dayId != "32" &&
+        request.resource.data.dayNo == resource.data.dayNo &&
+        "reopenedAt" in request.resource.data &&
+        request.resource.data.reopenedAt != null &&
+        request.resource.data.reopenedAt <= request.time.toMillis() + 120000 &&
+        (!("reopenedUntilAt" in request.resource.data) || request.resource.data.reopenedUntilAt == null) &&
+        request.resource.data.reopenedByRole == "owner";
     }
 
     function canReopenLiveDay(dayId) {
@@ -144,6 +240,10 @@ service cloud.firestore {
           data.entryDay == businessNow().day();
     }
 
+    function isLiveJazzLoadDayData(data) {
+      return "dayNo" in data && data.dayNo == businessNow().day();
+    }
+
     function canAdminRecalculateStockDay(monthId, dayId) {
       return isAdmin() &&
         get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
@@ -161,12 +261,36 @@ service cloud.firestore {
       return isAdmin() &&
         get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
         dayId != "32" &&
-        isLiveStockDayData(request.resource.data) &&
+        (isLiveStockDayData(request.resource.data) || isAdminEditableReopenedDayData(resource.data)) &&
+        request.resource.data.dayNo == resource.data.dayNo &&
+        (!isAdminEditableReopenedDayData(resource.data) || reopenMetadataUnchanged(resource.data, request.resource.data)) &&
+        (!isAdminEditableReopenedDayData(resource.data) || lockMetadataUnchanged(resource.data, request.resource.data)) &&
+        (
+          (isOpenOperationalDayData(resource.data) && request.resource.data.status == "open") ||
+          (isLiveStockDayData(resource.data) && request.resource.data.status == "closed" && isCanonicalCloseData(request.resource.data)) ||
+          (isLiveStockDayData(resource.data) && isExplicitReopenTransition(resource.data, request.resource.data))
+        );
+    }
+
+    function canOwnerUpdateStockDay(monthId) {
+      return isOwner() &&
+        get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
         request.resource.data.dayNo == resource.data.dayNo &&
         (
-          resource.data.status == "open" ||
-          (resource.data.status == "closed" && request.resource.data.status == "open") ||
-          ("reopenedUntilAt" in resource.data && resource.data.reopenedUntilAt != null && resource.data.reopenedUntilAt > request.time.toMillis())
+          (isOpenOperationalDayData(resource.data) && request.resource.data.status == "open") ||
+          (request.resource.data.status == "closed" && isCanonicalCloseData(request.resource.data)) ||
+          isExplicitReopenTransition(resource.data, request.resource.data) ||
+          (resource.data.status == "closed" && request.resource.data.status == "closed" && reopenMetadataUnchanged(resource.data, request.resource.data) && lockMetadataUnchanged(resource.data, request.resource.data))
+        );
+    }
+
+    function canOwnerEditStockRows(monthId, dayId) {
+      return isOwner() &&
+        get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
+        existsAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)) &&
+        (
+          isOpenOperationalDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data) ||
+          isCanonicalCloseData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
         );
     }
 
@@ -174,7 +298,10 @@ service cloud.firestore {
       return isAdmin() &&
         get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
         dayId != "32" &&
-        isLiveStockDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data) &&
+        (
+          isLiveStockDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data) ||
+          isAdminEditableReopenedDayData(get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
+        ) &&
         (
           getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
           get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
@@ -202,7 +329,7 @@ service cloud.firestore {
         request.resource.data.entryDay == resource.data.entryDay &&
         "lockedAt" in request.resource.data &&
         request.resource.data.lockedAt != null &&
-        (!("reopenedUntilAt" in request.resource.data) || request.resource.data.reopenedUntilAt == null);
+        reopenMetadataCleared(request.resource.data);
     }
 
     function canOwnerCloseAnyDay(monthId, dayId) {
@@ -213,7 +340,7 @@ service cloud.firestore {
         request.resource.data.dayNo == resource.data.dayNo &&
         "lockedAt" in request.resource.data &&
         request.resource.data.lockedAt != null &&
-        (!("reopenedUntilAt" in request.resource.data) || request.resource.data.reopenedUntilAt == null);
+        reopenMetadataCleared(request.resource.data);
     }
 
     function isRawWriteDuringExpenseClose(data) {
@@ -247,6 +374,7 @@ service cloud.firestore {
         dayId != "32" &&
         (
           canManageDayData(monthId, getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data) ||
+          canAdminEditReopenedExpenseRows(monthId, dayId) ||
           isRawWriteDuringExpenseClose(getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data)
         );
     }
@@ -255,6 +383,7 @@ service cloud.firestore {
       return existsAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)) &&
         (
           canManageDayData(monthId, getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data) ||
+          canAdminEditReopenedExpenseRows(monthId, dayId) ||
           canOperationallyRecalculateExpenseDay(monthId, dayId, getAfter(/databases/$(database)/documents/months/$(monthId)/days/$(dayId)).data) ||
           (
             (isOwner() || isAdmin()) &&
@@ -273,13 +402,22 @@ service cloud.firestore {
           get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
           data.monthId == monthId &&
           (
-            isOwner() ||
+            (isOwner() && (
+              isOpenOperationalDayData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data) ||
+              isCanonicalCloseData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data)
+            )) ||
             (
-              isAdmin() &&
+            isAdmin() &&
               data.dayNo == getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.dayNo &&
               (
-                getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-                get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open"
+                (
+                  isLiveJazzLoadDayData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data) &&
+                  (
+                    getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
+                    get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open"
+                  )
+                ) ||
+                isAdminEditableReopenedDayData(get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data)
               )
             )
           );
@@ -292,14 +430,23 @@ service cloud.firestore {
           get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
           data.monthId == monthId &&
           (
-              isOwner() ||
+              (isOwner() && (
+                isOpenOperationalDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data) ||
+                isCanonicalCloseData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
+              )) ||
               (
                 isAdmin() &&
-              data.dayNo == businessNow().day() &&
-              isLiveStockDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data) &&
+              (
+                (
+                  data.dayNo == businessNow().day() &&
+                  isLiveStockDayData(getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
+                ) ||
+                isAdminEditableReopenedDayData(get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
+              ) &&
               (
                 getAfter(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-                get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open"
+                get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
+                isAdminEditableReopenedDayData(get(/databases/$(database)/documents/stockMonths/$(monthId)/days/$(dayId)).data)
               )
             )
           );
@@ -308,6 +455,7 @@ service cloud.firestore {
     function canAdminCreateJazzLoadDay(monthId) {
       return isAdmin() &&
         get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
+        isLiveJazzLoadDayData(request.resource.data) &&
         (!("status" in request.resource.data) || request.resource.data.status == "open");
     }
 
@@ -316,8 +464,32 @@ service cloud.firestore {
         get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
         request.resource.data.dayNo == resource.data.dayNo &&
         (
-          resource.data.status == "open" ||
-          (resource.data.status == "closed" && request.resource.data.status == "open")
+          (isLiveJazzLoadDayData(request.resource.data) && resource.data.status == "open" && request.resource.data.status == "open") ||
+          (isLiveJazzLoadDayData(resource.data) && request.resource.data.status == "closed" && isCanonicalCloseData(request.resource.data)) ||
+          (isLiveJazzLoadDayData(resource.data) && isExplicitReopenTransition(resource.data, request.resource.data)) ||
+          (isAdminEditableReopenedDayData(resource.data) && reopenMetadataUnchanged(resource.data, request.resource.data) && lockMetadataUnchanged(resource.data, request.resource.data))
+        );
+    }
+
+    function canOwnerUpdateJazzLoadDay(monthId) {
+      return isOwner() &&
+        get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
+        request.resource.data.dayNo == resource.data.dayNo &&
+        (
+          (isOpenOperationalDayData(resource.data) && request.resource.data.status == "open") ||
+          (request.resource.data.status == "closed" && isCanonicalCloseData(request.resource.data)) ||
+          isExplicitReopenTransition(resource.data, request.resource.data) ||
+          (resource.data.status == "closed" && request.resource.data.status == "closed" && reopenMetadataUnchanged(resource.data, request.resource.data) && lockMetadataUnchanged(resource.data, request.resource.data))
+        );
+    }
+
+    function canOwnerEditJazzLoadRows(monthId, dayId) {
+      return isOwner() &&
+        get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
+        existsAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)) &&
+        (
+          isOpenOperationalDayData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data) ||
+          isCanonicalCloseData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data)
         );
     }
 
@@ -325,8 +497,14 @@ service cloud.firestore {
       return isAdmin() &&
         get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open" &&
         (
-          getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
-          get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open"
+          (
+            isLiveJazzLoadDayData(getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data) &&
+            (
+              getAfter(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open" ||
+              get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data.status == "open"
+            )
+          ) ||
+          isAdminEditableReopenedDayData(get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)/days/$(dayId)).data)
         );
     }
 
@@ -385,13 +563,14 @@ service cloud.firestore {
         allow create: if canOwnerEditDaily(monthId) ||
           canAdminCreateExpenseDay(monthId) ||
           canOperationallyRecalculateExpenseDay(monthId, dayId, request.resource.data);
-        allow update: if canManageDayData(monthId, request.resource.data) ||
+        allow update: if canReopenLiveDay(dayId) ||
+          canReopenPreviousDay(dayId) ||
+          canAdminEditReopenedExpenseDay(monthId, dayId) ||
           canCloseEditableDay(monthId, dayId) ||
           canOwnerCloseAnyDay(monthId, dayId) ||
+          canEditExistingExpenseDay(monthId) ||
           canOperationallyRecalculateExpenseDay(monthId, dayId, request.resource.data) ||
-          canAdminImportExpense() ||
-          (resource != null && canReopenLiveDay(dayId)) ||
-          (resource != null && canReopenPreviousDay(dayId));
+          canAdminImportExpense();
         allow delete: if isOwner();
       }
 
@@ -481,25 +660,22 @@ service cloud.firestore {
         allow create: if (isOwner() &&
           get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open") ||
           canAdminCreateJazzLoadDay(monthId);
-        allow update: if (isOwner() &&
-          get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open") ||
+        allow update: if canOwnerUpdateJazzLoadDay(monthId) ||
           canAdminUpdateJazzLoadDay(monthId);
         allow delete: if isOwner();
 
         match /doEntries/{entryId} {
           allow read: if isActiveUser();
-          allow create, update: if (isOwner() &&
-            get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open") ||
+          allow create, update: if canOwnerEditJazzLoadRows(monthId, dayId) ||
             canAdminEditJazzLoadRows(monthId, dayId);
-          allow delete: if isOwner() || canAdminEditJazzLoadRows(monthId, dayId);
+          allow delete: if canOwnerEditJazzLoadRows(monthId, dayId) || canAdminEditJazzLoadRows(monthId, dayId);
         }
 
         match /doAssignments/{assignmentId} {
           allow read: if isActiveUser();
-          allow create, update: if (isOwner() &&
-            get(/databases/$(database)/documents/jazzLoadMonths/$(monthId)).data.status == "open") ||
+          allow create, update: if canOwnerEditJazzLoadRows(monthId, dayId) ||
             canAdminEditJazzLoadRows(monthId, dayId);
-          allow delete: if isOwner() || canAdminEditJazzLoadRows(monthId, dayId);
+          allow delete: if canOwnerEditJazzLoadRows(monthId, dayId) || canAdminEditJazzLoadRows(monthId, dayId);
         }
       }
     }
@@ -555,34 +731,28 @@ service cloud.firestore {
           (isAdmin() &&
             get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open" &&
             isLiveStockDayData(request.resource.data));
-        allow update: if isOwner() || canAdminRecalculateStockDay(monthId, dayId) || canAdminEditStockDay(monthId, dayId);
+        allow update: if canOwnerUpdateStockDay(monthId) || canAdminRecalculateStockDay(monthId, dayId) || canAdminEditStockDay(monthId, dayId);
         allow delete: if isOwner();
 
         match /entries/{entryId} {
           allow read: if isActiveUser();
-          allow create: if (isOwner() &&
-            get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open") ||
+          allow create: if canOwnerEditStockRows(monthId, dayId) ||
             canAdminEditStockRows(monthId, dayId);
-          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
-          allow delete: if isOwner() || canAdminEditStockRows(monthId, dayId);
+          allow update, delete: if canOwnerEditStockRows(monthId, dayId) || canAdminEditStockRows(monthId, dayId);
         }
 
         match /stockOut/{entryId} {
           allow read: if isActiveUser();
-          allow create: if (isOwner() &&
-            get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open") ||
+          allow create: if canOwnerEditStockRows(monthId, dayId) ||
             canAdminEditStockRows(monthId, dayId);
-          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
-          allow delete: if isOwner() || canAdminEditStockRows(monthId, dayId);
+          allow update, delete: if canOwnerEditStockRows(monthId, dayId) || canAdminEditStockRows(monthId, dayId);
         }
 
         match /stockIn/{stockInId} {
           allow read: if isActiveUser();
-          allow create: if (isOwner() &&
-            get(/databases/$(database)/documents/stockMonths/$(monthId)).data.status == "open") ||
+          allow create: if canOwnerEditStockRows(monthId, dayId) ||
             canAdminEditStockRows(monthId, dayId);
-          allow update: if isOwner() || canAdminEditStockRows(monthId, dayId);
-          allow delete: if isOwner() || canAdminEditStockRows(monthId, dayId);
+          allow update, delete: if canOwnerEditStockRows(monthId, dayId) || canAdminEditStockRows(monthId, dayId);
         }
       }
     }

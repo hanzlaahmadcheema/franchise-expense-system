@@ -1196,10 +1196,12 @@ export async function queueDayAndSummaryWrite(
     createdAt: timestamp,
     ...auditEvent
   });
-  writeExpenseAuditLog(month.id, auditId, timestamp, auditEvent, {
-    batch,
-    dayNo: day.dayNo
-  });
+  if (auditAction !== "lock-day") {
+    writeExpenseAuditLog(month.id, auditId, timestamp, auditEvent, {
+      batch,
+      dayNo: day.dayNo
+    });
+  }
   const rawAuditLog = buildAuditLogDocument(
     {
       id: `${auditId}-raw`,
@@ -1224,14 +1226,27 @@ export async function queueDayAndSummaryWrite(
     },
     auditActorRole
   );
-  if (rawAuditLog.actorUid) {
+  if (rawAuditLog.actorUid && auditAction !== "lock-day") {
     const rawAuditRef = doc(firestore, "auditLogs", rawAuditLog.id);
     debugPermissionWrite(debugContext, rawAuditRef.path, "set");
     batch.set(rawAuditRef, rawAuditLog);
   }
 
   debugPermissionWrite(debugContext, "batch:queueDayAndSummaryWrite", "commit");
-  return batch.commit();
+  await batch.commit();
+  if (auditAction === "lock-day") {
+    const auditWrites: Promise<unknown>[] = [
+      writeExpenseAuditLog(month.id, auditId, timestamp, auditEvent, { dayNo: day.dayNo })
+    ];
+    if (rawAuditLog.actorUid) {
+      auditWrites.push(writeAuditLog(rawAuditLog, { actorRole: auditActorRole }));
+    }
+    void Promise.allSettled(auditWrites).then((results) => {
+      if (results.some((result) => result.status === "rejected")) {
+        console.warn("Expense day closed, but a secondary audit log write failed.");
+      }
+    });
+  }
 }
 
 export async function lockDayAndRecalculate(
@@ -1291,57 +1306,58 @@ export async function lockDayAndRecalculate(
   return computed;
 }
 
-export async function reopenPreviousDayFor15Minutes(
+export async function reopenPreviousDayUntilClose(
   monthId: string,
   dayNo: number,
-  role: UserRole | null,
-  reopenUntilAt?: number
+  role: UserRole | null
 ) {
   const reopenAt = now();
-  const reopenUntil = reopenUntilAt ?? reopenAt + 15 * 60 * 1000;
   await setDoc(
     doc(requireDb(), "months", monthId, "days", String(dayNo)),
-    cleanForFirestore({
-      reopenedUntilAt: reopenUntil,
+    {
+      reopenedUntilAt: deleteField(),
       reopenedAt: reopenAt,
       reopenedBy: auth?.currentUser?.uid,
-      reopenedByRole: role ?? undefined,
+      ...(role ? { reopenedByRole: role } : { reopenedByRole: deleteField() }),
       updatedAt: reopenAt
-    }),
+    },
     { merge: true }
   );
   await addAudit(monthId, {
     action: "reopen-day",
-    detail: `Reopened day ${dayNo} until ${new Date(reopenUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+    detail: `Reopened day ${dayNo} until manual close`,
     ...actor()
   });
-  return reopenUntil;
+  return reopenAt;
 }
 
-export function reopenMonthDaysFor15Minutes(
+export function reopenMonthDaysUntilClose(
   monthId: string,
   days: DailyLedgerInput[],
-  role: UserRole | null,
-  reopenUntilAt?: number
+  role: UserRole | null
 ) {
   const firestore = requireDb();
   const reopenAt = now();
-  const reopenUntil = reopenUntilAt ?? reopenAt + 15 * 60 * 1000;
   const batch = writeBatch(firestore);
   const monthRef = doc(firestore, "months", monthId);
   const actorFields = actor();
 
   days.forEach((day) => {
+    const payload = cleanForFirestore({
+      ...day,
+      reopenedUntilAt: undefined,
+      reopenedAt: reopenAt,
+      reopenedBy: actorFields.actorUid,
+      reopenedByRole: role ?? undefined,
+      updatedAt: reopenAt
+    });
     batch.set(
       doc(monthRef, "days", String(day.dayNo)),
-      cleanForFirestore({
-        ...day,
-        reopenedUntilAt: reopenUntil,
-        reopenedAt: reopenAt,
-        reopenedBy: actorFields.actorUid,
-        reopenedByRole: role ?? undefined,
-        updatedAt: reopenAt
-      }),
+      {
+        ...payload,
+        reopenedUntilAt: deleteField(),
+        ...(role ? {} : { reopenedByRole: deleteField() })
+      },
       { merge: true }
     );
   });
@@ -1351,7 +1367,7 @@ export function reopenMonthDaysFor15Minutes(
     const dayText = days.length === 1 ? `day ${days[0].dayNo}` : `${days.length} days`;
     const auditEvent = {
       action: "reopen-day",
-      detail: `Reopened ${dayText} until ${new Date(reopenUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+      detail: `Reopened ${dayText} until manual close`,
       ...actorFields
     } as Omit<AuditEvent, "id" | "createdAt">;
 
@@ -1368,6 +1384,9 @@ export function reopenMonthDaysFor15Minutes(
 
   return batch.commit();
 }
+
+export const reopenPreviousDayFor15Minutes = reopenPreviousDayUntilClose;
+export const reopenMonthDaysFor15Minutes = reopenMonthDaysUntilClose;
 
 export function closeMonthDaysExceptToday(
   month: MonthRecord,
@@ -1579,7 +1598,7 @@ export async function saveMonthRecord(
 
   const isEditable = (day: DailyLedgerInput) => {
     const isLive = month.id === liveMonthId && day.dayNo === liveDayNo;
-    const isReopened = Boolean(day.reopenedUntilAt && day.reopenedUntilAt > now());
+    const isReopened = Boolean(day.reopenedAt || (day.reopenedUntilAt && day.reopenedUntilAt > now()));
     return (isLive && !day.lockedAt) || isReopened;
   };
 

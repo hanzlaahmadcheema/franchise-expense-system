@@ -26,6 +26,19 @@ describe("jazzLoadSaveState", () => {
     expect(getJazzLoadSaveState({ ...validInput, role: "owner", selectedDayLive: false }).canSave).toBe(true);
   });
 
+  it("allows admin previous-day save only when owner-reopened correction access is active", () => {
+    expect(getJazzLoadSaveState({
+      ...validInput,
+      selectedDayLive: false,
+      adminCanEditSelectedDay: true
+    }).canSave).toBe(true);
+    expect(getJazzLoadSaveState({
+      ...validInput,
+      selectedDayLive: false,
+      adminCanEditSelectedDay: false
+    }).reason).toBe("Read-only role");
+  });
+
   it("blocks viewer/read-only role, closed days, and future dates with clear reasons", () => {
     expect(getJazzLoadSaveState({ ...validInput, role: "viewer", canWriteDaily: false }).reason).toBe("Read-only role");
     expect(getJazzLoadSaveState({ ...validInput, dayClosed: true }).reason).toBe("Day closed");

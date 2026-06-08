@@ -344,6 +344,9 @@ function tableHtml(title: string, headers: string[], rows: Array<Array<string | 
 
 function reportShell(title: string, orientation: "portrait" | "landscape", body: string) {
   const generatedAt = reportDateTime();
+  const classic = typeof window !== "undefined" && window.localStorage.getItem("uiMode") === "classic";
+  const tableFontSize = classic ? "11.5px" : "10px";
+  const cellPadding = classic ? "8px" : "5px 6px";
   return `<!doctype html>
 <html>
 <head>
@@ -362,9 +365,9 @@ function reportShell(title: string, orientation: "portrait" | "landscape", body:
     .kpi strong { display: block; margin-top: 4px; font-size: 15px; color: #0f172a; }
     .report-section { break-inside: avoid; margin-top: 14px; }
     h2 { margin: 0 0 6px; font-size: 13px; color: #0f172a; }
-    table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: ${tableFontSize}; }
     th { background: #0f172a; color: white; text-align: left; padding: 6px; border: 1px solid #0f172a; }
-    td { padding: 5px 6px; border: 1px solid #cbd5e1; vertical-align: top; }
+    td { padding: ${cellPadding}; border: ${classic ? "2px" : "1px"} solid #cbd5e1; vertical-align: top; }
     tbody tr:nth-child(even) td { background: #f8fafc; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .negative { color: #be123c; font-weight: 700; }

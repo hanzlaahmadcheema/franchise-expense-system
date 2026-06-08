@@ -17,6 +17,7 @@ import {
   ScrollText,
   LoaderCircle,
   Menu,
+  MonitorCog,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
@@ -64,8 +65,10 @@ import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/con
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
 import { MasterCalculationRefreshModal } from "./shared/dayControls/MasterCalculationRefreshModal";
 import { UniversalDayControlBar } from "./shared/dayControls/UniversalDayControlBar";
+import { canEditOperationalDailyEntry, canReopenOperationalDay, isAdminEditableReopenedDay } from "./shared/services/dayEditPermissions";
+import { resolveUniversalDayStatus } from "./shared/services/dayStatusService";
 import { runMasterRecalculation } from "./shared/services/masterRecalculationService";
-import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot, UniversalDayStatus } from "./shared/types/dayControl.types";
+import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
 import { listJazzLoadBackup, restoreJazzLoadBackup, roleCanJazzLoad, setJazzLoadMonthStatus, subscribeJazzLoadMonths } from "./modules/jazzLoad/services/jazzLoadFirestore";
@@ -82,14 +85,13 @@ import {
   fetchMonthDays,
   getUserRole,
   listMonths,
-  reopenMonthDaysFor15Minutes,
-  reopenPreviousDayFor15Minutes,
+  reopenMonthDaysUntilClose,
+  reopenPreviousDayUntilClose,
   recalculateMonth,
   resolveExpenseCarryForwardSeed,
   resolveOpeningBalance,
   resolveOwnerOpeningBalance,
   roleCan,
-  queueClosePreviousDayReopenWindow,
   queueDayAndSummaryWrite,
   reopenCurrentDayUntilClose,
   saveNotificationSettings,
@@ -204,6 +206,7 @@ function expenseCarryForwardWarnings(
 
 type SaveDayOptions = {
   silent?: boolean;
+  awaitRemote?: boolean;
 };
 
 type LoadMonthOptions = {
@@ -211,6 +214,7 @@ type LoadMonthOptions = {
 };
 
 type PwaNotice = "offline-ready" | "update-available" | null;
+type UiMode = "modern" | "classic";
 
 const CONNECTED_STATUS = "Connected to Firestore";
 const FIRESTORE_ERROR_STATUS = "Firestore permission/error";
@@ -250,7 +254,7 @@ function isLiveDay(monthId: string, dayNo: number, now: Date) {
 }
 
 function isReopenActive(day: DailyLedgerInput | undefined, now: Date) {
-  return Boolean(day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime());
+  return Boolean(day?.reopenedAt || (day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime()));
 }
 
 function LoadingIcon({ label = "Loading" }: { label?: string }) {
@@ -1525,6 +1529,7 @@ function App() {
   const [ledgerReadModeConfig, setLedgerReadModeConfig] = useState<LedgerReadModeConfig>(defaultLedgerReadModeConfig);
   const [expenseMismatchCount, setExpenseMismatchCount] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
+  const [uiMode, setUiMode] = useState<UiMode>(() => (localStorage.getItem("uiMode") === "classic" ? "classic" : "modern"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const [authReady, setAuthReady] = useState(false);
@@ -1544,6 +1549,7 @@ function App() {
   const pendingWritesRef = useRef(false);
   const syncErrorRef = useRef(false);
   const queuedWriteCountRef = useRef(0);
+  const closedExpenseDayKeysRef = useRef(new Set<string>());
 
   function confirmLeavePendingChanges() {
     return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
@@ -1570,15 +1576,17 @@ function App() {
   function handleQueuedWrite(promise: Promise<unknown>, failureMessage: string) {
     queuedWriteCountRef.current += 1;
     updateSyncState(true);
-    promise
+    return promise
       .then(() => {
         queuedWriteCountRef.current = Math.max(queuedWriteCountRef.current - 1, 0);
         updateSyncState(queuedWriteCountRef.current > 0);
+        return true;
       })
       .catch((err) => {
         queuedWriteCountRef.current = Math.max(queuedWriteCountRef.current - 1, 0);
         updateSyncState(queuedWriteCountRef.current > 0);
         setStatus(err instanceof Error ? err.message : failureMessage);
+        return false;
       });
   }
 
@@ -1622,6 +1630,11 @@ function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.uiMode = uiMode;
+    localStorage.setItem("uiMode", uiMode);
+  }, [uiMode]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -1975,20 +1988,10 @@ function App() {
 
   const isSelectedLiveDay = isLiveDay(monthId, selectedDay, now);
   const selectedDayReopenActive = isReopenActive(selectedDayInput, now);
-
-  useEffect(() => {
-    if (isSelectedLiveDay || !selectedDayInput.reopenedUntilAt) return;
-    if (selectedDayInput.reopenedUntilAt > now.getTime()) return;
-    const nextDay = {
-      ...selectedDayInput,
-      reopenedUntilAt: undefined,
-      reopenedAt: undefined,
-      reopenedBy: undefined,
-      reopenedByRole: undefined
-    };
-    setDays((currentDays) => replaceDay(currentDays, nextDay));
-    handleQueuedWrite(queueClosePreviousDayReopenWindow(monthId, selectedDay), "Could not close the reopen window.");
-  }, [isSelectedLiveDay, monthId, now, openingBalance, selectedDay, selectedDayInput.reopenedUntilAt]);
+  const canAdminEditSelectedExpenseDay = role === "admin" && (
+    isSelectedLiveDay ||
+    (!isSelectedLiveDay && isAdminEditableReopenedDay(selectedDayInput, now.getTime()))
+  );
 
   function currentMonthRecord(): MonthRecord {
     return (
@@ -1998,13 +2001,20 @@ function App() {
   }
 
   async function saveDay(day: DailyLedgerInput, options: SaveDayOptions = {}) {
+    const dayKey = `${monthId}/${day.dayNo}`;
+    const currentDay = days.find((entry) => entry.dayNo === day.dayNo);
+    if (closedExpenseDayKeysRef.current.has(dayKey) || (currentDay?.lockedAt && !isReopenActive(currentDay, now))) {
+      const message = `Day ${day.dayNo} is closed. Reopen it before saving.`;
+      if (!options.silent) setStatus(message);
+      throw new Error(message);
+    }
     if (!roleCan(role, "daily")) {
       const message = "Your role can view this month but cannot edit daily entries.";
       setStatus(message);
       throw new Error(message);
     }
-    if (role === "admin" && !isSelectedLiveDay) {
-      const message = "Admins can only edit the current running day.";
+    if (role === "admin" && !canAdminEditSelectedExpenseDay) {
+      const message = "Admins can only edit the current running day or an owner-reopened previous day while it is manually open.";
       setStatus(message);
       throw new Error(message);
     }
@@ -2012,10 +2022,14 @@ function App() {
     const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setDays(nextDays);
     setComputed(nextComputed);
-    handleQueuedWrite(
-      queueDayAndSummaryWrite(currentMonthRecord(), day, nextComputed),
-      "Could not queue day save."
-    );
+    const write = queueDayAndSummaryWrite(currentMonthRecord(), day, nextComputed);
+    if (options.awaitRemote) {
+      const wrote = await handleQueuedWrite(write, "Could not save day to Firestore.");
+      if (!wrote) throw new Error("Firestore did not confirm the day save.");
+      if (!options.silent) setStatus(`Saved ${day.label ?? `Day ${day.dayNo}`} to Firestore.`);
+      return;
+    }
+    void handleQueuedWrite(write, "Could not queue day save.");
     if (!options.silent) setStatus(`Saved ${day.label ?? `Day ${day.dayNo}`} locally. Firestore will sync automatically.`);
   }
 
@@ -2028,24 +2042,33 @@ function App() {
       setStatus("Admins can only close the current running day.");
       return;
     }
+    const timestamp = Date.now();
+    const dayKey = `${monthId}/${day.dayNo}`;
     const lockedDay = {
       ...day,
-      lockedAt: day.lockedAt ?? Date.now(),
-      lockedBy: day.lockedBy ?? user?.uid,
-      lockedByRole: day.lockedByRole ?? role ?? undefined,
+      lockedAt: timestamp,
+      lockedBy: user?.uid,
+      lockedByRole: role ?? undefined,
       reopenedUntilAt: undefined,
       reopenedAt: undefined,
       reopenedBy: undefined,
       reopenedByRole: undefined
     };
+    closedExpenseDayKeysRef.current.add(dayKey);
     const nextDays = replaceDay(days, lockedDay);
     const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setDays(nextDays);
     setComputed(nextComputed);
-    handleQueuedWrite(
+    const wrote = await handleQueuedWrite(
       queueDayAndSummaryWrite(currentMonthRecord(), lockedDay, nextComputed, "lock-day"),
       "Could not queue day close."
     );
+    if (!wrote) {
+      closedExpenseDayKeysRef.current.delete(dayKey);
+      setDays((currentDays) => replaceDay(currentDays, day));
+      setComputed(computeMonth(replaceDay(nextDays, day), calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined));
+      return;
+    }
     setStatus(`Closed ${day.label ?? `Day ${day.dayNo}`} locally. Firestore will sync automatically.`);
   }
 
@@ -2074,7 +2097,7 @@ function App() {
     }
   }
 
-  async function reopenDay(dayNo: number, reopenUntilAt?: number) {
+  async function reopenDay(dayNo: number) {
     if (!roleCan(role, "daily")) {
       setStatus("Your role can view this month but cannot reopen days.");
       return;
@@ -2085,6 +2108,7 @@ function App() {
       return;
     }
     const day = days.find((entry) => entry.dayNo === dayNo) ?? emptyDay(dayNo);
+    closedExpenseDayKeysRef.current.delete(`${monthId}/${dayNo}`);
     const reopenedDay = isLiveReopen
       ? {
           ...day,
@@ -2098,7 +2122,7 @@ function App() {
         }
       : {
           ...day,
-          reopenedUntilAt: reopenUntilAt ?? Date.now() + 15 * 60 * 1000,
+          reopenedUntilAt: undefined,
           reopenedAt: Date.now(),
           reopenedBy: user?.uid,
           reopenedByRole: role ?? undefined
@@ -2107,13 +2131,11 @@ function App() {
     handleQueuedWrite(
       isLiveReopen
         ? reopenCurrentDayUntilClose(monthId, dayNo, role)
-        : reopenPreviousDayFor15Minutes(monthId, dayNo, role, reopenUntilAt),
+        : reopenPreviousDayUntilClose(monthId, dayNo, role),
       "Could not queue day reopen."
     );
     setStatus(
-      isLiveReopen
-        ? `Day ${dayNo} reopened locally until you close it again. Firestore will sync automatically.`
-        : `Day ${dayNo} reopened locally until ${new Date((reopenUntilAt ?? Date.now() + 15 * 60 * 1000)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Firestore will sync automatically.`
+      `Day ${dayNo} reopened locally until you close it again. Firestore will sync automatically.`
     );
   }
 
@@ -2142,17 +2164,18 @@ function App() {
     const dayNumbers = scope === "selected"
       ? [selectedDay]
       : availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now));
-    const reopenUntilAt = Date.now() + 15 * 60 * 1000;
+    const reopenAt = Date.now();
     const nextReopenedDays = dayNumbers.map((dayNo) => {
       const existing = days.find((entry) => entry.dayNo === dayNo);
       return {
         ...dayWithMonthDate(monthId, dayNo, existing),
-        reopenedUntilAt: reopenUntilAt,
-        reopenedAt: Date.now(),
+        reopenedUntilAt: undefined,
+        reopenedAt: reopenAt,
         reopenedBy: user?.uid,
         reopenedByRole: role
       };
     });
+    nextReopenedDays.forEach((day) => closedExpenseDayKeysRef.current.delete(`${monthId}/${day.dayNo}`));
 
     if (nextReopenedDays.length === 0) {
       setStatus("No closed previous days are available to reopen for this month.");
@@ -2163,11 +2186,11 @@ function App() {
     setDays((currentDays) => nextReopenedDays.reduce((nextDays, day) => replaceDay(nextDays, day), currentDays));
     try {
       await handleQueuedWrite(
-        reopenMonthDaysFor15Minutes(monthId, nextReopenedDays, role, reopenUntilAt),
+        reopenMonthDaysUntilClose(monthId, nextReopenedDays, role),
         "Could not queue month day reopen."
       );
       const dayText = scope === "selected" ? `Day ${selectedDay}` : `${nextReopenedDays.length} days`;
-      setStatus(`${dayText} reopened locally until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Firestore will sync automatically.`);
+      setStatus(`${dayText} reopened locally until manually closed. Firestore will sync automatically.`);
     } finally {
       setBulkReopening(null);
     }
@@ -2194,9 +2217,9 @@ function App() {
         if (existing?.lockedAt && !isReopenActive(existing, now)) return [];
         const day: DailyLedgerInput = {
           ...dayWithMonthDate(monthId, dayNo, existing),
-          lockedAt: existing?.lockedAt ?? timestamp,
-          lockedBy: existing?.lockedBy ?? user?.uid,
-          lockedByRole: existing?.lockedByRole ?? role ?? undefined,
+          lockedAt: timestamp,
+          lockedBy: user?.uid,
+          lockedByRole: role ?? undefined,
           reopenedUntilAt: undefined,
           reopenedAt: undefined,
           reopenedBy: undefined,
@@ -2210,12 +2233,13 @@ function App() {
       return;
     }
     const nextDays = nextClosedDays.reduce((updatedDays, day) => replaceDay(updatedDays, day), days);
+    nextClosedDays.forEach((day) => closedExpenseDayKeysRef.current.add(`${monthId}/${day.dayNo}`));
     const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setBulkClosingDays(true);
     setDays(nextDays);
     setComputed(nextComputed);
     try {
-      handleQueuedWrite(
+      void handleQueuedWrite(
         closeMonthDaysExceptToday(currentMonthRecord(), nextClosedDays, nextComputed, role),
         "Could not queue close-all-days action."
       );
@@ -2545,14 +2569,13 @@ function App() {
       const day = days.find((entry) => entry.dayNo === dayNo);
       const future = !availableDayNumbers(monthId, now).includes(dayNo);
       const live = isLiveDay(monthId, dayNo, now);
-      const reopened = isReopenActive(day, now);
-      let statusValue: UniversalDayStatus = "closed";
-      if (future) statusValue = "futureDisabled";
-      else if (live) statusValue = "today";
-      else if (reopened) statusValue = "reopened";
-      else if (!day) statusValue = "missing";
-      else if (day.lockedAt) statusValue = "locked";
-      else statusValue = "open";
+      const statusValue = resolveUniversalDayStatus({
+        exists: Boolean(day),
+        future,
+        live,
+        day,
+        nowMs: now.getTime()
+      });
       return {
         moduleKey: "expense",
         monthId,
@@ -2561,6 +2584,7 @@ function App() {
         saved: Boolean(day),
         dateLabel: dateLabelFor(monthId, dayNo),
         reopenedUntilAt: day?.reopenedUntilAt,
+        reopenedAt: day?.reopenedAt,
         disabledReason: future ? "Future days are disabled and cannot create records." : undefined
       };
     });
@@ -2598,10 +2622,18 @@ function App() {
   const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed);
   const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
   const isClosed = monthStatus === "closed";
-  const selectedDayLocked = isSelectedLiveDay ? false : !selectedDayReopenActive;
+  const selectedDayLocked = Boolean(selectedDayInput.lockedAt) && !selectedDayReopenActive;
   const canEditDaily = roleCan(role, "daily") && !isClosed;
   const liveDate = currentDateState(now);
-  const canEditSelectedDay = canEditDaily && !selectedDayLocked && (role === "owner" || (role === "admin" && isSelectedLiveDay));
+  const canEditSelectedDay = canEditOperationalDailyEntry({
+    role,
+    canWriteDaily: roleCan(role, "daily"),
+    monthClosed: isClosed,
+    isLiveDay: isSelectedLiveDay,
+    dayClosed: selectedDayLocked,
+    day: selectedDayInput,
+    nowMs: now.getTime()
+  });
   const canCloseSelectedDay =
     canEditDaily &&
     (role === "owner" || (role === "admin" && isSelectedLiveDay)) &&
@@ -2609,9 +2641,9 @@ function App() {
   const canReopenSelectedDay =
     canEditDaily &&
     selectedDayLocked &&
-    (role === "owner" || (role === "admin" && isSelectedLiveDay)) &&
+    canReopenOperationalDay({ role, isLiveDay: isSelectedLiveDay }) &&
     !selectedDayReopenActive;
-  const selectedDayReopenLabel = isSelectedLiveDay ? "Reopen Until Close" : "Reopen Until";
+  const selectedDayReopenLabel = "Reopen Until Close";
   const selectedDayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
   const ownerBulkReopenDayCount = availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now)).length;
   const canOwnerBulkReopenSelected =
@@ -2950,6 +2982,13 @@ function App() {
               {theme === "dark" ? <Sun /> : <Moon />}
               Theme
             </button>
+            <label className="display-mode-control col-span-2">
+              Display Mode
+              <select value={uiMode} onChange={(event) => setUiMode(event.target.value as UiMode)}>
+                <option value="modern">Modern</option>
+                <option value="classic">Classic</option>
+              </select>
+            </label>
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2">
             {navItems.filter((item) => item.show && !mobilePrimaryNav.some((primary) => primary.id === item.id)).map((item) => {
@@ -2990,6 +3029,15 @@ function App() {
               <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
                 {theme === "dark" ? <Sun /> : <Moon />}
               </button>
+              {!sidebarOpen && (
+                <button
+                  className="btn-ghost !h-11 !w-11 !px-0"
+                  onClick={() => setUiMode((mode) => mode === "modern" ? "classic" : "modern")}
+                  title={`Display mode: ${uiMode === "modern" ? "Modern" : "Classic"}`}
+                >
+                  <MonitorCog />
+                </button>
+              )}
             </div>
           </div>
           <nav className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
@@ -3010,6 +3058,12 @@ function App() {
           </nav>
           {sidebarOpen && (
             <>
+                            {(expenseSidebarControls || showRegisteredSidebarControls) && (
+                  <div className="mt-4 border-t border-slate-800 pt-4">
+                    {expenseSidebarControls}
+                    {showRegisteredSidebarControls && <SidebarDayControlsSlot />}
+                  </div>
+                )}
               <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
                 <p className="text-sm font-semibold uppercase text-emerald-300">Operations</p>
                 <p className="mt-2 text-lg font-semibold text-white">{liveClock}</p>
@@ -3025,6 +3079,13 @@ function App() {
                 </div>
                 <div className="mt-4 border-t border-slate-800 pt-4">
                   <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
+                  <label className="display-mode-control mt-3">
+                    Display Mode
+                    <select value={uiMode} onChange={(event) => setUiMode(event.target.value as UiMode)}>
+                      <option value="modern">Modern</option>
+                      <option value="classic">Classic</option>
+                    </select>
+                  </label>
                   <label className="mt-3">
                     Active Month
                     <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
@@ -3050,12 +3111,6 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {(expenseSidebarControls || showRegisteredSidebarControls) && (
-                  <div className="mt-4 border-t border-slate-800 pt-4">
-                    {expenseSidebarControls}
-                    {showRegisteredSidebarControls && <SidebarDayControlsSlot />}
-                  </div>
-                )}
                 {/* {months.length > 0 && (
                   <div className="mt-4 flex flex-col gap-2">
                     {months.slice(0, 8).map((month) => (
@@ -3126,7 +3181,7 @@ function App() {
             <p className="warning">
               {isSelectedLiveDay
                 ? `Day ${selectedDay} is closed.`
-                : `Day ${selectedDay} is closed. Reopen it to edit for 15 minutes.`}
+                : `Day ${selectedDay} is closed. Reopen it to edit until it is manually closed.`}
             </p>
           )}
 
@@ -3224,9 +3279,8 @@ function App() {
                     canClose={canCloseSelectedDay && !loading && Boolean(user)}
                     canReopen={canReopenSelectedDay && !loading && Boolean(user)}
                     reopenLabel={selectedDayReopenLabel}
-                    reopenExpiresAt={selectedDayInput.reopenedUntilAt}
-                    reopenRequiresTime={!isSelectedLiveDay}
-                    onReopenDay={(reopenUntilAt) => reopenDay(selectedDay, reopenUntilAt)}
+                    reopenRequiresTime={false}
+                    onReopenDay={() => reopenDay(selectedDay)}
                     canCreateCatalogs={canManageCatalogs}
                     onSave={saveDay}
                     onCloseDay={closeDay}

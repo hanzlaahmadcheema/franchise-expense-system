@@ -69,10 +69,13 @@ import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
 import { UniversalDayControlBar } from "../../../shared/dayControls/UniversalDayControlBar";
 import { useSidebarDayControls } from "../../../shared/context/SidebarDayControlsContext";
 import { useSelectedDate } from "../../../shared/context/SelectedDateContext";
+import { canEditOperationalDailyEntry, isActiveReopenWindow } from "../../../shared/services/dayEditPermissions";
+import { resolveUniversalDayStatus } from "../../../shared/services/dayStatusService";
 import { useAutoSaveEntry } from "../../../shared/hooks/useAutoSaveEntry";
 import { runMasterRecalculation } from "../../../shared/services/masterRecalculationService";
 import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
 import { createStockRecalculationAdapter } from "../adapters/stockRecalculationAdapter";
+import { SaveProgressDialog, type SaveProgressState } from "../../../shared/components/SaveProgressDialog";
 
 type StockSection = "dashboard" | "stockIn" | "daily" | "records" | "balances" | "jazzPayable" | "dues" | "products" | "accounts" | "settings" | "backup" | "reportsHub";
 type StockSectionGroup = "entries" | "reports";
@@ -109,7 +112,7 @@ function availableDays(monthId: string, now = new Date()) {
 }
 
 function isReopenActive(day: StockDayRecord | undefined, now = new Date()) {
-  return Boolean(day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime());
+  return isActiveReopenWindow(day, now.getTime());
 }
 
 function getStockDayStatus(
@@ -121,11 +124,11 @@ function getStockDayStatus(
 ) {
   const available = new Set(availableDays(monthId, now));
   if (!available.has(dayNo)) return "Future";
-  if (isLiveDay(monthId, dayNo, now)) return "Open";
   if (!day) return "Missing";
   if (monthStatus === "closed") return "Closed";
   if (day && isReopenActive(day, now)) return "Re-Open";
-  if (day?.status === "closed") return "Closed";
+  if (day?.status === "closed" || day?.lockedAt != null || day?.closedAt != null) return "Closed";
+  if (isLiveDay(monthId, dayNo, now)) return "Open";
   if (day?.status === "open") return "Open";
   return "Closed";
 }
@@ -139,11 +142,16 @@ function getDayStatusChipClass(status: string) {
 }
 
 function canEditStockDay(role: UserRole | null, month: StockMonth | undefined, monthId: string, day: StockDayRecord | undefined, dayNo: number, now = new Date()) {
-  if (!roleCanStock(role, "daily")) return false;
-  if (month?.status === "closed") return false;
-  if (role === "admin") return isLiveDay(monthId, dayNo, now);
-  if (isLiveDay(monthId, dayNo, now)) return true;
-  return isReopenActive(day, now);
+  return canEditOperationalDailyEntry({
+    role,
+    canWriteDaily: roleCanStock(role, "daily"),
+    monthClosed: month?.status === "closed",
+    isFutureDay: isFutureDay(monthId, dayNo, now),
+    isLiveDay: isLiveDay(monthId, dayNo, now),
+    dayClosed: day?.status === "closed" && !isReopenActive(day, now),
+    day,
+    nowMs: now.getTime()
+  });
 }
 
 function NumberInput({ value, onChange, disabled }: { value: number; onChange: (value: number) => void; disabled?: boolean }) {
@@ -547,6 +555,7 @@ export function StockLedgerModule({
   const [auditLogs, setAuditLogs] = useState<SystemAuditLog[]>([]);
   const [now, setNow] = useState(() => new Date());
   const [monthBootstrapPending, setMonthBootstrapPending] = useState(false);
+  const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const monthBootstrapPendingRef = useRef(false);
   const openingSeedAttemptedRef = useRef(false);
   const [openingBalances, setOpeningBalances] = useState<StockOpeningBalances>({ openingStock: {}, jazzOpeningPayable: 0 });
@@ -557,6 +566,7 @@ export function StockLedgerModule({
     onQueueWrite,
     onStatus
   });
+  const closedDayKeysRef = useRef(new Set<string>());
   callbacksRef.current = {
     onSnapshotMetadata,
     onFirestoreError,
@@ -749,7 +759,14 @@ export function StockLedgerModule({
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
       const day = days.find((item) => item.dayNo === dayNo);
-      const status = getStockDayStatus(monthId, dayNo, day, month?.status, now);
+      const displayStatus = getStockDayStatus(monthId, dayNo, day, month?.status, now);
+      const status = month?.status === "closed" ? "closed" : resolveUniversalDayStatus({
+        exists: Boolean(day),
+        future: displayStatus === "Future",
+        live: isLiveDay(monthId, dayNo, now),
+        day,
+        nowMs: now.getTime()
+      });
       return {
         moduleKey: "stock",
         monthId,
@@ -757,18 +774,9 @@ export function StockLedgerModule({
         saved: Boolean(day),
         dateLabel: dayDate(monthId, dayNo),
         reopenedUntilAt: day?.reopenedUntilAt,
-        disabledReason: status === "Future" ? "Future Stock Ledger days are disabled and cannot create records." : undefined,
-        status: status === "Future"
-          ? "futureDisabled"
-          : isLiveDay(monthId, dayNo, now)
-            ? "today"
-            : status === "Missing"
-              ? "missing"
-              : status === "Re-Open"
-                ? "reopened"
-                : status === "Closed"
-                  ? "closed"
-                  : "open"
+        reopenedAt: day?.reopenedAt,
+        disabledReason: displayStatus === "Future" ? "Future Stock Ledger days are disabled and cannot create records." : undefined,
+        status
       };
     });
   }, [days, month?.status, monthId, now]);
@@ -870,12 +878,23 @@ export function StockLedgerModule({
     createdBy: user.uid
   }) : null;
 
-  async function saveEntry(nextDraft = draft) {
-    if (!canEdit) {
-      onStatus("Your role can view Stock Ledger but cannot edit this day.");
-      return;
+  async function saveEntry(nextDraft = draft, options: { throwOnError?: boolean } = {}) {
+    if (closedDayKeysRef.current.has(`${monthId}/${selectedDay}`)) {
+      const message = `Stock Ledger day ${selectedDay} is closed. Reopen it before saving.`;
+      onStatus(message);
+      if (options.throwOnError) throw new Error(message);
+      return false;
     }
-    if (!selectedAccount) return;
+    if (!canEdit) {
+      const message = "Your role can view Stock Ledger but cannot edit this day.";
+      onStatus(message);
+      if (options.throwOnError) throw new Error(message);
+      return false;
+    }
+    if (!selectedAccount) {
+      if (options.throwOnError) throw new Error("Select a stock account before saving.");
+      return false;
+    }
     const computedPreviewEntry = buildStockEntry({
       id: selectedAccount.id,
       date: dayDate(monthId, selectedDay),
@@ -888,11 +907,15 @@ export function StockLedgerModule({
       carryForwardBalance: selectedCarryForwardBalance,
       createdBy: user.uid
     });
-    if (!computedPreviewEntry) return;
+    if (!computedPreviewEntry) {
+      if (options.throwOnError) throw new Error("The stock entry could not be prepared.");
+      return false;
+    }
     const validation = validateStockDraft(nextDraft, products, selectedAccount);
     if (!validation.valid) {
       onStatus(validation.errors.join(" "));
-      return;
+      if (options.throwOnError) throw new Error(validation.errors.join(" "));
+      return false;
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const entries = [
@@ -908,8 +931,28 @@ export function StockLedgerModule({
       createdBy: user.uid
     });
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role), "Could not queue stock entry save.");
-    onStatus(`Saved stock record for ${selectedAccount.name}. Firestore will sync automatically.`);
+    const write = saveStockDay(workingMonth, nextDay, days, user, role);
+    onQueueWrite(write, "Could not queue stock entry save.");
+    try {
+      await write;
+      onStatus(`Saved stock record for ${selectedAccount.name} to Firestore.`);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Firestore did not confirm the stock save.";
+      onStatus(message);
+      if (options.throwOnError) throw new Error(message);
+      return false;
+    }
+  }
+
+  async function handleVerifiedSave() {
+    setVerifiedSave({ status: "saving", title: "Saving Stock Day", message: "Writing the selected account entry to Firestore and waiting for confirmation..." });
+    try {
+      await saveEntry(draft, { throwOnError: true });
+      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Stock day ${selectedDay} was saved successfully and Firestore confirmed the write.` });
+    } catch (error) {
+      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
+    }
   }
 
   const handlePrint = (title: string, elementId: string) => {
@@ -1038,22 +1081,45 @@ export function StockLedgerModule({
       onStatus("This Stock Ledger day cannot be closed for the current role/status.");
       return;
     }
+    if (role === "admin" && !isLiveDay(monthId, selectedDay, now)) {
+      onStatus("Admins can only close the current Stock Ledger day.");
+      return;
+    }
     if (!selectedDayRecord) return;
+    if (!window.confirm(`Close Stock Ledger day ${selectedDay}? Inputs and saves will be locked until an explicit reopen.`)) {
+      return;
+    }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
+    const dayKey = `${monthId}/${selectedDay}`;
     const nextDay = {
       ...selectedDayRecord,
       status: "closed" as const,
-      closedAt: selectedDayRecord.closedAt ?? timestamp,
-      closedBy: selectedDayRecord.closedBy ?? user.uid,
+      closedAt: timestamp,
+      closedBy: user.uid,
+      lockedAt: timestamp,
+      lockedBy: user.uid,
+      lockedByRole: role ?? undefined,
       reopenedAt: undefined,
       reopenedBy: undefined,
+      reopenedByRole: undefined,
       reopenedUntilAt: undefined,
       updatedBy: user.uid,
       updatedAt: timestamp
     };
+    closedDayKeysRef.current.add(dayKey);
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "close-days"), "Could not queue stock day close.");
+    const closePromise = updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "close-days")
+      .then((result) => {
+        setDays(result.days);
+        setSummary(result.summary);
+      })
+      .catch((error) => {
+        closedDayKeysRef.current.delete(dayKey);
+        setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), selectedDayRecord].sort((a, b) => a.dayNo - b.dayNo));
+        throw error;
+      });
+    onQueueWrite(closePromise, "Could not queue stock day close.");
     onStatus(`Closed stock day ${selectedDay}.`);
   }
 
@@ -1064,6 +1130,7 @@ export function StockLedgerModule({
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
+    closedDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
     const day = selectedDayRecord ?? buildStockDayRecord({
       month: workingMonth,
       dayNo: selectedDay,
@@ -1073,33 +1140,33 @@ export function StockLedgerModule({
       timestamp
     });
     const liveReopen = isLiveDay(monthId, selectedDay, now);
-    const reopenUntilAt = liveReopen ? undefined : timestamp + 15 * 60 * 1000;
     const nextDay = liveReopen ? {
       ...day,
       status: "open" as const,
       closedAt: undefined,
       closedBy: undefined,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
       reopenedAt: timestamp,
       reopenedBy: user.uid,
+      reopenedByRole: role ?? undefined,
       reopenedUntilAt: undefined,
       updatedBy: user.uid,
       updatedAt: timestamp
     } : {
       ...day,
-      status: "closed" as const,
+      status: "open" as const,
       reopenedAt: timestamp,
       reopenedBy: user.uid,
-      reopenedUntilAt: reopenUntilAt,
+      reopenedByRole: role ?? undefined,
+      reopenedUntilAt: undefined,
       updatedBy: user.uid,
       updatedAt: timestamp
     };
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "reopen-days", reopenUntilAt), "Could not queue stock day reopen.");
-    onStatus(
-      liveReopen
-        ? `Reopened stock day ${selectedDay} until you close it again.`
-        : `Reopened stock day ${selectedDay} until ${new Date(reopenUntilAt ?? timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
-    );
+    onQueueWrite(updateStockDaysStatusBatch(workingMonth, [nextDay], days, user, role, "reopen-days"), "Could not queue stock day reopen.");
+    onStatus(`Reopened stock day ${selectedDay} until you close it again.`);
   }
 
   async function closeAllStock() {
@@ -1127,10 +1194,14 @@ export function StockLedgerModule({
       return {
         ...existing,
         status: "closed" as const,
-        closedAt: existing.closedAt ?? timestamp,
-        closedBy: existing.closedBy ?? user.uid,
+        closedAt: timestamp,
+        closedBy: user.uid,
+        lockedAt: timestamp,
+        lockedBy: user.uid,
+        lockedByRole: role ?? undefined,
         reopenedAt: undefined,
         reopenedBy: undefined,
+        reopenedByRole: undefined,
         reopenedUntilAt: undefined,
         updatedBy: user.uid,
         updatedAt: timestamp
@@ -1141,6 +1212,7 @@ export function StockLedgerModule({
       days
     );
     setDays(nextDays);
+    nextClosedDays.forEach((day) => closedDayKeysRef.current.add(`${monthId}/${day.dayNo}`));
     const closePromise = updateStockDaysStatusBatch(workingMonth, nextClosedDays, days, user, role, "close-days")
       .then((result) => {
         setDays(result.days);
@@ -1157,7 +1229,6 @@ export function StockLedgerModule({
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
-    const reopenUntilAt = timestamp + 15 * 60 * 1000;
     const targetDayNos = availableDays(monthId, now);
     const nextReopenedDays = targetDayNos.map((dayNo) => {
       const existing = days.find((day) => day.dayNo === dayNo) ?? buildStockDayRecord({
@@ -1170,10 +1241,11 @@ export function StockLedgerModule({
       });
       return {
         ...existing,
-        status: "closed" as const,
+        status: "open" as const,
         reopenedAt: timestamp,
         reopenedBy: user.uid,
-        reopenedUntilAt: reopenUntilAt,
+        reopenedByRole: role ?? undefined,
+        reopenedUntilAt: undefined,
         updatedBy: user.uid,
         updatedAt: timestamp
       };
@@ -1183,14 +1255,15 @@ export function StockLedgerModule({
       days
     );
     setDays(nextDays);
-    const reopenPromise = updateStockDaysStatusBatch(workingMonth, nextReopenedDays, days, user, role, "reopen-days", reopenUntilAt)
+    nextReopenedDays.forEach((day) => closedDayKeysRef.current.delete(`${monthId}/${day.dayNo}`));
+    const reopenPromise = updateStockDaysStatusBatch(workingMonth, nextReopenedDays, days, user, role, "reopen-days")
       .then((result) => {
         setMonths((current) => [result.month, ...current.filter((item) => item.id !== result.month.id)].sort((a, b) => b.id.localeCompare(a.id)));
         setDays(result.days);
         setSummary(result.summary);
       });
     onQueueWrite(reopenPromise, "Could not reopen all stock ledger days.");
-    onStatus(`Reopened ${nextReopenedDays.length} Stock Ledger days until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+    onStatus(`Reopened ${nextReopenedDays.length} Stock Ledger days until manually closed.`);
   }
 
   async function masterRefreshStockCalculations() {
@@ -1274,9 +1347,9 @@ export function StockLedgerModule({
         role={role}
         density="compact"
         busy={Boolean(loading) || monthBootstrapPending}
-        autoSaveStatus={section === "daily" ? stockEntryAutoSave.autoSaveStatus : undefined}
+        autoSaveStatus={section === "daily" ? (canEdit ? stockEntryAutoSave.autoSaveStatus : selectedDayRecord?.status === "closed" ? "closed" : "readOnly") : undefined}
         permissions={{
-          canCloseSelectedDay: canEdit && Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
+          canCloseSelectedDay: canEdit && (role === "owner" || isLiveDay(monthId, selectedDay, now)) && Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
           canReopenSelectedDay: canReopenSelectedDay && month?.status !== "closed" && !monthBootstrapPending,
           canReopenAllDays: role === "owner" && !monthBootstrapPending && availableDays(monthId, now).length > 0,
           canClosePreviousDaysExceptToday: role === "owner" && month?.status !== "closed" && !monthBootstrapPending,
@@ -1301,6 +1374,15 @@ export function StockLedgerModule({
             >
               <Save />
               Save
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={!canEdit || Boolean(loading) || monthBootstrapPending || verifiedSave?.status === "saving"}
+              title={!canEdit ? "Reopen the day before saving." : "Save immediately and wait for Firestore confirmation"}
+              onClick={() => void handleVerifiedSave()}
+            >
+              <Save />
+              Save Now & Verify
             </button>
             <button
               className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
@@ -1339,7 +1421,8 @@ export function StockLedgerModule({
     selectedStockStatus,
     setSelectedDay,
     stockCalendarDays,
-    stockEntryAutoSave.autoSaveStatus
+    stockEntryAutoSave.autoSaveStatus,
+    verifiedSave?.status
   ]);
   useSidebarDayControls("stock", sidebarDayControls, true);
 
@@ -1408,6 +1491,7 @@ export function StockLedgerModule({
 
   return (
     <section className="space-y-5">
+      <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {carryForwardWarnings.length > 0 && (role === "owner" || role === "admin") && (
         <div className="warning">
           <p>{carryForwardWarnings.length} Stock month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
@@ -1711,7 +1795,7 @@ export function StockLedgerModule({
                     <>
                       <span className="text-slate-700">·</span>
                       <span className="text-[10px] font-semibold uppercase text-emerald-300 animate-pulse">
-                        Expires {new Date(selectedDayRecord.reopenedUntilAt!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        Reopened until manual close
                       </span>
                     </>
                   )}
@@ -1747,7 +1831,9 @@ export function StockLedgerModule({
               {/* Action Buttons Section */}
               <div className="md:col-span-4 flex flex-wrap gap-2.5">
                 <span className="flex flex-1 items-center rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                  {stockEntryAutoSave.autoSaveStatus === "saving"
+                  {!canEdit
+                    ? "Autosave off"
+                    : stockEntryAutoSave.autoSaveStatus === "saving"
                     ? "Autosaving..."
                     : stockEntryAutoSave.autoSaveStatus === "error"
                       ? "Autosave failed"

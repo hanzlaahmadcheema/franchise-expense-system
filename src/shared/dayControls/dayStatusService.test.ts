@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableDayNumbers, calendarCells, isFutureDay, isLiveDay, statusLabel } from "../services/dayStatusService";
+import { availableDayNumbers, calendarCells, isFutureDay, isLiveDay, resolveUniversalDayStatus, statusLabel } from "../services/dayStatusService";
 
 describe("shared day status helpers", () => {
   const now = new Date(2026, 4, 30);
@@ -27,5 +27,24 @@ describe("shared day status helpers", () => {
     expect(statusLabel("missing")).toBe("Missing");
     expect(statusLabel("closed")).toBe("Closed");
     expect(statusLabel("locked")).toBe("Closed");
+  });
+
+  it("keeps a live day closed and only reports reopened after an explicit newer reopen", () => {
+    const closedAt = now.getTime();
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: true,
+      day: { status: "closed", lockedAt: closedAt, reopenedAt: closedAt - 1 },
+      nowMs: closedAt
+    })).toBe("closed");
+
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: true,
+      day: { status: "open", lockedAt: closedAt, reopenedAt: closedAt + 1, reopenedByRole: "owner" },
+      nowMs: closedAt + 2
+    })).toBe("reopened");
   });
 });

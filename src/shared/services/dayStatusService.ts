@@ -1,4 +1,5 @@
 import type { ModuleKey, UniversalDaySnapshot, UniversalDayStatus } from "../types/dayControl.types";
+import { isActiveReopenWindow, type ReopenedDayState } from "./dayEditPermissions";
 
 export function pad2(value: number) {
   return String(value).padStart(2, "0");
@@ -64,6 +65,21 @@ export function statusChipClass(status: UniversalDayStatus) {
   if (status === "closed" || status === "locked") return "bg-red-400/15 text-red-200";
   if (status === "missing") return "bg-orange-400/15 text-orange-200";
   return "bg-slate-800 text-slate-500";
+}
+
+export function resolveUniversalDayStatus(input: {
+  exists: boolean;
+  future: boolean;
+  live: boolean;
+  day?: ReopenedDayState | null;
+  nowMs?: number;
+}): UniversalDayStatus {
+  if (input.future) return "futureDisabled";
+  if (isActiveReopenWindow(input.day, input.nowMs)) return "reopened";
+  if (input.day?.status === "closed" || input.day?.lockedAt != null || input.day?.closedAt != null) return "closed";
+  if (!input.exists) return "missing";
+  if (input.live) return "today";
+  return "open";
 }
 
 export function buildDaySnapshot(input: {

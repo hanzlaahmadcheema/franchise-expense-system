@@ -161,7 +161,7 @@ async function syncJazzLoadLedgerV2RawEntriesInBatch(
   for (const entry of rawEntries) {
     batch.set(doc(rawCollection, entry.id), cleanForFirestore({
       id: entry.id,
-      module: "jazzLoad",
+      module: "jazzLoad" as const,
       type: entry.type,
       monthId: day.monthId,
       dayNo: day.dayNo,
@@ -236,8 +236,12 @@ function mapDayData(data: Partial<JazzLoadDay>, id: string): JazzLoadDay {
     updatedAt: data.updatedAt ?? 0,
     closedAt: data.closedAt,
     closedBy: data.closedBy,
+    lockedAt: data.lockedAt,
+    lockedBy: data.lockedBy,
+    lockedByRole: data.lockedByRole,
     reopenedAt: data.reopenedAt,
     reopenedBy: data.reopenedBy,
+    reopenedByRole: data.reopenedByRole,
     reopenedUntilAt: data.reopenedUntilAt
   };
 }
@@ -776,7 +780,18 @@ export async function saveJazzLoadDay(
   };
 
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
-  batch.set(dayRef(month.id, day.dayNo), cleanForFirestore(nextDay), { merge: true });
+  batch.set(dayRef(month.id, day.dayNo), {
+    ...cleanForFirestore(nextDay),
+    lockedAt: nextDay.lockedAt ?? deleteField(),
+    lockedBy: nextDay.lockedBy ?? deleteField(),
+    lockedByRole: nextDay.lockedByRole ?? deleteField(),
+    closedAt: nextDay.closedAt ?? deleteField(),
+    closedBy: nextDay.closedBy ?? deleteField(),
+    reopenedAt: nextDay.reopenedAt ?? deleteField(),
+    reopenedBy: nextDay.reopenedBy ?? deleteField(),
+    reopenedByRole: nextDay.reopenedByRole ?? deleteField(),
+    reopenedUntilAt: nextDay.reopenedUntilAt ?? deleteField()
+  }, { merge: true });
   for (const entry of nextDay.doEntries) {
     batch.set(doc(dayRef(month.id, day.dayNo), "doEntries", entry.id), cleanForFirestore(entry), { merge: true });
   }
@@ -789,12 +804,10 @@ export async function saveJazzLoadDay(
       : action === "reopen-day"
         ? `Reopened Jazz Load day ${day.dayNo}`
         : `Saved Jazz Load day ${day.dayNo}`;
-  stageUnifiedAudit(
-    batch,
-    {
+  const unifiedAuditInput = {
       id: auditId,
       createdAt: timestamp,
-      module: "jazzLoad",
+      module: "jazzLoad" as const,
       action,
       summary: summaryText,
       monthId: month.id,
@@ -804,10 +817,15 @@ export async function saveJazzLoadDay(
       targetType: "day",
       targetId: `${month.id}/${day.dayNo}`,
       sourcePath: `jazzLoadMonths/${month.id}/audit/${auditId}`
-    },
-    currentActor.userRole ?? "viewer"
-  );
+    };
+  if (action !== "close-day") {
+    stageUnifiedAudit(batch, unifiedAuditInput, currentActor.userRole ?? "viewer");
+  }
   await batch.commit();
+  if (action === "close-day") {
+    void writeAuditLog(unifiedAuditInput, { actorRole: currentActor.userRole ?? "viewer" })
+      .catch(() => console.warn("Jazz Load day closed, but the secondary audit log write failed."));
+  }
   return { month: nextMonth, day: nextDay, summary };
 }
 
@@ -955,7 +973,6 @@ export function reopenJazzLoadDaysFor15Minutes(
 ) {
   const currentActor = actor(user, role);
   const timestamp = now();
-  const reopenUntil = reopenUntilAt ?? timestamp + 15 * 60 * 1000;
   const nextDays = allDays
     .map((day) => reopenedDays.find((item) => item.dayNo === day.dayNo) ?? day)
     .concat(reopenedDays.filter((day) => !allDays.some((item) => item.dayNo === day.dayNo)))
@@ -975,17 +992,19 @@ export function reopenJazzLoadDaysFor15Minutes(
 
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
   reopenedDays.forEach((day) => {
+    const payload = cleanForFirestore({
+      ...day,
+      status: "open" as const,
+      reopenedAt: timestamp,
+      reopenedBy: currentActor.userId,
+      reopenedByRole: currentActor.userRole,
+      reopenedUntilAt: reopenUntilAt,
+      updatedBy: currentActor.userId,
+      updatedAt: timestamp
+    });
     batch.set(
       dayRef(month.id, day.dayNo),
-      cleanForFirestore({
-        ...day,
-        status: "closed",
-        reopenedAt: timestamp,
-        reopenedBy: currentActor.userId,
-        reopenedUntilAt: reopenUntil,
-        updatedBy: currentActor.userId,
-        updatedAt: timestamp
-      }),
+      reopenUntilAt ? payload : { ...payload, reopenedUntilAt: deleteField() },
       { merge: true }
     );
   });
@@ -1056,10 +1075,14 @@ export function closeJazzLoadDaysExceptToday(
     const payload = cleanForFirestore({
       ...day,
       status: "closed",
-      closedAt: day.closedAt ?? timestamp,
-      closedBy: day.closedBy ?? currentActor.userId,
+      closedAt: timestamp,
+      closedBy: currentActor.userId,
+      lockedAt: timestamp,
+      lockedBy: currentActor.userId,
+      lockedByRole: currentActor.userRole,
       reopenedAt: undefined,
       reopenedBy: undefined,
+      reopenedByRole: undefined,
       reopenedUntilAt: undefined,
       updatedBy: currentActor.userId,
       updatedAt: timestamp
@@ -1070,6 +1093,7 @@ export function closeJazzLoadDaysExceptToday(
         ...payload,
         reopenedAt: deleteField(),
         reopenedBy: deleteField(),
+        reopenedByRole: deleteField(),
         reopenedUntilAt: deleteField()
       },
       { merge: true }

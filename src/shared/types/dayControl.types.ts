@@ -32,6 +32,7 @@ export type UniversalDaySnapshot = {
   dateLabel?: string;
   saved?: boolean;
   reopenedUntilAt?: number;
+  reopenedAt?: number;
   disabledReason?: string;
 };
 

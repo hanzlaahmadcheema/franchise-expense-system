@@ -165,7 +165,7 @@ async function syncStockLedgerV2RawEntriesInBatch(
   for (const entry of rawEntries) {
     batch.set(doc(rawCollection, entry.id), cleanForFirestore({
       id: entry.id,
-      module: "stock",
+      module: "stock" as const,
       type: entry.type,
       monthId: day.monthId,
       dayNo: day.dayNo,
@@ -259,8 +259,12 @@ function mapDayData(data: Partial<StockDayRecord>, id: string): StockDayRecord {
     updatedAt: data.updatedAt ?? 0,
     closedAt: data.closedAt,
     closedBy: data.closedBy,
+    lockedAt: data.lockedAt,
+    lockedBy: data.lockedBy,
+    lockedByRole: data.lockedByRole,
     reopenedAt: data.reopenedAt,
     reopenedBy: data.reopenedBy,
+    reopenedByRole: data.reopenedByRole,
     reopenedUntilAt: data.reopenedUntilAt
   };
 }
@@ -598,8 +602,12 @@ export async function saveStockDay(
     ...cleanForFirestore({ ...nextDay, stockOut: nextDay.entries }),
     closedAt: nextDay.closedAt ?? deleteField(),
     closedBy: nextDay.closedBy ?? deleteField(),
+    lockedAt: nextDay.lockedAt ?? deleteField(),
+    lockedBy: nextDay.lockedBy ?? deleteField(),
+    lockedByRole: nextDay.lockedByRole ?? deleteField(),
     reopenedAt: nextDay.reopenedAt ?? deleteField(),
     reopenedBy: nextDay.reopenedBy ?? deleteField(),
+    reopenedByRole: nextDay.reopenedByRole ?? deleteField(),
     reopenedUntilAt: nextDay.reopenedUntilAt ?? deleteField()
   }, { merge: true });
   const nextEntryIds = new Set(nextDay.entries.map((entry) => entry.id));
@@ -640,12 +648,10 @@ export async function saveStockDay(
   );
   batch.set(monthlySummaryRef(month.id), cleanForFirestore(summary), { merge: true });
   batch.set(auditRef(month.id, auditId), cleanForFirestore(audit));
-  stageUnifiedAudit(
-    batch,
-    {
+  const unifiedAuditInput = {
       id: auditId,
       createdAt: timestamp,
-      module: "stock",
+      module: "stock" as const,
       action,
       summary: action === "close-day" ? `Closed stock day ${day.dayNo}` : action === "reopen-day" ? `Reopened stock day ${day.dayNo}` : `Saved stock day ${day.dayNo}`,
       monthId: month.id,
@@ -655,10 +661,15 @@ export async function saveStockDay(
       targetType: "day",
       targetId: `${month.id}/${day.dayNo}`,
       sourcePath: `stockMonths/${month.id}/audit/${auditId}`
-    },
-    currentActor.userRole ?? "viewer"
-  );
+    };
+  if (action !== "close-day") {
+    stageUnifiedAudit(batch, unifiedAuditInput, currentActor.userRole ?? "viewer");
+  }
   await batch.commit();
+  if (action === "close-day") {
+    void writeAuditLog(unifiedAuditInput, { actorRole: currentActor.userRole ?? "viewer" })
+      .catch(() => console.warn("Stock day closed, but the secondary audit log write failed."));
+  }
   return { month: nextMonth, day: nextDay, summary };
 }
 
@@ -723,8 +734,12 @@ export async function recalculateStockMonth(
     }),
       closedAt: day.closedAt ?? deleteField(),
       closedBy: day.closedBy ?? deleteField(),
+      lockedAt: day.lockedAt ?? deleteField(),
+      lockedBy: day.lockedBy ?? deleteField(),
+      lockedByRole: day.lockedByRole ?? deleteField(),
       reopenedAt: day.reopenedAt ?? deleteField(),
       reopenedBy: day.reopenedBy ?? deleteField(),
+      reopenedByRole: day.reopenedByRole ?? deleteField(),
       reopenedUntilAt: day.reopenedUntilAt ?? deleteField()
     }, { merge: true });
   });
@@ -785,10 +800,11 @@ export function reopenStockDayFor15Minutes(
     month,
     {
       ...day,
-      status: "closed",
+      status: "open",
       reopenedAt: timestamp,
       reopenedBy: user?.uid,
-      reopenedUntilAt: reopenUntilAt ?? timestamp + 15 * 60 * 1000
+      reopenedByRole: role ?? undefined,
+      reopenedUntilAt: reopenUntilAt
     },
     allDays,
     user,
@@ -838,8 +854,12 @@ export async function updateStockDaysStatusBatch(
       ...cleanForFirestore({ ...nextDay, stockOut: nextDay.entries }),
       closedAt: nextDay.closedAt ?? deleteField(),
       closedBy: nextDay.closedBy ?? deleteField(),
+      lockedAt: nextDay.lockedAt ?? deleteField(),
+      lockedBy: nextDay.lockedBy ?? deleteField(),
+      lockedByRole: nextDay.lockedByRole ?? deleteField(),
       reopenedAt: nextDay.reopenedAt ?? deleteField(),
       reopenedBy: nextDay.reopenedBy ?? deleteField(),
+      reopenedByRole: nextDay.reopenedByRole ?? deleteField(),
       reopenedUntilAt: nextDay.reopenedUntilAt ?? deleteField()
     }, { merge: true });
   });
@@ -892,10 +912,14 @@ export function closeStockDay(
     {
       ...day,
       status: "closed",
-      closedAt: day.closedAt ?? timestamp,
-      closedBy: day.closedBy ?? user?.uid,
+      closedAt: timestamp,
+      closedBy: user?.uid,
+      lockedAt: timestamp,
+      lockedBy: user?.uid,
+      lockedByRole: role ?? undefined,
       reopenedAt: undefined,
       reopenedBy: undefined,
+      reopenedByRole: undefined,
       reopenedUntilAt: undefined
     },
     allDays,

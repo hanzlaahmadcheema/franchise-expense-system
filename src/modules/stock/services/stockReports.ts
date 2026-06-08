@@ -221,6 +221,7 @@ export function exportStockDayXlsx(day: StockDayRecord) {
 }
 
 export function exportStockPrintable(summary: StockMonthlySummary, days: StockDayRecord[]) {
+  const classic = window.localStorage.getItem("uiMode") === "classic";
   const rows = days.flatMap((day) =>
     day.entries.map((entry) => `
       <tr>
@@ -293,14 +294,14 @@ export function exportStockPrintable(summary: StockMonthlySummary, days: StockDa
           table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 12px;
-            border: 1px solid #1e293b;
+            font-size: ${classic ? "14px" : "12px"};
+            border: ${classic ? "2px" : "1px"} solid #1e293b;
             border-radius: 12px;
             overflow: hidden;
           }
           th, td {
-            border-bottom: 1px solid #1e293b;
-            padding: 9px 10px;
+            border-bottom: ${classic ? "2px" : "1px"} solid #1e293b;
+            padding: ${classic ? "12px 13px" : "9px 10px"};
             text-align: left;
             vertical-align: top;
           }

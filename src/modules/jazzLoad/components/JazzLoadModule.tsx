@@ -68,10 +68,13 @@ import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
 import { UniversalDayControlBar } from "../../../shared/dayControls/UniversalDayControlBar";
 import { useSidebarDayControls } from "../../../shared/context/SidebarDayControlsContext";
 import { useSelectedDate } from "../../../shared/context/SelectedDateContext";
+import { canEditOperationalDailyEntry, isActiveReopenWindow, isAdminEditableReopenedDay } from "../../../shared/services/dayEditPermissions";
+import { resolveUniversalDayStatus } from "../../../shared/services/dayStatusService";
 import { useAutoSaveEntry } from "../../../shared/hooks/useAutoSaveEntry";
 import { runMasterRecalculation } from "../../../shared/services/masterRecalculationService";
 import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
 import { createJazzLoadRecalculationAdapter } from "../adapters/jazzLoadRecalculationAdapter";
+import { SaveProgressDialog, type SaveProgressState } from "../../../shared/components/SaveProgressDialog";
 
 type JazzLoadSection = "daily" | "dashboard" | "reports" | "settings" | "backup";
 type JazzLoadPopup = {
@@ -91,7 +94,7 @@ function shouldLogJazzLoadSaveDebug() {
 }
 
 function debugJazzLoadSaveBlock(input: {
-  source: "autosave" | "manual-save" | "save-guard";
+  source: "autosave" | "manual-save" | "verified-save" | "save-guard";
   reason: JazzLoadSaveBlockReason | "Permission denied";
   detail: string;
   role: UserRole | null;
@@ -164,18 +167,6 @@ function activeRateFor(rates: JazzLoadRateConfig[], primaryType: JazzLoadRateTyp
   return rates.find((rate) => rate.active && rate.type === primaryType) ??
     rates.find((rate) => rate.active && legacyTypes.includes(rate.type)) ??
     null;
-}
-
-function getMillis(val: unknown): number {
-  if (!val) return 0;
-  if (typeof val === "number") return val;
-  if (typeof val === "object" && "toMillis" in val && typeof val.toMillis === "function") return val.toMillis();
-  if (val instanceof Date) return val.getTime();
-  if (typeof val === "object" && "seconds" in val) {
-    const timestamp = val as { seconds: number; nanoseconds?: number };
-    return timestamp.seconds * 1000 + Math.floor((timestamp.nanoseconds ?? 0) / 1000000);
-  }
-  return Number(val);
 }
 
 function NumberInput({
@@ -308,7 +299,9 @@ export function JazzLoadModule({
   const [recalculating, setRecalculating] = useState(false);
   const [editingDoNameRows, setEditingDoNameRows] = useState<Set<string>>(() => new Set());
   const [popup, setPopup] = useState<JazzLoadPopup | null>(null);
+  const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const lastSavedRef = useRef("");
+  const closedDayKeysRef = useRef(new Set<string>());
   const lastSystemMessageRef = useRef("");
   const callbacksRef = useRef({
     onSnapshotMetadata,
@@ -349,8 +342,16 @@ export function JazzLoadModule({
   const selectedDate = dayDate(monthId, selectedDay);
   const selectedDayFuture = isFutureJazzDay(monthId, selectedDay, now);
   const selectedDayLive = monthId === currentMonthId(now) && selectedDay === now.getDate();
-  const selectedDayCorrectionActive = Boolean(selectedDayRecord?.reopenedUntilAt && getMillis(selectedDayRecord.reopenedUntilAt) > now.getTime());
-  const selectedDayClosed = selectedDayRecord?.status === "closed" && !selectedDayCorrectionActive;
+  const selectedDayCorrectionActive = isActiveReopenWindow(selectedDayRecord, now.getTime());
+  const selectedDayClosed = Boolean(
+    selectedDayRecord &&
+    (selectedDayRecord.status === "closed" || selectedDayRecord.lockedAt != null || selectedDayRecord.closedAt != null) &&
+    !selectedDayCorrectionActive
+  );
+  const adminCanEditSelectedDay = role === "admin" && (
+    selectedDayLive ||
+    (!selectedDayLive && isAdminEditableReopenedDay(selectedDayRecord, now.getTime()))
+  );
   const activeRates: ActiveJazzLoadRates = useMemo(
     () => ({
       mlRate: activeRateFor(rates, "ml_addition"),
@@ -361,19 +362,29 @@ export function JazzLoadModule({
   );
   const canRead = roleCanJazzLoad(role, "read");
   const canWriteDaily = roleCanJazzLoad(role, "daily");
-  const canEditDaily =
-    canWriteDaily &&
-    !selectedDayFuture &&
-    currentMonth?.status !== "closed" &&
-    (role === "owner" || selectedDayLive) &&
-    !selectedDayClosed;
+  const canEditDaily = canEditOperationalDailyEntry({
+    role,
+    canWriteDaily,
+    monthClosed: currentMonth?.status === "closed",
+    isFutureDay: selectedDayFuture,
+    isLiveDay: selectedDayLive,
+    dayClosed: selectedDayClosed,
+    day: selectedDayRecord,
+    nowMs: now.getTime()
+  });
   const jazzCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
       const day = days.find((entry) => entry.dayNo === dayNo);
       const future = isFutureJazzDay(monthId, dayNo, now);
       const live = monthId === currentMonthId(now) && dayNo === now.getDate();
-      const correctionActive = Boolean(day?.reopenedUntilAt && getMillis(day.reopenedUntilAt) > now.getTime());
+      const status = resolveUniversalDayStatus({
+        exists: Boolean(day),
+        future,
+        live,
+        day,
+        nowMs: now.getTime()
+      });
       return {
         moduleKey: "jazzLoad",
         monthId,
@@ -381,18 +392,9 @@ export function JazzLoadModule({
         saved: Boolean(day),
         dateLabel: dayDate(monthId, dayNo),
         reopenedUntilAt: day?.reopenedUntilAt,
+        reopenedAt: day?.reopenedAt,
         disabledReason: future ? "Future Jazz Load days are disabled and cannot create records." : undefined,
-        status: future
-          ? "futureDisabled"
-          : live
-            ? "today"
-            : correctionActive
-              ? "reopened"
-              : day?.status === "closed"
-                ? "closed"
-                : day
-                  ? "open"
-                  : "missing"
+        status
       };
     });
   }, [days, monthId, now]);
@@ -490,17 +492,6 @@ export function JazzLoadModule({
     }, (error) => callbacksRef.current.onFirestoreError(error.message));
   }, [monthId, selectedDay, selectedDayFuture]);
 
-  // Auto-close reopened Jazz Load day when the correction window expires
-  useEffect(() => {
-    if (selectedDayFuture || !selectedDayRecord) return;
-    if (selectedDayRecord.status !== "open" || !selectedDayRecord.reopenedUntilAt) return;
-    
-    const expiresAt = getMillis(selectedDayRecord.reopenedUntilAt);
-    if (expiresAt > now.getTime()) return;
-
-    void saveDay("closed", { silent: true });
-  }, [now, selectedDayRecord, selectedDayFuture]);
-
   useEffect(() => {
     if (selectedDayFuture) {
       setDrafts([]);
@@ -591,6 +582,7 @@ export function JazzLoadModule({
     canWriteDaily,
     selectedDayFuture,
     selectedDayLive,
+    adminCanEditSelectedDay,
     monthClosed: currentMonth?.status === "closed",
     dayClosed: selectedDayClosed,
     hasDrafts: drafts.length > 0,
@@ -720,10 +712,17 @@ export function JazzLoadModule({
     options: {
       silent?: boolean;
       nextDrafts?: JazzLoadDoEntryDraft[];
-      source?: "autosave" | "manual-save";
+      source?: "autosave" | "manual-save" | "verified-save";
       throwOnError?: boolean;
     } = {}
   ) {
+    const dayKey = `${monthId}/${selectedDay}`;
+    if (status === "open" && closedDayKeysRef.current.has(dayKey)) {
+      const message = `Jazz Load day ${selectedDay} is closed. Reopen it before saving.`;
+      if (!options.silent) pushPopup("warning", message);
+      if (options.throwOnError) throw new Error(message);
+      return;
+    }
     const currentDrafts = options.nextDrafts ?? drafts;
     const workingValidation = validateJazzLoadDrafts(currentDrafts, activeRates);
     const workingSaveState = getJazzLoadSaveState({
@@ -731,6 +730,7 @@ export function JazzLoadModule({
       canWriteDaily,
       selectedDayFuture,
       selectedDayLive,
+      adminCanEditSelectedDay,
       monthClosed: currentMonth?.status === "closed",
       dayClosed: selectedDayClosed,
       hasDrafts: currentDrafts.length > 0,
@@ -754,7 +754,7 @@ export function JazzLoadModule({
     }
     const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
     const timestamp = Date.now();
-    const nextStatus = status === "closed" || (selectedDayRecord?.status === "closed" && !selectedDayCorrectionActive) ? "closed" : "open";
+    const nextStatus = status === "closed" || selectedDayClosed ? "closed" : "open";
     const entries = currentDrafts.map((draft) => {
       const previous = resolveOpeningEntry(draft);
       const openingBase = previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0;
@@ -784,12 +784,17 @@ export function JazzLoadModule({
       updatedBy: user.uid,
       createdAt: selectedDayRecord?.createdAt ?? timestamp,
       updatedAt: timestamp,
-      closedAt: nextStatus === "closed" ? (selectedDayRecord?.closedAt ?? timestamp) : undefined,
-      closedBy: nextStatus === "closed" ? (selectedDayRecord?.closedBy ?? user.uid) : undefined,
+      closedAt: nextStatus === "closed" ? timestamp : selectedDayRecord?.closedAt,
+      closedBy: nextStatus === "closed" ? user.uid : selectedDayRecord?.closedBy,
+      lockedAt: nextStatus === "closed" ? timestamp : selectedDayRecord?.lockedAt,
+      lockedBy: nextStatus === "closed" ? user.uid : selectedDayRecord?.lockedBy,
+      lockedByRole: nextStatus === "closed" ? role ?? undefined : selectedDayRecord?.lockedByRole,
       reopenedAt: nextStatus === "open" ? selectedDayRecord?.reopenedAt : undefined,
       reopenedBy: nextStatus === "open" ? selectedDayRecord?.reopenedBy : undefined,
+      reopenedByRole: nextStatus === "open" ? selectedDayRecord?.reopenedByRole : undefined,
       reopenedUntilAt: nextStatus === "open" ? selectedDayRecord?.reopenedUntilAt : undefined
     };
+    if (nextStatus === "closed") closedDayKeysRef.current.add(dayKey);
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), day].sort((a, b) => a.dayNo - b.dayNo));
     const write = saveJazzLoadDay(month, day, days, user, role, status === "closed" ? "close-day" : "save-day")
       .catch((err) => {
@@ -816,6 +821,12 @@ export function JazzLoadModule({
         pushPopup("success", status === "closed" ? `Closed Jazz Load day ${selectedDay} locally.` : `Saved Jazz Load day ${selectedDay} locally.`);
       }
     } catch (err) {
+      if (nextStatus === "closed") {
+        closedDayKeysRef.current.delete(dayKey);
+        setDays((current) => selectedDayRecord
+          ? [...current.filter((item) => item.dayNo !== selectedDay), selectedDayRecord].sort((a, b) => a.dayNo - b.dayNo)
+          : current.filter((item) => item.dayNo !== selectedDay));
+      }
       const message = normalizeSaveError(err);
       if (!options.silent) pushPopup("error", message);
       if (options.throwOnError) throw new Error(message);
@@ -830,22 +841,28 @@ export function JazzLoadModule({
     }
     if (!window.confirm(`Reopen Jazz Load day ${selectedDay}?`)) return;
     const timestamp = Date.now();
+    closedDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
     const reopened = selectedDayLive ? {
       ...selectedDayRecord,
       status: "open" as const,
       closedAt: undefined,
       closedBy: undefined,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
       reopenedAt: timestamp,
       reopenedBy: user.uid,
+      reopenedByRole: role ?? undefined,
       reopenedUntilAt: undefined,
       updatedBy: user.uid,
       updatedAt: timestamp
     } : {
       ...selectedDayRecord,
-      status: "closed" as const,
+      status: "open" as const,
       reopenedAt: timestamp,
       reopenedBy: user.uid,
-      reopenedUntilAt: timestamp + 15 * 60 * 1000,
+      reopenedByRole: role ?? undefined,
+      reopenedUntilAt: undefined,
       updatedBy: user.uid,
       updatedAt: timestamp
     };
@@ -857,7 +874,7 @@ export function JazzLoadModule({
       "success",
       selectedDayLive
         ? `Jazz Load day ${selectedDay} reopened until you close it again.`
-        : `Jazz Load day ${selectedDay} opened for a 15-minute correction window.`
+        : `Jazz Load day ${selectedDay} reopened until you close it again.`
     );
   }
 
@@ -881,19 +898,20 @@ export function JazzLoadModule({
       ? [selectedDay]
       : availableJazzLoadDayNumbers(monthId, now).filter((dayNo) => !(monthId === liveDate.monthId && dayNo === liveDate.dayNo));
     const timestamp = Date.now();
-    const reopenUntilAt = timestamp + 15 * 60 * 1000;
     const nextReopenedDays = dayNumbers.map((dayNo) => {
       const existing = days.find((day) => day.dayNo === dayNo) ?? emptyJazzLoadDay(dayNo, "closed", timestamp);
       return {
         ...existing,
-        status: "closed" as const,
+        status: "open" as const,
         reopenedAt: timestamp,
         reopenedBy: user.uid,
-        reopenedUntilAt: reopenUntilAt,
+        reopenedByRole: role ?? undefined,
+        reopenedUntilAt: undefined,
         updatedBy: user.uid,
         updatedAt: timestamp
       };
     });
+    nextReopenedDays.forEach((day) => closedDayKeysRef.current.delete(`${monthId}/${day.dayNo}`));
 
     if (nextReopenedDays.length === 0) {
       pushPopup("warning", "No previous Jazz Load days are available to reopen.");
@@ -906,11 +924,11 @@ export function JazzLoadModule({
       current
     ));
     onQueueWrite(
-      reopenJazzLoadDaysFor15Minutes(month, nextReopenedDays, days, user, role, reopenUntilAt)
+      reopenJazzLoadDaysFor15Minutes(month, nextReopenedDays, days, user, role)
         .finally(() => setBulkReopening(null)),
       "Could not queue Jazz Load day reopen."
     );
-    pushPopup("success", `${scope === "selected" ? `Jazz Load day ${selectedDay}` : `${nextReopenedDays.length} Jazz Load days`} opened for correction until ${new Date(reopenUntilAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+    pushPopup("success", `${scope === "selected" ? `Jazz Load day ${selectedDay}` : `${nextReopenedDays.length} Jazz Load days`} reopened until manually closed.`);
   }
 
   async function closeAllDaysExceptToday() {
@@ -929,14 +947,18 @@ export function JazzLoadModule({
       .filter((dayNo) => !(monthId === liveDate.monthId && dayNo === liveDate.dayNo))
       .flatMap((dayNo) => {
         const existing = days.find((day) => day.dayNo === dayNo);
-        if (existing?.status === "closed" && !existing.reopenedUntilAt) return [];
+        if (existing?.status === "closed" && !isActiveReopenWindow(existing, now.getTime())) return [];
         const day: JazzLoadDay = {
           ...(existing ?? emptyJazzLoadDay(dayNo, "closed", timestamp)),
           status: "closed" as const,
-          closedAt: existing?.closedAt ?? timestamp,
-          closedBy: existing?.closedBy ?? user.uid,
+          closedAt: timestamp,
+          closedBy: user.uid,
+          lockedAt: timestamp,
+          lockedBy: user.uid,
+          lockedByRole: role ?? undefined,
           reopenedAt: undefined,
           reopenedBy: undefined,
+          reopenedByRole: undefined,
           reopenedUntilAt: undefined,
           updatedBy: user.uid,
           updatedAt: timestamp
@@ -954,6 +976,7 @@ export function JazzLoadModule({
       (nextDays, day) => [...nextDays.filter((item) => item.dayNo !== day.dayNo), day].sort((a, b) => a.dayNo - b.dayNo),
       current
     ));
+    nextClosedDays.forEach((day) => closedDayKeysRef.current.add(`${monthId}/${day.dayNo}`));
     onQueueWrite(
       closeJazzLoadDaysExceptToday(month, nextClosedDays, days, user, role)
         .finally(() => setBulkClosingDays(false)),
@@ -1197,9 +1220,11 @@ export function JazzLoadModule({
         mlLifting,
         dayNotes,
         status: selectedDayRecord?.status ?? "open",
+        lockedAt: selectedDayRecord?.lockedAt,
+        reopenedAt: selectedDayRecord?.reopenedAt,
         reopenedUntilAt: selectedDayRecord?.reopenedUntilAt
       }),
-    [dayNotes, drafts, liftingOpening, mlLifting, monthId, selectedDay, selectedDayRecord?.reopenedUntilAt, selectedDayRecord?.status]
+    [dayNotes, drafts, liftingOpening, mlLifting, monthId, selectedDay, selectedDayRecord?.lockedAt, selectedDayRecord?.reopenedAt, selectedDayRecord?.reopenedUntilAt, selectedDayRecord?.status]
   );
 
   useEffect(() => {
@@ -1236,6 +1261,7 @@ export function JazzLoadModule({
     canWriteDaily,
     selectedDayFuture,
     selectedDayLive,
+    adminCanEditSelectedDay,
     monthClosed: currentMonth?.status === "closed",
     dayClosed: selectedDayClosed,
     hasDrafts: drafts.length > 0,
@@ -1245,6 +1271,16 @@ export function JazzLoadModule({
   });
   const manualSaveDisabled = !manualSaveState.canSave;
   const manualSaveDisabledReason = manualSaveState.detail || "Save unavailable.";
+  const verifiedSaveDisabled = !canWriteDaily || selectedDayFuture || selectedDayClosed || currentMonth?.status === "closed" || (role === "admin" && !adminCanEditSelectedDay);
+  async function handleVerifiedSave() {
+    setVerifiedSave({ status: "saving", title: "Saving Jazz Load Day", message: "Writing the full day to Firestore and waiting for confirmation..." });
+    try {
+      await saveDay("open", { silent: true, source: "verified-save", throwOnError: true });
+      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Jazz Load day ${selectedDay} was saved successfully and Firestore confirmed the write.` });
+    } catch (error) {
+      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
+    }
+  }
   const autoSaveChipText = saveState.reason
     ? `Autosave blocked: ${saveState.detail}`
     : autoSaveStatus === "saving"
@@ -1276,9 +1312,9 @@ export function JazzLoadModule({
         role={role}
         density="compact"
         busy={loading || recalculating || bulkReopening !== null || bulkClosingDays}
-        autoSaveStatus={autoSaveStatus}
+        autoSaveStatus={selectedDayClosed ? "closed" : autoSaveStatus}
         permissions={{
-          canCloseSelectedDay: canEditDaily && validation.valid,
+          canCloseSelectedDay: canEditDaily && validation.valid && (role === "owner" || selectedDayLive),
           canReopenSelectedDay:
             Boolean(selectedDayRecord && selectedDayRecord.status === "closed") &&
             !selectedDayFuture &&
@@ -1311,6 +1347,15 @@ export function JazzLoadModule({
             >
               <Save />
               Save
+            </button>
+            <button
+              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+              disabled={verifiedSaveDisabled || verifiedSave?.status === "saving"}
+              title={verifiedSaveDisabled ? manualSaveDisabledReason : "Save immediately and wait for Firestore confirmation"}
+              onClick={() => void handleVerifiedSave()}
+            >
+              <Save />
+              Save Now & Verify
             </button>
             <button className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadXlsx(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}>
               <FileSpreadsheet />
@@ -1346,7 +1391,9 @@ export function JazzLoadModule({
     selectedDayRecord,
     selectedJazzStatus,
     setSelectedDay,
-    validation.valid
+    validation.valid,
+    verifiedSave?.status,
+    verifiedSaveDisabled
   ]);
   useSidebarDayControls("jazzLoad", sidebarDayControls, canRead && section === "daily");
 
@@ -1361,6 +1408,7 @@ export function JazzLoadModule({
 
   return (
     <section className="space-y-5">
+      <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {popup && (
         <div className="fixed right-4 top-4 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-slate-700 bg-slate-950/95 p-4 text-slate-100 shadow-2xl shadow-black/40 backdrop-blur">
           <div className="flex items-start justify-between gap-3">
@@ -1463,7 +1511,7 @@ export function JazzLoadModule({
             <div className="mb-4 flex flex-wrap gap-2 text-sm text-slate-300">
               <span className="btn-chip"><CalendarDays /> {selectedDate}</span>
               <span className="btn-chip">Status: {selectedDayFuture ? "future disabled" : selectedDayRecord?.status ?? "new"}</span>
-              {selectedDayCorrectionActive && <span className="btn-chip">Correction until {new Date(getMillis(selectedDayRecord?.reopenedUntilAt)).toLocaleTimeString()}</span>}
+              {selectedDayCorrectionActive && <span className="btn-chip">Reopened until manual close</span>}
               {canManageSettings ? (
                 <>
                   <span className="btn-chip">Active Jazz Load: {activeRates.mlRate ? `${activeRates.mlRate.name} ${formatPercentage(activeRates.mlRate.percentage)}` : "missing"}</span>

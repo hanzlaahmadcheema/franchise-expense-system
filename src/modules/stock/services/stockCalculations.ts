@@ -384,8 +384,12 @@ export function buildStockDayRecord(input: {
     updatedAt: timestamp,
     closedAt: input.previous?.closedAt,
     closedBy: input.previous?.closedBy,
+    lockedAt: input.previous?.lockedAt,
+    lockedBy: input.previous?.lockedBy,
+    lockedByRole: input.previous?.lockedByRole,
     reopenedAt: input.previous?.reopenedAt,
     reopenedBy: input.previous?.reopenedBy,
+    reopenedByRole: input.previous?.reopenedByRole,
     reopenedUntilAt: input.previous?.reopenedUntilAt
   };
 }

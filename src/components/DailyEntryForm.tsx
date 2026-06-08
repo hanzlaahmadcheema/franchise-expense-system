@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
+import { LoaderCircle, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -12,6 +12,7 @@ import {
 } from "../types/ledger";
 import { computeDay, parseLedgerNumber, resolveCreditClosingBalance } from "../lib/formulaEngine";
 import { useAutoSaveEntry } from "../shared/hooks/useAutoSaveEntry";
+import { SaveProgressDialog, type SaveProgressState } from "../shared/components/SaveProgressDialog";
 
 type Props = {
   dayNo: number;
@@ -31,13 +32,12 @@ type Props = {
   canClose?: boolean;
   canReopen?: boolean;
   reopenLabel?: string;
-  reopenExpiresAt?: number;
   reopenRequiresTime?: boolean;
   previousDay?: DailyLedgerInput;
-  onSave: (input: DailyLedgerInput, options?: { silent?: boolean }) => Promise<void>;
+  onSave: (input: DailyLedgerInput, options?: { silent?: boolean; awaitRemote?: boolean }) => Promise<void>;
   onCloseDay: (input: DailyLedgerInput) => Promise<void>;
   onSendEmail?: (input: DailyLedgerInput) => Promise<void>;
-  onReopenDay?: (reopenUntilAt?: number) => Promise<void>;
+  onReopenDay?: () => Promise<void>;
   canSendEmail?: boolean;
   canCreateCatalogs?: boolean;
   onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
@@ -303,8 +303,14 @@ export function DailyEntryForm({
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
   const lastSavedRef = useRef("");
+  const disabledRef = useRef(Boolean(disabled));
   const [saveInFlight, setSaveInFlight] = useState(false);
+  const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const [saveBaselineReady, setSaveBaselineReady] = useState(false);
+
+  useEffect(() => {
+    disabledRef.current = Boolean(disabled);
+  }, [disabled]);
 
   function previousCreditOpening(partyId: string, partyName: string) {
     if (!previousDay) return 0;
@@ -540,6 +546,7 @@ export function DailyEntryForm({
   }, [hasPendingChanges]);
 
   async function handleManualSave() {
+    if (disabledRef.current) return false;
     setSaving(true);
     setSaveInFlight(true);
     try {
@@ -551,6 +558,21 @@ export function DailyEntryForm({
     } finally {
       setSaveInFlight(false);
       setSaving(false);
+    }
+  }
+
+  async function handleVerifiedSave() {
+    if (disabledRef.current) return;
+    setVerifiedSave({ status: "saving", title: "Saving Expense Day", message: "Writing the complete day snapshot to Firestore and waiting for confirmation..." });
+    setSaveInFlight(true);
+    try {
+      await onSave(payload, { awaitRemote: true });
+      lastSavedRef.current = JSON.stringify(payload);
+      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Day ${dayNo} was saved successfully and Firestore confirmed the write.` });
+    } catch (error) {
+      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
+    } finally {
+      setSaveInFlight(false);
     }
   }
 
@@ -816,6 +838,7 @@ export function DailyEntryForm({
 
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {catalogModal && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-2xl shadow-black/40">
@@ -854,18 +877,31 @@ export function DailyEntryForm({
             </div>
             <div className="hidden items-center gap-3 md:flex">
               <span className={`text-xs font-semibold uppercase ${
-                autoSaveStatus === "error"
+                disabled
+                  ? "text-slate-400"
+                  : autoSaveStatus === "error"
                   ? "text-rose-300"
                   : autoSaveStatus === "saving"
                     ? "text-amber-300"
                     : "text-emerald-300"
               }`}>
-                {autoSaveStatus === "error"
+                {disabled
+                  ? "Autosave off"
+                  : autoSaveStatus === "error"
                   ? "Autosave failed"
                   : autoSaveStatus === "saving"
                     ? "Autosaving..."
                     : "Autosave on"}
               </span>
+              <button
+                className="btn-primary"
+                disabled={disabled || saving || emailing || saveInFlight}
+                title={disabled ? "Reopen the day before saving." : "Write now and wait for Firestore confirmation"}
+                onClick={() => void handleVerifiedSave()}
+              >
+                <Save />
+                Save Now & Verify
+              </button>
               {onSendEmail && (
                 <button
                   className="btn-secondary"
@@ -894,18 +930,24 @@ export function DailyEntryForm({
         <div className="mobile-entry-actions md:hidden">
           <div className="flex flex-col gap-0.5">
             <p className={`text-[11px] font-semibold uppercase ${
-              autoSaveStatus === "error"
+              disabled
+                ? "text-slate-400"
+                : autoSaveStatus === "error"
                 ? "text-rose-300"
                 : autoSaveStatus === "saving"
                   ? "text-amber-300"
                   : "text-emerald-300"
             }`}>
-              {autoSaveStatus === "error" ? "Autosave failed" : autoSaveStatus === "saving" ? "Autosaving..." : "Autosave on"}
+              {disabled ? "Autosave off" : autoSaveStatus === "error" ? "Autosave failed" : autoSaveStatus === "saving" ? "Autosaving..." : "Autosave on"}
             </p>
             <p className="mt-0.5 text-xs text-slate-400">
               {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
             </p>
           </div>
+          <button className="btn-primary" disabled={disabled || saving || saveInFlight} onClick={() => void handleVerifiedSave()}>
+            <Save />
+            Save & Verify
+          </button>
         </div>
 
         <section className="panel">
