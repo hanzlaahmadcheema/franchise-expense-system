@@ -39,6 +39,16 @@ import type {
 
 export type FirestoreSnapshotMeta = Pick<SnapshotMetadata, "fromCache" | "hasPendingWrites">;
 
+type SaveStockDayOptions = {
+  openingBalances?: StockOpeningBalances;
+  previousSummary?: StockMonthlySummary | null;
+  products?: StockProduct[];
+  skipExistingDocCleanup?: boolean;
+  skipRawEntryCleanup?: boolean;
+  skipProductBalanceWrites?: boolean;
+  skipJazzCompanyBalanceWrite?: boolean;
+};
+
 const INITIAL_OPENING_STOCK_BY_PRODUCT_NAME: Record<string, number> = {
   "retailer sim": 1129,
   "franchise sim": 7,
@@ -116,10 +126,11 @@ async function syncStockLedgerV2RawEntriesInBatch(
   batch: ReturnType<typeof writeBatch>,
   day: StockDayRecord,
   actorUid: string,
-  timestamp: number
+  timestamp: number,
+  options: { skipExistingCleanup?: boolean } = {}
 ) {
   const rawCollection = ledgerV2StockRawEntries(day.monthId, day.dayNo);
-  const existingSnap = await getDocs(rawCollection);
+  const existingSnap = options.skipExistingCleanup ? null : await getDocs(rawCollection);
   const rawEntries = [
     ...day.entries.map((entry) => ({
       id: `stock-out-${entry.id}`,
@@ -159,8 +170,10 @@ async function syncStockLedgerV2RawEntriesInBatch(
     }))
   ];
   const nextIds = new Set(rawEntries.map((entry) => entry.id));
-  for (const entryDoc of existingSnap.docs) {
-    if (!nextIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+  if (existingSnap) {
+    for (const entryDoc of existingSnap.docs) {
+      if (!nextIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+    }
   }
   for (const entry of rawEntries) {
     batch.set(doc(rawCollection, entry.id), cleanForFirestore({
@@ -208,6 +221,25 @@ function jazzCompanyBalanceRef() {
 
 function monthlySummaryRef(monthId: string) {
   return doc(monthRef(monthId), "summary", "monthly");
+}
+
+async function getStockOpeningBalances() {
+  const openingSnap = await getDoc(openingRef());
+  return openingSnap.exists()
+    ? (openingSnap.data() as StockOpeningBalances)
+    : { openingStock: {}, jazzOpeningPayable: 0 };
+}
+
+async function getStockPreviousSummary(monthId: string) {
+  const previousSummarySnap = await getDoc(monthlySummaryRef(previousMonthId(monthId)));
+  return previousSummarySnap.exists()
+    ? (previousSummarySnap.data() as StockMonthlySummary)
+    : null;
+}
+
+async function getStockProductsForCalculations() {
+  const productsSnap = await getDocs(query(productCollection(), orderBy("displayOrder", "asc")));
+  return productsSnap.docs.map((item) => item.data() as StockProduct);
 }
 
 function auditRef(monthId: string, id = `${now()}-${Math.random().toString(36).slice(2, 8)}`) {
@@ -535,24 +567,20 @@ export async function saveStockDay(
   allDays: StockDayRecord[],
   user: User | null,
   role: UserRole | null,
-  action: "save-day" | "close-day" | "reopen-day" = "save-day"
+  action: "save-day" | "close-day" | "reopen-day" = "save-day",
+  options: SaveStockDayOptions = {}
 ) {
   const currentActor = actor(user, role);
   const timestamp = now();
   const nextDays = [...allDays.filter((item) => item.dayNo !== day.dayNo), day].sort((a, b) => a.dayNo - b.dayNo);
   const baseSummary = calculateMonthlySummary(month.id, nextDays);
-  const openingSnap = await getDoc(openingRef());
-  const openingBalances = openingSnap.exists()
-    ? (openingSnap.data() as StockOpeningBalances)
-    : { openingStock: {}, jazzOpeningPayable: 0 };
-  const previousSummarySnap = await getDoc(monthlySummaryRef(previousMonthId(month.id)));
-  const previousSummary = previousSummarySnap.exists()
-    ? (previousSummarySnap.data() as StockMonthlySummary)
-    : null;
+  const openingBalances = options.openingBalances ?? await getStockOpeningBalances();
+  const previousSummary = options.previousSummary !== undefined
+    ? options.previousSummary
+    : await getStockPreviousSummary(month.id);
   const monthOpeningStock = previousSummary?.closingStock ?? openingBalances.openingStock;
   const monthOpeningJazzPayable = previousSummary?.closingJazzPayable ?? openingBalances.jazzOpeningPayable;
-  const productsSnap = await getDocs(query(productCollection(), orderBy("displayOrder", "asc")));
-  const products = productsSnap.docs.map((item) => item.data() as StockProduct);
+  const products = options.products ?? await getStockProductsForCalculations();
   const allStockInRecords = nextDays.flatMap((item) => item.stockIn ?? []);
   const productBalances = calculateCurrentStock(products, monthOpeningStock, allStockInRecords, nextDays);
   const jazzCompanyBalance = calculateJazzCompanyBalance(monthOpeningJazzPayable, allStockInRecords);
@@ -581,11 +609,13 @@ export async function saveStockDay(
     updatedAt: timestamp
   };
   const dayDocumentRef = dayRef(month.id, day.dayNo);
-  const [existingEntrySnap, existingStockOutSnap, existingStockInSnap] = await Promise.all([
-    getDocs(collection(dayDocumentRef, "entries")),
-    getDocs(collection(dayDocumentRef, "stockOut")),
-    getDocs(collection(dayDocumentRef, "stockIn"))
-  ]);
+  const existingDocs = options.skipExistingDocCleanup
+    ? null
+    : await Promise.all([
+      getDocs(collection(dayDocumentRef, "entries")),
+      getDocs(collection(dayDocumentRef, "stockOut")),
+      getDocs(collection(dayDocumentRef, "stockIn"))
+    ]);
   const batch = writeBatch(requireDb());
   const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
   const audit: StockAuditEvent = {
@@ -612,28 +642,39 @@ export async function saveStockDay(
   }, { merge: true });
   const nextEntryIds = new Set(nextDay.entries.map((entry) => entry.id));
   const nextStockInIds = new Set((nextDay.stockIn ?? []).map((record) => record.id));
-  existingEntrySnap.docs.forEach((entryDoc) => {
-    if (!nextEntryIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
-  });
-  existingStockOutSnap.docs.forEach((entryDoc) => {
-    if (!nextEntryIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
-  });
-  existingStockInSnap.docs.forEach((entryDoc) => {
-    if (!nextStockInIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
-  });
+  if (existingDocs) {
+    const [existingEntrySnap, existingStockOutSnap, existingStockInSnap] = existingDocs;
+    existingEntrySnap.docs.forEach((entryDoc) => {
+      if (!nextEntryIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+    });
+    existingStockOutSnap.docs.forEach((entryDoc) => {
+      if (!nextEntryIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+    });
+    existingStockInSnap.docs.forEach((entryDoc) => {
+      if (!nextStockInIds.has(entryDoc.id)) batch.delete(entryDoc.ref);
+    });
+  }
   for (const entry of nextDay.entries) {
-    batch.set(doc(dayDocumentRef, "stockOut", entry.id), cleanForFirestore(entry), { merge: true });
-    batch.set(doc(dayDocumentRef, "entries", entry.id), cleanForFirestore(entry), { merge: true });
+    const entryPayload = {
+      ...cleanForFirestore(entry),
+      notes: entry.notes?.trim() ? entry.notes : deleteField()
+    };
+    batch.set(doc(dayDocumentRef, "stockOut", entry.id), entryPayload, { merge: true });
+    batch.set(doc(dayDocumentRef, "entries", entry.id), entryPayload, { merge: true });
   }
   if (nextDay.stockIn) {
     for (const record of nextDay.stockIn) {
       batch.set(doc(dayDocumentRef, "stockIn", record.id), cleanForFirestore(record), { merge: true });
     }
   }
-  await syncStockLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp);
-  productBalances.forEach((balance) => {
-    batch.set(productBalanceRef(balance.productId), cleanForFirestore(balance satisfies StockProductBalance), { merge: true });
+  await syncStockLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp, {
+    skipExistingCleanup: options.skipRawEntryCleanup
   });
+  if (!options.skipProductBalanceWrites) {
+    productBalances.forEach((balance) => {
+      batch.set(productBalanceRef(balance.productId), cleanForFirestore(balance satisfies StockProductBalance), { merge: true });
+    });
+  }
   summary.accountTotals.forEach((account) => {
     batch.set(
       accountBalanceRef(account.accountId),
@@ -641,11 +682,13 @@ export async function saveStockDay(
       { merge: true }
     );
   });
-  batch.set(
-    jazzCompanyBalanceRef(),
-    cleanForFirestore({ ...jazzCompanyBalance, updatedAt: timestamp } satisfies StockJazzCompanyBalance),
-    { merge: true }
-  );
+  if (!options.skipJazzCompanyBalanceWrite) {
+    batch.set(
+      jazzCompanyBalanceRef(),
+      cleanForFirestore({ ...jazzCompanyBalance, updatedAt: timestamp } satisfies StockJazzCompanyBalance),
+      { merge: true }
+    );
+  }
   batch.set(monthlySummaryRef(month.id), cleanForFirestore(summary), { merge: true });
   batch.set(auditRef(month.id, auditId), cleanForFirestore(audit));
   const unifiedAuditInput = {

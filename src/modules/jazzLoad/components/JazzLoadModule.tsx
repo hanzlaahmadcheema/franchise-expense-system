@@ -54,7 +54,8 @@ import type {
   JazzLoadMonth,
   JazzLoadMonthlySummary,
   JazzLoadRateConfig,
-  JazzLoadRateType
+  JazzLoadRateType,
+  ValidationResult
 } from "../types/jazzLoad.types";
 import {
   dayDate,
@@ -62,6 +63,7 @@ import {
   formatCurrency,
   formatPercentage,
   monthLabel,
+  normalizeDoKey,
   parseMoneyInput
 } from "../utils/jazzLoadFormatters";
 import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
@@ -163,6 +165,16 @@ function slug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || crypto.randomUUID();
 }
 
+function doNameIdentityKey(input: { doNameId?: string; doName?: string }) {
+  const name = input.doName?.trim() ?? "";
+  if (!input.doNameId && !name) return "";
+  return input.doNameId ?? normalizeDoKey(name);
+}
+
+function standaloneDoNameRowId(date: string, nameId: string) {
+  return `${date}-name-${nameId}`;
+}
+
 function activeRateFor(rates: JazzLoadRateConfig[], primaryType: JazzLoadRateType, legacyTypes: JazzLoadRateType[] = []) {
   return rates.find((rate) => rate.active && rate.type === primaryType) ??
     rates.find((rate) => rate.active && legacyTypes.includes(rate.type)) ??
@@ -172,18 +184,25 @@ function activeRateFor(rates: JazzLoadRateConfig[], primaryType: JazzLoadRateTyp
 function NumberInput({
   value,
   onChange,
-  disabled
+  disabled,
+  onFocus,
+  onBlur
 }: {
   value: number;
   onChange: (value: number) => void;
   disabled?: boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
 }) {
   const formatInputValue = (nextValue: number) => nextValue ? String(Math.round(nextValue)) : "";
   const [text, setText] = useState(formatInputValue(value));
+  const [focused, setFocused] = useState(false);
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
+    if (focused || dirtyRef.current) return;
     setText(formatInputValue(value));
-  }, [value]);
+  }, [focused, value]);
 
   return (
     <input
@@ -191,9 +210,15 @@ function NumberInput({
       inputMode="decimal"
       value={text}
       disabled={disabled}
+      onFocus={() => {
+        dirtyRef.current = false;
+        setFocused(true);
+        onFocus?.();
+      }}
       onChange={(event) => {
         const next = event.target.value;
         if (!/^\d*\.?\d*$/.test(next)) return;
+        dirtyRef.current = true;
         setText(next);
         const parsed = parseMoneyInput(next);
         if (!Number.isNaN(parsed)) onChange(parsed);
@@ -203,13 +228,46 @@ function NumberInput({
         if (Number.isNaN(parsed)) {
           setText("");
           onChange(0);
+          dirtyRef.current = false;
+          setFocused(false);
+          onBlur?.();
           return;
         }
         setText(formatInputValue(parsed));
         onChange(parsed);
+        dirtyRef.current = false;
+        setFocused(false);
+        onBlur?.();
       }}
     />
   );
+}
+
+function jazzDraftStateSignature(input: {
+  drafts: JazzLoadDoEntryDraft[];
+  liftingOpening: number;
+  mlLifting: number;
+  dayNotes: string;
+}) {
+  return JSON.stringify({
+    drafts: input.drafts.map((draft) => ({
+      id: draft.id,
+      doProfileId: draft.doProfileId,
+      doNameId: draft.doNameId,
+      doLineId: draft.doLineId,
+      assignmentId: draft.assignmentId,
+      doName: draft.doName,
+      doLine: draft.doLine,
+      doLineSortOrder: draft.doLineSortOrder,
+      openingBase: draft.openingBase ?? 0,
+      todayMlIssuanceBase: draft.todayMlIssuanceBase ?? 0,
+      paymentReceivedBase: draft.paymentReceivedBase ?? 0,
+      notes: draft.notes ?? ""
+    })),
+    liftingOpening: input.liftingOpening,
+    mlLifting: input.mlLifting,
+    dayNotes: input.dayNotes
+  });
 }
 
 function MetricCard({ label, value, helper }: { label: string; value: string; helper: string }) {
@@ -246,6 +304,9 @@ function asDraft(entry: JazzLoadDay["doEntries"][number]): JazzLoadDoEntryDraft 
   return {
     id: entry.id,
     doProfileId: entry.doProfileId,
+    doNameId: entry.doNameId,
+    doLineId: entry.doLineId,
+    assignmentId: entry.assignmentId,
     doName: entry.doName,
     doLine: entry.doLine,
     doLineSortOrder: entry.doLineSortOrder,
@@ -275,6 +336,16 @@ export function JazzLoadModule({
   const [section, setSection] = useState<JazzLoadSection>("daily");
   const [months, setMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<JazzLoadDay[]>([]);
+  const [jazzDaysInitialized, setJazzDaysInitialized] = useState(false);
+  const [jazzPreviousMonthInitialized, setJazzPreviousMonthInitialized] = useState(false);
+  const [jazzAssignmentsInitialized, setJazzAssignmentsInitialized] = useState(false);
+  const [jazzSettingsInitialized, setJazzSettingsInitialized] = useState({
+    rates: false,
+    profiles: false,
+    names: false,
+    lines: false,
+    months: false
+  });
   const [previousMonthDays, setPreviousMonthDays] = useState<JazzLoadDay[]>([]);
   const [summary, setSummary] = useState<JazzLoadMonthlySummary | null>(null);
   const [rates, setRates] = useState<JazzLoadRateConfig[]>([]);
@@ -301,6 +372,13 @@ export function JazzLoadModule({
   const [popup, setPopup] = useState<JazzLoadPopup | null>(null);
   const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const lastSavedRef = useRef("");
+  const draftHydrationKeyRef = useRef("");
+  const draftDirtyRef = useRef(false);
+  const focusedDraftFieldsRef = useRef(new Set<string>());
+  const draftsRef = useRef(drafts);
+  const liftingOpeningRef = useRef(liftingOpening);
+  const mlLiftingRef = useRef(mlLifting);
+  const dayNotesRef = useRef(dayNotes);
   const closedDayKeysRef = useRef(new Set<string>());
   const lastSystemMessageRef = useRef("");
   const callbacksRef = useRef({
@@ -314,6 +392,75 @@ export function JazzLoadModule({
       onFirestoreError
     };
   }, [onFirestoreError, onSnapshotMetadata]);
+
+  useEffect(() => {
+    draftsRef.current = drafts;
+  }, [drafts]);
+
+  useEffect(() => {
+    liftingOpeningRef.current = liftingOpening;
+  }, [liftingOpening]);
+
+  useEffect(() => {
+    mlLiftingRef.current = mlLifting;
+  }, [mlLifting]);
+
+  useEffect(() => {
+    dayNotesRef.current = dayNotes;
+  }, [dayNotes]);
+
+  useEffect(() => {
+    draftDirtyRef.current = false;
+    focusedDraftFieldsRef.current.clear();
+    draftHydrationKeyRef.current = "";
+  }, [monthId, selectedDay]);
+
+  function markDraftDirty() {
+    draftDirtyRef.current = true;
+  }
+
+  function focusDraftField(fieldId: string) {
+    focusedDraftFieldsRef.current.add(fieldId);
+  }
+
+  function blurDraftField(fieldId: string) {
+    focusedDraftFieldsRef.current.delete(fieldId);
+  }
+
+  function currentDraftStateSignature() {
+    return jazzDraftStateSignature({
+      drafts: draftsRef.current,
+      liftingOpening: liftingOpeningRef.current,
+      mlLifting: mlLiftingRef.current,
+      dayNotes: dayNotesRef.current
+    });
+  }
+
+  function shouldApplyRemoteDraftState(hydrationKey: string) {
+    if (draftHydrationKeyRef.current !== hydrationKey) return true;
+    if (focusedDraftFieldsRef.current.size > 0 || draftDirtyRef.current) return false;
+    return true;
+  }
+
+  function applyRemoteDraftState(input: {
+    hydrationKey: string;
+    drafts: JazzLoadDoEntryDraft[];
+    liftingOpening: number;
+    mlLifting: number;
+    dayNotes: string;
+  }) {
+    if (!shouldApplyRemoteDraftState(input.hydrationKey)) return;
+    setDrafts(input.drafts);
+    setLiftingOpening(input.liftingOpening);
+    setMlLifting(input.mlLifting);
+    setDayNotes(input.dayNotes);
+    draftHydrationKeyRef.current = input.hydrationKey;
+    draftDirtyRef.current = false;
+  }
+
+  function markJazzSettingInitialized(key: keyof typeof jazzSettingsInitialized) {
+    setJazzSettingsInitialized((current) => ({ ...current, [key]: true }));
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -335,7 +482,7 @@ export function JazzLoadModule({
   }
 
   const currentMonth = months.find((month) => month.id === monthId);
-  const selectedDayRecord = days.find((day) => day.dayNo === selectedDay);
+  const selectedDayRecord = days.find((day) => day.monthId === monthId && day.dayNo === selectedDay);
   const latestPriorDay = selectedDay === 1
     ? [...previousMonthDays].sort((a, b) => a.dayNo - b.dayNo).at(-1)
     : [...days].filter((day) => day.dayNo < selectedDay).sort((a, b) => a.dayNo - b.dayNo).at(-1);
@@ -378,13 +525,15 @@ export function JazzLoadModule({
       const day = days.find((entry) => entry.dayNo === dayNo);
       const future = isFutureJazzDay(monthId, dayNo, now);
       const live = monthId === currentMonthId(now) && dayNo === now.getDate();
-      const status = resolveUniversalDayStatus({
-        exists: Boolean(day),
-        future,
-        live,
-        day,
-        nowMs: now.getTime()
-      });
+      const status = !jazzDaysInitialized && !future
+        ? "loading"
+        : resolveUniversalDayStatus({
+          exists: Boolean(day),
+          future,
+          live,
+          day,
+          nowMs: now.getTime()
+        });
       return {
         moduleKey: "jazzLoad",
         monthId,
@@ -397,8 +546,10 @@ export function JazzLoadModule({
         status
       };
     });
-  }, [days, monthId, now]);
-  const selectedJazzStatus = jazzCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
+  }, [days, jazzDaysInitialized, monthId, now]);
+  const selectedJazzStatus = !jazzDaysInitialized
+    ? "loading"
+    : jazzCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
   const canManageSettings = roleCanJazzLoad(role, "settings");
   const canBackup = roleCanJazzLoad(role, "backup");
   const sortedDoLines = useMemo(
@@ -416,27 +567,35 @@ export function JazzLoadModule({
     [sortedDoLines]
   );
   const activeLines = useMemo(() => orderedDoLines.filter((line) => line.active), [orderedDoLines]);
+  const activeDoNames = useMemo(() => doNames.filter((name) => name.active), [doNames]);
+  const jazzSettingsReady = Object.values(jazzSettingsInitialized).every(Boolean);
+  const jazzDailyReady = jazzSettingsReady && jazzDaysInitialized && jazzPreviousMonthInitialized && jazzAssignmentsInitialized;
 
   useEffect(() => {
     const unsubscribers = [
       subscribeJazzLoadRates((items, metadata) => {
         setRates(items);
+        markJazzSettingInitialized("rates");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadDoProfiles((items, metadata) => {
         setDoProfiles(items);
+        markJazzSettingInitialized("profiles");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadDoNames((items, metadata) => {
         setDoNames(items);
+        markJazzSettingInitialized("names");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadDoLines((items, metadata) => {
         setDoLines(items);
+        markJazzSettingInitialized("lines");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadMonths((items, metadata) => {
         setMonths(items);
+        markJazzSettingInitialized("months");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message))
     ];
@@ -444,9 +603,14 @@ export function JazzLoadModule({
   }, []);
 
   useEffect(() => {
+    setJazzDaysInitialized(false);
+  }, [monthId]);
+
+  useEffect(() => {
     const unsubscribers = [
       subscribeJazzLoadDays(monthId, (items, metadata) => {
         setDays(items);
+        setJazzDaysInitialized(true);
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadMonthlySummary(monthId, (item, metadata) => {
@@ -459,20 +623,28 @@ export function JazzLoadModule({
 
   useEffect(() => {
     let cancelled = false;
+    setJazzPreviousMonthInitialized(false);
     async function loadPreviousMonth() {
       const [yearText, monthText] = monthId.split("-");
       const year = Number(yearText);
       const month = Number(monthText);
       if (!Number.isInteger(year) || !Number.isInteger(month)) {
         setPreviousMonthDays([]);
+        setJazzPreviousMonthInitialized(true);
         return;
       }
       const previousMonthId = month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, "0")}`;
       try {
         const items = await loadJazzLoadDays(previousMonthId);
-        if (!cancelled) setPreviousMonthDays(items);
+        if (!cancelled) {
+          setPreviousMonthDays(items);
+          setJazzPreviousMonthInitialized(true);
+        }
       } catch {
-        if (!cancelled) setPreviousMonthDays([]);
+        if (!cancelled) {
+          setPreviousMonthDays([]);
+          setJazzPreviousMonthInitialized(true);
+        }
       }
     }
     void loadPreviousMonth();
@@ -482,28 +654,76 @@ export function JazzLoadModule({
   }, [monthId]);
 
   useEffect(() => {
+    setJazzAssignmentsInitialized(false);
     if (selectedDayFuture) {
       setDoAssignments([]);
+      setJazzAssignmentsInitialized(true);
       return;
     }
     return subscribeJazzLoadDoAssignments(monthId, selectedDay, (items, metadata) => {
       setDoAssignments(items.filter((item) => item.active));
+      setJazzAssignmentsInitialized(true);
       callbacksRef.current.onSnapshotMetadata(metadata);
     }, (error) => callbacksRef.current.onFirestoreError(error.message));
   }, [monthId, selectedDay, selectedDayFuture]);
 
   useEffect(() => {
+    const hydrationKey = `${monthId}-${selectedDay}`;
     if (selectedDayFuture) {
-      setDrafts([]);
-      setLiftingOpening(0);
-      setMlLifting(0);
-      setDayNotes("");
+      applyRemoteDraftState({
+        hydrationKey,
+        drafts: [],
+        liftingOpening: 0,
+        mlLifting: 0,
+        dayNotes: ""
+      });
       return;
     }
-    const savedByLine = new Map((selectedDayRecord?.doEntries ?? []).map((entry) => [entry.doLineId ?? entry.doLine ?? entry.id, entry]));
-    const assignmentByLine = new Map(doAssignments.map((assignment) => [assignment.doLineId, assignment]));
+    if (!jazzDailyReady) return;
+    const savedEntries = selectedDayRecord?.doEntries ?? [];
+    const savedByLine = new Map(savedEntries.map((entry) => [entry.doLineId ?? entry.doLine ?? entry.id, entry]));
+    const savedStandaloneByName = new Map(
+      savedEntries.flatMap((entry) => {
+        const key = doNameIdentityKey(entry);
+        if (!key || entry.doLineId || entry.doLine) return [];
+        return [[key, entry] as const];
+      })
+    );
+    const assignmentByLine = new Map<string, JazzLoadDoAssignment>();
+    const assignedNameKeys = new Set<string>();
+    for (const line of activeLines) {
+      const assignment = doAssignments.find((item) => item.doLineId === line.id);
+      if (!assignment) continue;
+      const key = doNameIdentityKey(assignment);
+      if (key && assignedNameKeys.has(key)) continue;
+      if (key) assignedNameKeys.add(key);
+      assignmentByLine.set(line.id, assignment);
+    }
+    const withStandaloneNameDrafts = (lineDrafts: JazzLoadDoEntryDraft[]) => {
+      const usedNameKeys = new Set<string>();
+      const uniqueLineDrafts = lineDrafts.map((draft) => {
+        const key = doNameIdentityKey(draft);
+        if (!key) return draft;
+        if (usedNameKeys.has(key)) {
+          return {
+            ...draft,
+            doNameId: undefined,
+            assignmentId: undefined,
+            doName: ""
+          };
+        }
+        usedNameKeys.add(key);
+        return draft;
+      });
+      const nameDrafts = activeDoNames.flatMap((name) => {
+        const key = doNameIdentityKey({ doNameId: name.id, doName: name.name });
+        if (!key || usedNameKeys.has(key)) return [];
+        return [standaloneNameDraft(name, savedStandaloneByName.get(key))];
+      });
+      return [...uniqueLineDrafts, ...nameDrafts];
+    };
     if (selectedDayRecord) {
-      const nextDrafts = activeLines.map((line) => {
+      const lineDrafts = activeLines.map((line) => {
         const saved = savedByLine.get(line.id) ?? savedByLine.get(line.line);
         const assignment = assignmentByLine.get(line.id);
         if (saved) {
@@ -528,28 +748,33 @@ export function JazzLoadModule({
           assignment ?? (carried ? { doNameId: carried.doNameId, doName: carried.doName } : undefined)
         );
       });
-      setDrafts(nextDrafts);
-      setLiftingOpening(latestPriorDay?.lifting.inHandBalance ?? 0);
-      setMlLifting(selectedDayRecord.lifting.mlLifting);
-      setDayNotes(selectedDayRecord.notes ?? "");
+      applyRemoteDraftState({
+        hydrationKey,
+        drafts: withStandaloneNameDrafts(lineDrafts),
+        liftingOpening: latestPriorDay?.lifting.inHandBalance ?? 0,
+        mlLifting: selectedDayRecord.lifting.mlLifting,
+        dayNotes: selectedDayRecord.notes ?? ""
+      });
       return;
     }
-    setDrafts(
-      activeLines.map((line) => {
-        const assignment = assignmentByLine.get(line.id);
-        const carried = previousEntryForDraftAcrossDays(days, selectedDay, {
-          doNameId: assignment?.doNameId,
-          doName: assignment?.doName ?? "",
-          doLineId: line.id,
-          doLine: line.line
-        });
-        return lineDraft(line, assignment ?? (carried ? { doNameId: carried.doNameId, doName: carried.doName } : undefined));
-      })
-    );
-    setLiftingOpening(latestPriorDay?.lifting.inHandBalance ?? 0);
-    setMlLifting(0);
-    setDayNotes("");
-  }, [activeLines, days, doAssignments, latestPriorDay, previousMonthDays, selectedDay, selectedDayFuture, selectedDayRecord]);
+    const lineDrafts = activeLines.map((line) => {
+      const assignment = assignmentByLine.get(line.id);
+      const carried = previousEntryForDraftAcrossDays(days, selectedDay, {
+        doNameId: assignment?.doNameId,
+        doName: assignment?.doName ?? "",
+        doLineId: line.id,
+        doLine: line.line
+      });
+      return lineDraft(line, assignment ?? (carried ? { doNameId: carried.doNameId, doName: carried.doName } : undefined));
+    });
+    applyRemoteDraftState({
+      hydrationKey,
+      drafts: withStandaloneNameDrafts(lineDrafts),
+      liftingOpening: latestPriorDay?.lifting.inHandBalance ?? 0,
+      mlLifting: 0,
+      dayNotes: ""
+    });
+  }, [activeDoNames, activeLines, days, doAssignments, jazzDailyReady, latestPriorDay, monthId, previousMonthDays, selectedDate, selectedDay, selectedDayFuture, selectedDayRecord]);
 
   const previewEntries = useMemo(() => {
     if (!activeRates.mlRate) return [];
@@ -566,17 +791,57 @@ export function JazzLoadModule({
   const previewSummary = calculateDailySummary({ doEntries: previewEntries }, activeRates);
   const previewLifting = calculateDailyLifting({ openingBalance: liftingOpening, mlLifting }, previewSummary.issuanceMl);
   const localSummary = summary ?? calculateMonthlySummary(monthId, days);
+  const doBalanceRows = useMemo(() => {
+    const rows: JazzLoadMonthlySummary["doBalances"] = [...localSummary.doBalances];
+    const seenNameKeys = new Set(rows.map(doNameIdentityKey).filter(Boolean));
+    const seedDays = [
+      ...[...previousMonthDays].sort((left, right) => left.dayNo - right.dayNo),
+      ...[...days].sort((left, right) => left.dayNo - right.dayNo)
+    ];
+    for (const name of activeDoNames) {
+      const key = doNameIdentityKey({ doNameId: name.id, doName: name.name });
+      if (!key || seenNameKeys.has(key)) continue;
+      const previous = latestEntryForDraft(seedDays, { doNameId: name.id, doName: name.name });
+      rows.push({
+        doNameId: name.id,
+        doLineId: previous?.doLineId,
+        doName: name.name,
+        doLine: previous?.doLine,
+        doLineSortOrder: previous?.doLineSortOrder,
+        openingBase: previous?.closingBalance.baseAmount ?? 0,
+        issuanceBase: 0,
+        paymentBase: 0,
+        closingBase: previous?.closingBalance.baseAmount ?? 0,
+        closingMl: previous?.closingBalance.calculatedAmount ?? 0,
+        activeDays: 0
+      });
+      seenNameKeys.add(key);
+    }
+    return rows.sort((a, b) => {
+      const orderA = a.doLineSortOrder ?? Number.POSITIVE_INFINITY;
+      const orderB = b.doLineSortOrder ?? Number.POSITIVE_INFINITY;
+      if (orderA !== orderB) return orderA - orderB;
+      const lineOrder = (a.doLine ?? a.doName).localeCompare(b.doLine ?? b.doName, undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+      if (lineOrder !== 0) return lineOrder;
+      return a.doName.localeCompare(b.doName, undefined, { numeric: true, sensitivity: "base" });
+    });
+  }, [activeDoNames, days, localSummary.doBalances, previousMonthDays]);
   const carryForwardWarnings = useMemo(
     () => jazzCarryForwardWarnings(days, previousMonthDays),
     [days, previousMonthDays]
   );
-  const validation = validateJazzLoadDrafts(
-    drafts.map((draft) => ({
-      ...draft,
-      openingBase: resolveOpeningEntry(draft)?.closingBalance.baseAmount ?? draft.openingBase ?? 0
-    })),
-    activeRates
-  );
+  const validation: ValidationResult = jazzDailyReady
+    ? validateJazzLoadDrafts(
+      drafts.map((draft) => ({
+        ...draft,
+        openingBase: resolveOpeningEntry(draft)?.closingBalance.baseAmount ?? draft.openingBase ?? 0
+      })),
+      activeRates
+    )
+    : { valid: true, errors: [] };
   const saveState = getJazzLoadSaveState({
     role,
     canWriteDaily,
@@ -585,8 +850,8 @@ export function JazzLoadModule({
     adminCanEditSelectedDay,
     monthClosed: currentMonth?.status === "closed",
     dayClosed: selectedDayClosed,
-    hasDrafts: drafts.length > 0,
-    activeRates,
+    hasDrafts: jazzDailyReady && drafts.length > 0,
+    activeRates: jazzDailyReady ? activeRates : { mlRate: null, commission1Rate: null, commission2Rate: null },
     validation
   });
 
@@ -605,6 +870,8 @@ export function JazzLoadModule({
     ? ""
     : syncState === "offline"
       ? "Offline mode: Jazz Load changes will sync when this device reconnects."
+    : !jazzDailyReady
+      ? ""
       : saveState.reason === "No active rate"
         ? (canManageSettings
           ? "Owner must configure active Jazz Load Addition, Commission 1 Adjustment, and Commission 2 Payment rates before financial entry."
@@ -670,6 +937,26 @@ export function JazzLoadModule({
     };
   }
 
+  function standaloneNameDraft(name: JazzLoadDoName, saved?: JazzLoadDay["doEntries"][number]): JazzLoadDoEntryDraft {
+    const previous = previousEntryForDraftAcrossDays(days, selectedDay, {
+      doNameId: name.id,
+      doName: name.name
+    });
+    const openingEntry = resolveOpeningEntry({
+      doNameId: name.id,
+      doName: name.name
+    });
+    return {
+      id: saved?.id ?? standaloneDoNameRowId(selectedDate, name.id),
+      doNameId: name.id,
+      doName: name.name,
+      openingBase: openingEntry?.closingBalance.baseAmount ?? previous?.closingBalance.baseAmount ?? saved?.openingBalance.baseAmount ?? 0,
+      todayMlIssuanceBase: saved?.todayMlIssuance.baseAmount ?? 0,
+      paymentReceivedBase: saved?.paymentReceived.baseAmount ?? 0,
+      notes: saved?.notes
+    };
+  }
+
   function emptyJazzLoadDay(dayNo: number, status: "open" | "closed", timestamp = Date.now()): JazzLoadDay {
     const emptySummary = calculateDailySummary({ doEntries: [] }, activeRates, timestamp);
     const previousDay = dayNo === 1
@@ -695,6 +982,7 @@ export function JazzLoadModule({
   }
 
   function setDraft(index: number, patch: Partial<JazzLoadDoEntryDraft>) {
+    markDraftDirty();
     setDrafts((current) => current.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...patch } : draft)));
   }
 
@@ -755,6 +1043,12 @@ export function JazzLoadModule({
     const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
     const timestamp = Date.now();
     const nextStatus = status === "closed" || selectedDayClosed ? "closed" : "open";
+    const savedDraftSignature = jazzDraftStateSignature({
+      drafts: currentDrafts,
+      liftingOpening,
+      mlLifting,
+      dayNotes
+    });
     const entries = currentDrafts.map((draft) => {
       const previous = resolveOpeningEntry(draft);
       const openingBase = previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0;
@@ -817,6 +1111,9 @@ export function JazzLoadModule({
     try {
       await write;
       lastSavedRef.current = autosaveSignature;
+      if (currentDraftStateSignature() === savedDraftSignature) {
+        draftDirtyRef.current = false;
+      }
       if (!options.silent) {
         pushPopup("success", status === "closed" ? `Closed Jazz Load day ${selectedDay} locally.` : `Saved Jazz Load day ${selectedDay} locally.`);
       }
@@ -1174,6 +1471,16 @@ export function JazzLoadModule({
     const line = doLines.find((item) => item.id === lineId);
     const name = doNames.find((item) => item.id === nameId);
     if (!line || !name) return;
+    const nameKey = doNameIdentityKey({ doNameId: name.id, doName: name.name });
+    const duplicateLine = drafts.find((draft) =>
+      draft.doLineId &&
+      draft.doLineId !== line.id &&
+      doNameIdentityKey(draft) === nameKey
+    );
+    if (duplicateLine) {
+      pushPopup("warning", `${name.name} is already assigned to line ${duplicateLine.doLine ?? "another line"}.`);
+      return;
+    }
     const id = `${selectedDate}-${line.id}`;
     const assignment: Omit<JazzLoadDoAssignment, "createdBy" | "createdAt" | "updatedAt"> = {
       id,
@@ -1194,17 +1501,25 @@ export function JazzLoadModule({
       createdAt: Date.now(),
       updatedAt: Date.now()
     }]);
-    onQueueWrite(upsertJazzLoadDoAssignment(assignment, user, role), "Could not queue DO assignment.");
-    const nextDrafts = drafts.map((draft) => {
+    const previousLineDraft = drafts.find((draft) => draft.doLineId === line.id || draft.id === line.id || draft.id === id);
+    let nextDrafts = drafts.flatMap((draft) => {
+      if (!draft.doLineId && doNameIdentityKey(draft) === nameKey) return [];
       if (draft.doLineId === line.id || draft.id === line.id || draft.id === `${selectedDate}-${line.id}`) {
-        return {
+        return [{
           ...draft,
           doNameId: name.id,
           doName: name.name
-        };
+        }];
       }
-      return draft;
+      return [draft];
     });
+    const previousNameKey = previousLineDraft ? doNameIdentityKey(previousLineDraft) : "";
+    if (previousNameKey && previousNameKey !== nameKey && !nextDrafts.some((draft) => doNameIdentityKey(draft) === previousNameKey)) {
+      const previousName = activeDoNames.find((item) => item.id === previousLineDraft?.doNameId || normalizeDoKey(item.name) === normalizeDoKey(previousLineDraft?.doName ?? ""));
+      if (previousName) nextDrafts = [...nextDrafts, standaloneNameDraft(previousName)];
+    }
+    onQueueWrite(upsertJazzLoadDoAssignment(assignment, user, role), "Could not queue DO assignment.");
+    markDraftDirty();
     setDrafts(nextDrafts);
     void saveDay("open", { silent: true, nextDrafts, source: "autosave" });
     pushPopup("success", `Assigned ${name.name} to line ${line.line} for ${selectedDate}.`);
@@ -1228,7 +1543,7 @@ export function JazzLoadModule({
   );
 
   useEffect(() => {
-    if (!saveState.reason) return;
+    if (!jazzDailyReady || !saveState.reason) return;
     debugJazzLoadSaveBlock({
       source: "autosave",
       reason: saveState.reason,
@@ -1239,18 +1554,19 @@ export function JazzLoadModule({
       selectedDayLive,
       selectedDayFuture
     });
-  }, [monthId, role, saveState.detail, saveState.reason, selectedDay, selectedDayFuture, selectedDayLive]);
+  }, [jazzDailyReady, monthId, role, saveState.detail, saveState.reason, selectedDay, selectedDayFuture, selectedDayLive]);
 
   const { autoSaveStatus, autoSaveError } = useAutoSaveEntry({
     data: autosaveSignature,
     enabled: true,
-    disabled: saveState.reason === "Day closed" ||
+    disabled: !jazzDailyReady ||
+      saveState.reason === "Day closed" ||
       saveState.reason === "Read-only role" ||
       saveState.reason === "Selected date is future",
     debounceMs: 900,
-    resetKey: `${monthId}-${selectedDay}-${selectedDayRecord?.updatedAt ?? ""}`,
+    resetKey: `${monthId}-${selectedDay}`,
     validate: () => saveState.canSave || [saveState.detail],
-    validationKey: saveState.canSave ? "can-save" : saveState.detail,
+    validationKey: !jazzDailyReady ? "loading" : saveState.canSave ? "can-save" : saveState.detail,
     savedStatus: "saved",
     save: async () => {
       await saveDay("open", { silent: true, source: "autosave", throwOnError: true });
@@ -1264,8 +1580,8 @@ export function JazzLoadModule({
     adminCanEditSelectedDay,
     monthClosed: currentMonth?.status === "closed",
     dayClosed: selectedDayClosed,
-    hasDrafts: drafts.length > 0,
-    activeRates,
+    hasDrafts: jazzDailyReady && drafts.length > 0,
+    activeRates: jazzDailyReady ? activeRates : { mlRate: null, commission1Rate: null, commission2Rate: null },
     validation,
     saving: autoSaveStatus === "saving" || loading
   });
@@ -1281,7 +1597,9 @@ export function JazzLoadModule({
       setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
     }
   }
-  const autoSaveChipText = saveState.reason
+  const autoSaveChipText = !jazzDailyReady
+    ? "Loading..."
+    : saveState.reason
     ? `Autosave blocked: ${saveState.detail}`
     : autoSaveStatus === "saving"
       ? "Autosaving..."
@@ -1301,6 +1619,7 @@ export function JazzLoadModule({
         selectedDay={selectedDay}
         days={jazzCalendarDays}
         now={now}
+        disabled={!jazzDaysInitialized}
         onSelect={setSelectedDay}
         variant="mini"
       />
@@ -1483,7 +1802,7 @@ export function JazzLoadModule({
             <ReportTable
               title="Highest Outstanding DOs"
               headers={["DO", "Line", "Closing", "Active Days"]}
-              rows={localSummary.doBalances.slice(0, 8).map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.closingBase), String(row.activeDays)])}
+              rows={doBalanceRows.slice(0, 8).map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.closingBase), String(row.activeDays)])}
             />
             <ReportTable
               title="Daily Trend"
@@ -1528,21 +1847,23 @@ export function JazzLoadModule({
                   <tr>
                     <th>DO</th>
                     <th>Line</th>
-                    <th>Opening Base</th>
-                    <th>Opening Jazz Load</th>
-                    <th>Issuance Base</th>
+                    <th>Opening Balance</th>
+                    {/* <th>Open Jazz Load</th> */}
+                    <th>Issuance Balance</th>
                     <th>Issuance Jazz Load</th>
-                    <th>Day Total Base</th>
-                    <th>Payment Base</th>
-                    <th>Payment Jazz Load</th>
-                    <th>Closing Base</th>
+                    <th>Total Recieveable</th>
+                    <th>Payment Recieved</th>
+                    {/* <th>Payment Jazz Load</th> */}
+                    <th>Closing Balance</th>
                     <th>Closing Jazz Load</th>
                   </tr>
                 </thead>
                 <tbody>
                   {drafts.map((draft, index) => {
                     const preview = previewEntries[index];
-                    const editingDoName = !draft.doNameId || editingDoNameRows.has(draft.id);
+                    const rowNameKey = doNameIdentityKey(draft);
+                    const canEditDoNameForRow = Boolean(draft.doLineId);
+                    const editingDoName = canEditDoNameForRow && (!draft.doNameId || editingDoNameRows.has(draft.id));
                     return (
                       <tr key={draft.id}>
                         <td>
@@ -1553,7 +1874,11 @@ export function JazzLoadModule({
                                 disabled={!canEditDaily}
                                 onChange={(event) => {
                                   const name = doNames.find((item) => item.id === event.target.value);
-                                  if (draft.doLineId && name) assignNameToLine(draft.doLineId, name.id);
+                                  if (draft.doLineId && name) {
+                                    assignNameToLine(draft.doLineId, name.id);
+                                    setDoNameEditing(draft.id, false);
+                                    return;
+                                  }
                                   setDraft(index, {
                                     doNameId: name?.id,
                                     doName: name?.name ?? draft.doName
@@ -1562,9 +1887,19 @@ export function JazzLoadModule({
                                 }}
                               >
                                 <option value="">Select DO Name</option>
-                                {doNames.filter((name) => name.active).map((name) => (
-                                  <option key={name.id} value={name.id}>{name.name}</option>
-                                ))}
+                                {activeDoNames
+                                  .filter((name) => {
+                                    const optionKey = doNameIdentityKey({ doNameId: name.id, doName: name.name });
+                                    if (optionKey === rowNameKey) return true;
+                                    return !drafts.some((otherDraft, otherIndex) =>
+                                      otherIndex !== index &&
+                                      Boolean(otherDraft.doLineId) &&
+                                      doNameIdentityKey(otherDraft) === optionKey
+                                    );
+                                  })
+                                  .map((name) => (
+                                    <option key={name.id} value={name.id}>{name.name}</option>
+                                  ))}
                               </select>
                               {!draft.doNameId && draft.doName && (
                                 <p className="mt-2 text-xs text-slate-400">Saved name: {draft.doName}</p>
@@ -1573,42 +1908,62 @@ export function JazzLoadModule({
                           ) : (
                             <div className="flex items-center justify-between gap-2">
                               <span className="font-semibold text-white">{draft.doName}</span>
-                              <button
-                                type="button"
-                                className="btn-icon"
-                                disabled={!canEditDaily}
-                                title="Edit DO name"
-                                onClick={() => setDoNameEditing(draft.id, true)}
-                              >
-                                <Pencil />
-                              </button>
+                              {canEditDoNameForRow && (
+                                <button
+                                  type="button"
+                                  className="btn-icon"
+                                  disabled={!canEditDaily}
+                                  title="Edit DO name"
+                                  onClick={() => setDoNameEditing(draft.id, true)}
+                                >
+                                  <Pencil />
+                                </button>
+                              )}
                             </div>
                           )}
                         </td>
                         <td>
                           <p className="font-semibold text-white">{draft.doLine || "-"}</p>
-                          <p className="text-xs text-slate-500">Fixed line row</p>
+                          <p className="text-xs text-slate-500">{draft.doLine ? "Fixed line row" : "DO name balance row"}</p>
                         </td>
                         <td>
                           <NumberInput
                             value={selectedDay === 1 && previousMonthDays.length === 0 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0}
                             disabled={!canEditDaily || selectedDay !== 1 || previousMonthDays.length > 0}
+                            onFocus={() => focusDraftField(`${draft.id}:openingBase`)}
+                            onBlur={() => blurDraftField(`${draft.id}:openingBase`)}
                             onChange={(value) => setDraft(index, { openingBase: value })}
                           />
                         </td>
-                        <td>{formatCurrency(preview?.openingBalance.calculatedAmount ?? 0)}</td>
-                        <td><NumberInput value={draft.todayMlIssuanceBase} disabled={!canEditDaily} onChange={(value) => setDraft(index, { todayMlIssuanceBase: value })} /></td>
+                        {/* <td>{formatCurrency(preview?.openingBalance.calculatedAmount ?? 0)}</td> */}
+                        <td>
+                          <NumberInput
+                            value={draft.todayMlIssuanceBase}
+                            disabled={!canEditDaily}
+                            onFocus={() => focusDraftField(`${draft.id}:todayMlIssuanceBase`)}
+                            onBlur={() => blurDraftField(`${draft.id}:todayMlIssuanceBase`)}
+                            onChange={(value) => setDraft(index, { todayMlIssuanceBase: value })}
+                          />
+                        </td>
                         <td>{formatCurrency(preview?.todayMlIssuance.calculatedAmount ?? 0)}</td>
                         <td>{formatCurrency(preview?.dayTotal.baseAmount ?? 0)}</td>
-                        <td><NumberInput value={draft.paymentReceivedBase} disabled={!canEditDaily} onChange={(value) => setDraft(index, { paymentReceivedBase: value })} /></td>
-                        <td>{formatCurrency(preview?.paymentReceived.calculatedAmount ?? 0)}</td>
+                        <td>
+                          <NumberInput
+                            value={draft.paymentReceivedBase}
+                            disabled={!canEditDaily}
+                            onFocus={() => focusDraftField(`${draft.id}:paymentReceivedBase`)}
+                            onBlur={() => blurDraftField(`${draft.id}:paymentReceivedBase`)}
+                            onChange={(value) => setDraft(index, { paymentReceivedBase: value })}
+                          />
+                        </td>
+                        {/* <td>{formatCurrency(preview?.paymentReceived.calculatedAmount ?? 0)}</td> */}
                         <td>{formatCurrency(preview?.closingBalance.baseAmount ?? 0)}</td>
                         <td>{formatCurrency(preview?.closingBalance.calculatedAmount ?? 0)}</td>
                       </tr>
                     );
                   })}
                   {drafts.length === 0 && (
-                    <tr><td colSpan={11}>No DO lines configured. Add DO Lines in Settings.</td></tr>
+                    <tr><td colSpan={9}>No active DO names or lines configured. Add DO Names and DO Lines in Settings.</td></tr>
                   )}
                 </tbody>
                 <tfoot>
@@ -1616,12 +1971,12 @@ export function JazzLoadModule({
                     <td className="uppercase tracking-[0.12em] text-slate-300">Daily Totals</td>
                     <td className="text-slate-500">-</td>
                     <td>{formatCurrency(previewSummary.openingBase)}</td>
-                    <td>{formatCurrency(previewSummary.openingMl)}</td>
+                    {/* <td>{formatCurrency(previewSummary.openingMl)}</td> */}
                     <td>{formatCurrency(previewSummary.issuanceBase)}</td>
                     <td>{formatCurrency(previewSummary.issuanceMl)}</td>
                     <td>{formatCurrency(previewSummary.dayTotalBase ?? 0)}</td>
                     <td>{formatCurrency(previewSummary.paymentBase)}</td>
-                    <td>{formatCurrency(previewSummary.paymentMl)}</td>
+                    {/* <td>{formatCurrency(previewSummary.paymentMl)}</td> */}
                     <td>{formatCurrency(previewSummary.closingBase)}</td>
                     <td>{formatCurrency(previewSummary.closingMl)}</td>
                   </tr>
@@ -1640,7 +1995,19 @@ export function JazzLoadModule({
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-">
                 <label>Opening Balance<NumberInput value={liftingOpening} disabled={true} onChange={setLiftingOpening} /></label>
-                <label>Jazz Load Lifting<NumberInput value={mlLifting} disabled={!canEditDaily} onChange={setMlLifting} /></label>
+                <label>
+                  Jazz Load Lifting
+                  <NumberInput
+                    value={mlLifting}
+                    disabled={!canEditDaily}
+                    onFocus={() => focusDraftField("mlLifting")}
+                    onBlur={() => blurDraftField("mlLifting")}
+                    onChange={(value) => {
+                      markDraftDirty();
+                      setMlLifting(value);
+                    }}
+                  />
+                </label>
                 <label>Total Balance<input value={formatCurrency(previewLifting.totalBalance)} disabled readOnly /></label>
                 <label>Today Jazz Load Issuance<input value={formatCurrency(previewLifting.todayMlIssuance)} disabled readOnly /></label>
                 <label>In-Hand Balance<input value={formatCurrency(previewLifting.inHandBalance)} disabled readOnly /></label>
@@ -1665,7 +2032,19 @@ export function JazzLoadModule({
                   </div>
                 ))}
               </div>
-              <label className="mt-4">Notes<input value={dayNotes} disabled={!canEditDaily} onChange={(event) => setDayNotes(event.target.value)} /></label>
+              <label className="mt-4">
+                Notes
+                <input
+                  value={dayNotes}
+                  disabled={!canEditDaily}
+                  onFocus={() => focusDraftField("dayNotes")}
+                  onBlur={() => blurDraftField("dayNotes")}
+                  onChange={(event) => {
+                    markDraftDirty();
+                    setDayNotes(event.target.value);
+                  }}
+                />
+              </label>
             </section>
           </div>
         </div>
@@ -1677,7 +2056,7 @@ export function JazzLoadModule({
             <button className="btn-primary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadXlsx(localSummary, days)}><FileSpreadsheet /> Export Excel</button>
             <button className="btn-secondary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadPrintable(localSummary)}><FileDown /> Export PDF/Print</button>
           </div>
-          <ReportTable title="DO Balance Report" headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load"]} rows={localSummary.doBalances.map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.openingBase), formatCurrency(row.issuanceBase), formatCurrency(row.paymentBase), formatCurrency(row.closingMl)])} />
+          <ReportTable title="DO Balance Report" headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load"]} rows={doBalanceRows.map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.openingBase), formatCurrency(row.issuanceBase), formatCurrency(row.paymentBase), formatCurrency(row.closingMl)])} />
           <ReportTable title="Jazz Load Issuance Report" headers={["Day", "Issuance Base", "Issuance Jazz Load"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceBase), formatCurrency(row.issuanceMl)])} />
           <ReportTable title="Payments Received" headers={["Day", "Payment Base", "Payment Jazz Load"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.paymentBase), formatCurrency(row.paymentMl)])} />
           <ReportTable title="Lifting Summary" headers={["Day", "Lifting", "In-Hand"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.lifting), formatCurrency(row.inHandBalance)])} />

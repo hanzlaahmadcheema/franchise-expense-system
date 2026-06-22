@@ -190,6 +190,59 @@ describe("jazzLoadCalculations", () => {
     expect(summary.doBalances.map((row) => row.doLine)).toEqual(["301", "302"]);
   });
 
+  it("summarizes a DO name once even when it moves between fixed lines", () => {
+    const dayOne = calculateDoRow(
+      { id: "line-1-day-1", doNameId: "name-a", doLineId: "line-1", doName: "A", doLine: "301", doLineSortOrder: 0, todayMlIssuanceBase: 500, paymentReceivedBase: 0 },
+      rates,
+      { createdBy: "u", timestamp: 1 }
+    );
+    const dayTwo = calculateDoRow(
+      { id: "line-2-day-2", doNameId: "name-a", doLineId: "line-2", doName: "A", doLine: "302", doLineSortOrder: 1, openingBase: dayOne.closingBalance.baseAmount, todayMlIssuanceBase: 0, paymentReceivedBase: 200 },
+      rates,
+      { createdBy: "u", previous: dayOne, timestamp: 2 }
+    );
+
+    const summary = calculateMonthlySummary("2026-05", [
+      {
+        id: "1",
+        monthId: "2026-05",
+        dayNo: 1,
+        date: "2026-05-01",
+        status: "open",
+        doEntries: [dayOne],
+        lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, dayOne.todayMlIssuance.calculatedAmount),
+        summary: calculateDailySummary({ doEntries: [dayOne] }, rates),
+        createdBy: "u",
+        createdAt: 1,
+        updatedAt: 1
+      },
+      {
+        id: "2",
+        monthId: "2026-05",
+        dayNo: 2,
+        date: "2026-05-02",
+        status: "open",
+        doEntries: [dayTwo],
+        lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, dayTwo.todayMlIssuance.calculatedAmount),
+        summary: calculateDailySummary({ doEntries: [dayTwo] }, rates),
+        createdBy: "u",
+        createdAt: 2,
+        updatedAt: 2
+      }
+    ]);
+
+    expect(summary.doBalances).toHaveLength(1);
+    expect(summary.doBalances[0]).toMatchObject({
+      doNameId: "name-a",
+      doName: "A",
+      doLine: "302",
+      issuanceBase: 500,
+      paymentBase: 200,
+      closingBase: 300,
+      activeDays: 2
+    });
+  });
+
   it("carries the latest prior DO name and opening balance across skipped days", () => {
     const prior = calculateDoRow(
       { id: "line-1-day-1", doNameId: "name-a", doLineId: "line-1", doName: "RIZWAN", doLine: "301", todayMlIssuanceBase: 1000, paymentReceivedBase: 200 },
@@ -330,5 +383,18 @@ describe("jazzLoadCalculations", () => {
     ]));
     expect(result.errors).not.toContain("A payment cannot be greater than day total.");
     expect(result.errors).not.toContain("A opening cannot be negative.");
+  });
+
+  it("blocks assigning one DO name to more than one row", () => {
+    const result = validateJazzLoadDrafts(
+      [
+        { id: "a", doNameId: "name-a", doLineId: "line-1", doName: "A", doLine: "301", todayMlIssuanceBase: 10, paymentReceivedBase: 0 },
+        { id: "b", doNameId: "name-a", doLineId: "line-2", doName: "A", doLine: "302", todayMlIssuanceBase: 20, paymentReceivedBase: 0 }
+      ],
+      rates
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("Duplicate DO name assignment: A.");
   });
 });

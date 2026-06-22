@@ -782,6 +782,7 @@ export async function saveJazzLoadDay(
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
   batch.set(dayRef(month.id, day.dayNo), {
     ...cleanForFirestore(nextDay),
+    notes: nextDay.notes?.trim() ? nextDay.notes : deleteField(),
     lockedAt: nextDay.lockedAt ?? deleteField(),
     lockedBy: nextDay.lockedBy ?? deleteField(),
     lockedByRole: nextDay.lockedByRole ?? deleteField(),

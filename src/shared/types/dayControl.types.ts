@@ -4,6 +4,7 @@ import type { UserRole } from "../../types/ledger";
 export type ModuleKey = "expense" | "jazzLoad" | "stock";
 
 export type UniversalDayStatus =
+  | "loading"
   | "missing"
   | "open"
   | "closed"

@@ -247,6 +247,8 @@ export type JazzLoadMonthlySummary = {
   }>;
   doBalances: Array<{
     doProfileId?: string;
+    doNameId?: string;
+    doLineId?: string;
     doName: string;
     doLine?: string;
     doLineSortOrder?: number;

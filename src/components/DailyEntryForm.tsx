@@ -273,9 +273,10 @@ export function DailyEntryForm({
     expense: 0,
     received: 0
   });
-  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "loan" | "receive">>({
+  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "description" | "loan" | "receive">>({
     partyId: partyOptions[0]?.id ?? "",
     partyName: partyOptions[0]?.name ?? "",
+    description: "",
     loan: 0,
     receive: 0
   });
@@ -364,6 +365,7 @@ export function DailyEntryForm({
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
+          description: row.description,
           opening,
           loan: 0,
           today: 0,
@@ -431,6 +433,7 @@ export function DailyEntryForm({
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
+          description: row.description,
           opening: resolveCreditClosingBalance(row),
           loan: 0,
           today: 0,
@@ -709,6 +712,7 @@ export function DailyEntryForm({
                 ...row,
                 partyId: creditDraft.partyId,
                 partyName: creditDraft.partyName,
+                description: creditDraft.description?.trim() || row.description,
                 loan: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
                 today: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
                 receive: parseLedgerNumber(row.receive) + parseLedgerNumber(creditDraft.receive)
@@ -722,6 +726,7 @@ export function DailyEntryForm({
           id: editingCreditId ?? `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: creditDraft.partyId,
           partyName: creditDraft.partyName,
+          description: creditDraft.description?.trim() || undefined,
           opening,
           loan: creditDraft.loan,
           receive: creditDraft.receive
@@ -731,6 +736,7 @@ export function DailyEntryForm({
     setCreditDraft({
       partyId: partyOptions[0]?.id ?? "",
       partyName: partyOptions[0]?.name ?? "",
+      description: "",
       loan: 0,
       receive: 0
     });
@@ -742,6 +748,7 @@ export function DailyEntryForm({
     setCreditDraft({
       partyId: row.partyId ?? "",
       partyName: row.partyName ?? "",
+      description: row.description ?? "",
       loan: parseLedgerNumber(row.loan ?? row.today),
       receive: parseLedgerNumber(row.receive)
     });
@@ -1334,7 +1341,7 @@ export function DailyEntryForm({
             </button>
           </div>
           {creditVerifyMessage && <pre className="status whitespace-pre-wrap font-sans text-sm">{creditVerifyMessage}</pre>}
-          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_auto]">
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1.4fr_1.6fr_1fr_1fr_1fr_auto]">
             <label>
               Party
               <select
@@ -1355,6 +1362,15 @@ export function DailyEntryForm({
             <label>
               Opening
               <input value={creditOpeningPreview.toLocaleString()} disabled readOnly />
+            </label>
+            <label>
+              Description
+              <input
+                value={creditDraft.description ?? ""}
+                disabled={disabled || !creditDraft.partyId}
+                onChange={(event) => setCreditDraft((draft) => ({ ...draft, description: event.target.value }))}
+                placeholder="Reason, detail, reference"
+              />
             </label>
             <label>
               Loan
@@ -1390,6 +1406,7 @@ export function DailyEntryForm({
                     <span className="mobile-pill">{balance.toLocaleString()}</span>
                   </div>
                   <dl className="mobile-kv-grid mt-3">
+                    <div><dt>Description</dt><dd>{row.description || "-"}</dd></div>
                     <div><dt>Opening</dt><dd>{row.opening.toLocaleString()}</dd></div>
                     <div><dt>Loan</dt><dd>{(row.loan ?? row.today ?? 0).toLocaleString()}</dd></div>
                     <div><dt>Receive</dt><dd>{row.receive.toLocaleString()}</dd></div>
@@ -1412,6 +1429,7 @@ export function DailyEntryForm({
               <thead>
                 <tr>
                   <th>Party</th>
+                  <th>Description</th>
                   <th>Opening</th>
                   <th>Loan</th>
                   <th>Receive</th>
@@ -1425,6 +1443,7 @@ export function DailyEntryForm({
                   return (
                     <tr key={row.id}>
                       <td>{row.partyName}</td>
+                      <td>{row.description || "-"}</td>
                       <td>{row.opening.toLocaleString()}</td>
                       <td>{(row.loan ?? row.today ?? 0).toLocaleString()}</td>
                       <td>{row.receive.toLocaleString()}</td>
@@ -1454,7 +1473,7 @@ export function DailyEntryForm({
                 })}
                 {derivedCredits.length === 0 && (
                   <tr>
-                    <td colSpan={6}>No credit entries.</td>
+                    <td colSpan={7}>No credit entries.</td>
                   </tr>
                 )}
               </tbody>

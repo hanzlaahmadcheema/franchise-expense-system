@@ -20,6 +20,12 @@ function sum(values: number[]) {
   return roundMoney(values.reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0));
 }
 
+function doNameIdentityKey(input: Pick<JazzLoadDoEntryDraft, "doNameId" | "doName">) {
+  const name = input.doName.trim();
+  if (!input.doNameId && !name) return "";
+  return input.doNameId ?? normalizeDoKey(name);
+}
+
 export function calculateAmountWithRate(
   baseAmount: number,
   rate: JazzLoadRateConfig,
@@ -185,9 +191,11 @@ export function calculateMonthlySummary(monthId: string, days: JazzLoadDay[]): J
 
   for (const day of sortedDays) {
     for (const entry of day.doEntries) {
-      const key = entry.doLineId ?? entry.doProfileId ?? normalizeDoKey(entry.doName, entry.doLine);
+      const key = doNameIdentityKey(entry) || entry.doLineId || entry.doProfileId || normalizeDoKey(entry.doName, entry.doLine);
       const current = doMap.get(key) ?? {
         doProfileId: entry.doProfileId,
+        doNameId: entry.doNameId,
+        doLineId: entry.doLineId,
         doName: entry.doName,
         doLine: entry.doLine,
         doLineSortOrder: entry.doLineSortOrder,
@@ -202,6 +210,8 @@ export function calculateMonthlySummary(monthId: string, days: JazzLoadDay[]): J
       current.paymentBase = roundMoney(current.paymentBase + entry.paymentReceived.baseAmount);
       current.closingBase = roundMoney(entry.closingBalance.baseAmount);
       current.closingMl = roundMoney(entry.closingBalance.calculatedAmount);
+      current.doNameId = entry.doNameId ?? current.doNameId;
+      current.doLineId = entry.doLineId ?? current.doLineId;
       current.doName = entry.doName || current.doName;
       current.doLine = entry.doLine || current.doLine;
       current.doLineSortOrder = entry.doLineSortOrder ?? current.doLineSortOrder;
@@ -319,12 +329,18 @@ export function validateJazzLoadDrafts(
   if (!activeRates.commission1Rate?.active) errors.push("No active Commission 1 Adjustment Rate configured.");
   if (!activeRates.commission2Rate?.active) errors.push("No active Commission 2 Payment Rate configured.");
   const seen = new Set<string>();
+  const seenNames = new Set<string>();
   for (const draft of drafts) {
     const label = draft.doName || draft.doLine || "DO row";
     if (!draft.doName.trim()) errors.push(`Missing DO assignment${draft.doLine ? ` for ${draft.doLine}` : ""}.`);
     const key = draft.doLineId ?? draft.doProfileId ?? normalizeDoKey(draft.doName, draft.doLine);
     if (seen.has(key)) errors.push(`Duplicate DO entry: ${label}.`);
     seen.add(key);
+    const nameKey = doNameIdentityKey(draft);
+    if (nameKey) {
+      if (seenNames.has(nameKey)) errors.push(`Duplicate DO name assignment: ${label}.`);
+      seenNames.add(nameKey);
+    }
     for (const [field, value] of [
       ["opening", draft.openingBase ?? 0],
       ["issuance", draft.todayMlIssuanceBase],

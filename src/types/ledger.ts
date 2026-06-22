@@ -55,6 +55,7 @@ export type CreditRow = {
   id: string;
   partyId?: string;
   partyName: string;
+  description?: string;
   opening: number;
   loan: number;
   receive: number;

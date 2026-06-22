@@ -71,4 +71,51 @@ describe("DailyEntryForm close-day locking", () => {
     expect(await screen.findByText("Save Confirmed")).toBeTruthy();
     expect(screen.getByText(/Firestore confirmed the write/)).toBeTruthy();
   });
+
+  it("includes credit party descriptions in the saved day payload", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <DailyEntryForm
+        dayNo={7}
+        entryYear={2026}
+        entryMonth={6}
+        entryDay={7}
+        openingBalance={0}
+        ownerOpeningBalance={0}
+        previousOwnerClosingBalance={0}
+        dateLabel="2026-06-07"
+        expenseCategories={[]}
+        commissionCategories={[]}
+        creditParties={[{ id: "party-a", name: "Party A", active: true, sortOrder: 0 }]}
+        initial={{ dayNo: 7, expenses: [], commissions: [], credits: [], ownerBalances: [] }}
+        onSave={onSave}
+        onCloseDay={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    await userEvent.type(screen.getByPlaceholderText("Reason, detail, reference"), "Advance for shop work");
+    await userEvent.type(screen.getByLabelText("Loan"), "500");
+    await userEvent.type(screen.getByLabelText("Receive"), "100");
+    const enabledAddEntry = screen.getAllByRole("button", { name: "Add Entry" }).find((button) => !(button as HTMLButtonElement).disabled);
+    expect(enabledAddEntry).toBeTruthy();
+    await userEvent.click(enabledAddEntry as HTMLButtonElement);
+    expect(screen.getAllByText("Advance for shop work").length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Now & Verify" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credits: [
+          expect.objectContaining({
+            partyId: "party-a",
+            partyName: "Party A",
+            description: "Advance for shop work",
+            loan: 500,
+            receive: 100
+          })
+        ]
+      }),
+      { awaitRemote: true }
+    );
+  });
 });

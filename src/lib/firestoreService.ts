@@ -795,10 +795,10 @@ async function syncExpenseLedgerV2RawEntriesInBatch(
       raw: {
         partyId: credit.partyId,
         partyNameSnapshot: credit.partyName,
+        notes: credit.description,
         loan: credit.loan ?? credit.today ?? 0,
         receive: credit.receive,
         manualAdjustment: 0,
-        notes: undefined,
         source: "user"
       }
     })),

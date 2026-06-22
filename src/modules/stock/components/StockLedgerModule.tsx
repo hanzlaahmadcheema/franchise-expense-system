@@ -154,24 +154,64 @@ function canEditStockDay(role: UserRole | null, month: StockMonth | undefined, m
   });
 }
 
-function NumberInput({ value, onChange, disabled }: { value: number; onChange: (value: number) => void; disabled?: boolean }) {
+function NumberInput({
+  value,
+  onChange,
+  disabled,
+  onFocus,
+  onBlur
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
+}) {
   const [text, setText] = useState(value ? String(value) : "");
-  useEffect(() => setText(value ? String(value) : ""), [value]);
+  const [focused, setFocused] = useState(false);
+  const dirtyRef = useRef(false);
+
+  useEffect(() => {
+    if (focused || dirtyRef.current) return;
+    setText(value ? String(value) : "");
+  }, [focused, value]);
+
   return (
     <input
       type="text"
       inputMode="decimal"
       value={text}
       disabled={disabled}
+      onFocus={() => {
+        dirtyRef.current = false;
+        setFocused(true);
+        onFocus?.();
+      }}
       onChange={(event) => {
         const next = event.target.value;
         if (!/^\d*\.?\d*$/.test(next)) return;
+        dirtyRef.current = true;
         setText(next);
         onChange(parseMoneyInput(next));
       }}
-      onBlur={() => setText((current) => current ? String(parseMoneyInput(current)) : "")}
+      onBlur={() => {
+        setText((current) => current ? String(parseMoneyInput(current)) : "");
+        dirtyRef.current = false;
+        setFocused(false);
+        onBlur?.();
+      }}
     />
   );
+}
+
+function stockDraftSignature(draft: StockDailyAccountDraft) {
+  return JSON.stringify({
+    accountId: draft.accountId,
+    productQuantities: Object.fromEntries(Object.entries(draft.productQuantities).sort(([left], [right]) => left.localeCompare(right))),
+    paymentReceived: draft.paymentReceived ?? 0,
+    carryForwardBalance: draft.carryForwardBalance ?? 0,
+    notes: draft.notes ?? ""
+  });
 }
 
 function MetricCard({ label, value, helper }: { label: string; value: string; helper: string }) {
@@ -532,6 +572,14 @@ export function StockLedgerModule({
   });
   const [months, setMonths] = useState<StockMonth[]>([]);
   const [days, setDays] = useState<StockDayRecord[]>([]);
+  const [stockDaysInitialized, setStockDaysInitialized] = useState(false);
+  const [stockPreviousSummaryInitialized, setStockPreviousSummaryInitialized] = useState(false);
+  const [stockSettingsInitialized, setStockSettingsInitialized] = useState({
+    products: false,
+    accounts: false,
+    months: false,
+    openingBalances: false
+  });
   const [summary, setSummary] = useState<StockMonthlySummary | null>(null);
   const [prevSummary, setPrevSummary] = useState<StockMonthlySummary | null>(null);
   const [products, setProducts] = useState<StockProduct[]>([]);
@@ -559,6 +607,10 @@ export function StockLedgerModule({
   const monthBootstrapPendingRef = useRef(false);
   const openingSeedAttemptedRef = useRef(false);
   const [openingBalances, setOpeningBalances] = useState<StockOpeningBalances>({ openingStock: {}, jazzOpeningPayable: 0 });
+  const stockDraftRef = useRef(draft);
+  const stockDraftDirtyRef = useRef(false);
+  const stockDraftHydrationKeyRef = useRef("");
+  const focusedStockDraftFieldsRef = useRef(new Set<string>());
 
   const callbacksRef = useRef({
     onSnapshotMetadata,
@@ -574,8 +626,56 @@ export function StockLedgerModule({
     onStatus
   };
 
+  useEffect(() => {
+    stockDraftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
+    stockDraftDirtyRef.current = false;
+    focusedStockDraftFieldsRef.current.clear();
+    stockDraftHydrationKeyRef.current = "";
+  }, [monthId, selectedDay, selectedAccountId]);
+
+  function markStockDraftDirty() {
+    stockDraftDirtyRef.current = true;
+  }
+
+  function focusStockDraftField(fieldId: string) {
+    focusedStockDraftFieldsRef.current.add(fieldId);
+  }
+
+  function blurStockDraftField(fieldId: string) {
+    focusedStockDraftFieldsRef.current.delete(fieldId);
+  }
+
+  function currentStockDraftSignature() {
+    return stockDraftSignature(stockDraftRef.current);
+  }
+
+  function updateStockDraft(nextDraft: StockDailyAccountDraft | ((current: StockDailyAccountDraft) => StockDailyAccountDraft)) {
+    markStockDraftDirty();
+    setDraft(nextDraft);
+  }
+
+  function shouldApplyRemoteStockDraft(hydrationKey: string) {
+    if (stockDraftHydrationKeyRef.current !== hydrationKey) return true;
+    if (focusedStockDraftFieldsRef.current.size > 0 || stockDraftDirtyRef.current) return false;
+    return true;
+  }
+
+  function applyRemoteStockDraft(hydrationKey: string, nextDraft: StockDailyAccountDraft) {
+    if (!shouldApplyRemoteStockDraft(hydrationKey)) return;
+    setDraft(nextDraft);
+    stockDraftHydrationKeyRef.current = hydrationKey;
+    stockDraftDirtyRef.current = false;
+  }
+
+  function markStockSettingInitialized(key: keyof typeof stockSettingsInitialized) {
+    setStockSettingsInitialized((current) => ({ ...current, [key]: true }));
+  }
+
   const month = months.find((item) => item.id === monthId);
-  const selectedDayRecord = days.find((day) => day.dayNo === selectedDay);
+  const selectedDayRecord = days.find((day) => day.monthId === monthId && day.dayNo === selectedDay);
   const selectedDayStatus = getStockDayStatus(monthId, selectedDay, selectedDayRecord, month?.status, now);
   const sortedProducts = useMemo(() => productsSorted(products), [products]);
   const activeProducts = useMemo(() => sortedProducts.filter((product) => product.active), [sortedProducts]);
@@ -745,7 +845,9 @@ export function StockLedgerModule({
   }, [monthOpeningJazzPayable, allStockInRecords]);
 
   const canManageSettings = roleCanStock(role, "settings");
-  const canEdit = canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
+  const stockSettingsReady = Object.values(stockSettingsInitialized).every(Boolean);
+  const stockDailyReady = stockSettingsReady && stockDaysInitialized && stockPreviousSummaryInitialized;
+  const canEdit = stockDailyReady && canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
   const canUseStockBackup = roleCanStock(role, "backup");
   const canReopenSelectedDay =
     Boolean(selectedDayRecord && selectedDayRecord.status === "closed") &&
@@ -760,13 +862,15 @@ export function StockLedgerModule({
       const dayNo = index + 1;
       const day = days.find((item) => item.dayNo === dayNo);
       const displayStatus = getStockDayStatus(monthId, dayNo, day, month?.status, now);
-      const status = month?.status === "closed" ? "closed" : resolveUniversalDayStatus({
-        exists: Boolean(day),
-        future: displayStatus === "Future",
-        live: isLiveDay(monthId, dayNo, now),
-        day,
-        nowMs: now.getTime()
-      });
+      const status = !stockDaysInitialized && displayStatus !== "Future"
+        ? "loading"
+        : month?.status === "closed" ? "closed" : resolveUniversalDayStatus({
+          exists: Boolean(day),
+          future: displayStatus === "Future",
+          live: isLiveDay(monthId, dayNo, now),
+          day,
+          nowMs: now.getTime()
+        });
       return {
         moduleKey: "stock",
         monthId,
@@ -779,8 +883,10 @@ export function StockLedgerModule({
         status
       };
     });
-  }, [days, month?.status, monthId, now]);
-  const selectedStockStatus = stockCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
+  }, [days, month?.status, monthId, now, stockDaysInitialized]);
+  const selectedStockStatus = !stockDaysInitialized
+    ? "loading"
+    : stockCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -790,10 +896,29 @@ export function StockLedgerModule({
   useEffect(() => {
     if (!user || !role) return;
     const unsubscribers = [
-      subscribeStockProducts((rows, metadata) => { setProducts(rows); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
-      subscribeStockAccounts((rows, metadata) => { setAccounts(rows); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
-      subscribeStockMonths((rows, metadata) => { setMonths(rows); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
-      subscribeStockOpeningBalances((bal) => { if (bal) setOpeningBalances(bal); }, (err) => console.error("Could not subscribe to opening balances:", err))
+      subscribeStockProducts((rows, metadata) => {
+        setProducts(rows);
+        markStockSettingInitialized("products");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => callbacksRef.current.onFirestoreError(err.message)),
+      subscribeStockAccounts((rows, metadata) => {
+        setAccounts(rows);
+        markStockSettingInitialized("accounts");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => callbacksRef.current.onFirestoreError(err.message)),
+      subscribeStockMonths((rows, metadata) => {
+        setMonths(rows);
+        markStockSettingInitialized("months");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => callbacksRef.current.onFirestoreError(err.message)),
+      subscribeStockOpeningBalances((bal, metadata) => {
+        if (bal) setOpeningBalances(bal);
+        markStockSettingInitialized("openingBalances");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => {
+        markStockSettingInitialized("openingBalances");
+        console.error("Could not subscribe to opening balances:", err);
+      })
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
   }, [role, user]);
@@ -809,6 +934,10 @@ export function StockLedgerModule({
   }, [products, role, user]);
 
   useEffect(() => {
+    setStockDaysInitialized(false);
+  }, [monthId]);
+
+  useEffect(() => {
     if (!user || !role) return;
     if (!month && roleCanStock(role, "daily") && !monthBootstrapPendingRef.current) {
       const createMonthPromise = ensureStockMonth(monthId, user, role);
@@ -821,7 +950,11 @@ export function StockLedgerModule({
       });
     }
     const unsubscribers = [
-      subscribeStockDays(monthId, (rows, metadata) => { setDays(rows); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
+      subscribeStockDays(monthId, (rows, metadata) => {
+        setDays(rows);
+        setStockDaysInitialized(true);
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => callbacksRef.current.onFirestoreError(err.message)),
       subscribeStockMonthlySummary(monthId, (nextSummary, metadata) => { setSummary(nextSummary); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
       subscribeAuditLogs({ module: "stock", monthId }, (logs) => setAuditLogs(logs), (err) => console.error("Could not subscribe to audit logs:", err))
     ];
@@ -831,10 +964,17 @@ export function StockLedgerModule({
   useEffect(() => {
     if (!user || !role) return;
     const prevId = previousMonthId(monthId);
+    setStockPreviousSummaryInitialized(false);
     return subscribeStockMonthlySummary(
       prevId,
-      (nextSummary) => setPrevSummary(nextSummary),
-      (err) => console.error("Could not subscribe to previous month summary:", err)
+      (nextSummary) => {
+        setPrevSummary(nextSummary);
+        setStockPreviousSummaryInitialized(true);
+      },
+      (err) => {
+        setStockPreviousSummaryInitialized(true);
+        console.error("Could not subscribe to previous month summary:", err);
+      }
     );
   }, [monthId, role, user]);
 
@@ -851,9 +991,9 @@ export function StockLedgerModule({
 
   useEffect(() => {
     if (!selectedAccountId) return;
+    if (!stockDailyReady) return;
     const nextEntry = selectedDayRecord?.entries.find((entry) => entry.accountId === selectedAccountId);
-
-    setDraft({
+    const nextDraft = {
       accountId: selectedAccountId,
       productQuantities: Object.fromEntries(activeProducts.map((product) => [
         product.id,
@@ -862,8 +1002,9 @@ export function StockLedgerModule({
       paymentReceived: nextEntry?.totalPaymentReceived ?? 0,
       carryForwardBalance: selectedCarryForwardBalance,
       notes: nextEntry?.notes ?? ""
-    });
-  }, [activeProducts, selectedAccountId, selectedCarryForwardBalance, selectedDayRecord]);
+    };
+    applyRemoteStockDraft(`${monthId}-${selectedDay}-${selectedAccountId}`, nextDraft);
+  }, [activeProducts, monthId, selectedAccountId, selectedCarryForwardBalance, selectedDay, selectedDayRecord, stockDailyReady]);
 
   const previewEntry = selectedAccount ? buildStockEntry({
     id: selectedAccount.id,
@@ -917,6 +1058,7 @@ export function StockLedgerModule({
       if (options.throwOnError) throw new Error(validation.errors.join(" "));
       return false;
     }
+    const savedDraftSignature = stockDraftSignature(nextDraft);
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const entries = [
       ...(selectedDayRecord?.entries.filter((entry) => entry.accountId !== selectedAccount.id) ?? []),
@@ -930,11 +1072,27 @@ export function StockLedgerModule({
       previous: selectedDayRecord,
       createdBy: user.uid
     });
+    const productQuantitiesChanged = products.some((product) => {
+      const nextQuantity = roundMoney(nextDraft.productQuantities[product.id] ?? 0);
+      const previousQuantity = roundMoney(selectedEntry?.products.find((item) => item.productId === product.id)?.quantity ?? 0);
+      return nextQuantity !== previousQuantity;
+    });
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    const write = saveStockDay(workingMonth, nextDay, days, user, role);
+    const write = saveStockDay(workingMonth, nextDay, days, user, role, "save-day", {
+      openingBalances,
+      previousSummary: prevSummary,
+      products,
+      skipExistingDocCleanup: true,
+      skipJazzCompanyBalanceWrite: true,
+      skipProductBalanceWrites: !productQuantitiesChanged,
+      skipRawEntryCleanup: true
+    });
     onQueueWrite(write, "Could not queue stock entry save.");
     try {
       await write;
+      if (currentStockDraftSignature() === savedDraftSignature) {
+        stockDraftDirtyRef.current = false;
+      }
       onStatus(`Saved stock record for ${selectedAccount.name} to Firestore.`);
       return true;
     } catch (error) {
@@ -1301,28 +1459,35 @@ export function StockLedgerModule({
     }
   }
 
-  const stockEntryAutoSave = useAutoSaveEntry({
-    data: {
+  const stockAutosaveData = useMemo(
+    () => ({
       monthId,
       selectedDay,
       selectedAccountId,
       draft
-    },
+    }),
+    [draft, monthId, selectedAccountId, selectedDay]
+  );
+
+  const stockEntryAutoSave = useAutoSaveEntry({
+    data: stockAutosaveData,
     enabled: true,
-    disabled: !canEdit || !selectedAccount || !previewEntry || monthBootstrapPending || section !== "daily",
+    disabled: !stockDailyReady || !canEdit || !selectedAccount || !previewEntry || monthBootstrapPending || section !== "daily",
     debounceMs: 900,
-    resetKey: `${monthId}-${selectedDay}-${selectedAccountId}-${selectedDayRecord?.updatedAt ?? ""}`,
-    validate: () => {
+    resetKey: `${monthId}-${selectedDay}-${selectedAccountId}`,
+    validate: (snapshot) => {
+      if (!stockDailyReady) return "Loading Stock Ledger data.";
       if (!selectedAccount) return "Select an account.";
-      const hasMovement = Object.values(draft.productQuantities).some((quantity) => quantity !== 0) ||
-        (draft.paymentReceived ?? 0) !== 0 ||
-        Boolean(draft.notes?.trim()) ||
+      const snapshotDraft = snapshot.draft;
+      const hasMovement = Object.values(snapshotDraft.productQuantities).some((quantity) => quantity !== 0) ||
+        (snapshotDraft.paymentReceived ?? 0) !== 0 ||
+        Boolean(snapshotDraft.notes?.trim()) ||
         Boolean(selectedEntry);
       if (!hasMovement) return "Enter stock movement before autosave.";
-      return validateStockDraft(draft, products, selectedAccount).errors;
+      return validateStockDraft(snapshotDraft, products, selectedAccount).errors;
     },
-    save: async () => {
-      await saveEntry();
+    save: async (snapshot) => {
+      await saveEntry(snapshot.draft, { throwOnError: true });
     }
   });
 
@@ -1336,6 +1501,7 @@ export function StockLedgerModule({
         selectedDay={selectedDay}
         days={stockCalendarDays}
         now={now}
+        disabled={!stockDaysInitialized}
         onSelect={setSelectedDay}
         variant="mini"
       />
@@ -1346,8 +1512,8 @@ export function StockLedgerModule({
         selectedStatus={selectedStockStatus}
         role={role}
         density="compact"
-        busy={Boolean(loading) || monthBootstrapPending}
-        autoSaveStatus={section === "daily" ? (canEdit ? stockEntryAutoSave.autoSaveStatus : selectedDayRecord?.status === "closed" ? "closed" : "readOnly") : undefined}
+        busy={Boolean(loading) || monthBootstrapPending || !stockDailyReady}
+        autoSaveStatus={section === "daily" ? (!stockDailyReady ? "readOnly" : canEdit ? stockEntryAutoSave.autoSaveStatus : selectedDayRecord?.status === "closed" ? "closed" : "readOnly") : undefined}
         permissions={{
           canCloseSelectedDay: canEdit && (role === "owner" || isLiveDay(monthId, selectedDay, now)) && Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
           canReopenSelectedDay: canReopenSelectedDay && month?.status !== "closed" && !monthBootstrapPending,
@@ -1812,7 +1978,7 @@ export function StockLedgerModule({
                 </label>
                 <select 
                   value={selectedAccountId} 
-                  disabled={!canEdit || activeAccounts.length === 0 || monthBootstrapPending} 
+                  disabled={!stockDailyReady || !canEdit || activeAccounts.length === 0 || monthBootstrapPending}
                   onChange={(event) => setSelectedAccountId(event.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
                 >
@@ -1831,7 +1997,9 @@ export function StockLedgerModule({
               {/* Action Buttons Section */}
               <div className="md:col-span-4 flex flex-wrap gap-2.5">
                 <span className="flex flex-1 items-center rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                  {!canEdit
+                  {!stockDailyReady
+                    ? "Loading..."
+                    : !canEdit
                     ? "Autosave off"
                     : stockEntryAutoSave.autoSaveStatus === "saving"
                     ? "Autosaving..."
@@ -1843,8 +2011,9 @@ export function StockLedgerModule({
             </div>
 
             {/* Warnings */}
-            {!canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
-            {activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
+            {!stockDailyReady && <p className="status mt-4 bg-slate-500/10 text-slate-300 border border-slate-500/20 px-3 py-2 rounded-lg text-xs">Loading Stock Ledger data...</p>}
+            {stockDailyReady && !canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
+            {stockDailyReady && activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
           </section>
 
           {selectedAccount && previewEntry && (
@@ -1918,7 +2087,7 @@ export function StockLedgerModule({
                             [activeId]: prevQty + selectedProductQtyInput
                           }
                         };
-                        setDraft(nextDraft);
+                        updateStockDraft(nextDraft);
                         setSelectedProductQtyInput(0);
                         setSelectedProductIdInput("");
                         void saveEntry(nextDraft);
@@ -1972,8 +2141,10 @@ export function StockLedgerModule({
                                         <NumberInput
                                           value={qty}
                                           disabled={monthBootstrapPending}
+                                          onFocus={() => focusStockDraftField(`product:${prodId}`)}
+                                          onBlur={() => blurStockDraftField(`product:${prodId}`)}
                                           onChange={(val) => {
-                                            setDraft((curr) => ({
+                                            updateStockDraft((curr) => ({
                                               ...curr,
                                               productQuantities: {
                                                 ...curr.productQuantities,
@@ -1998,7 +2169,7 @@ export function StockLedgerModule({
                                           const nextQuantities = { ...draft.productQuantities };
                                           delete nextQuantities[prodId];
                                           const nextDraft = { ...draft, productQuantities: nextQuantities };
-                                          setDraft(nextDraft);
+                                          updateStockDraft(nextDraft);
                                           void saveEntry(nextDraft);
                                         }}
                                       >
@@ -2053,7 +2224,9 @@ export function StockLedgerModule({
                       <NumberInput
                         value={draft.paymentReceived ?? 0}
                         disabled={!canEdit || monthBootstrapPending}
-                        onChange={(value) => setDraft((current) => ({ ...current, paymentReceived: value }))}
+                        onFocus={() => focusStockDraftField("paymentReceived")}
+                        onBlur={() => blurStockDraftField("paymentReceived")}
+                        onChange={(value) => updateStockDraft((current) => ({ ...current, paymentReceived: value }))}
                       />
                     </div>
                   </label>
@@ -2069,7 +2242,13 @@ export function StockLedgerModule({
               </div>
               <label className="mt-4">
                 Notes
-                <input value={draft.notes ?? ""} disabled={!canEdit || monthBootstrapPending} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} />
+                <input
+                  value={draft.notes ?? ""}
+                  disabled={!canEdit || monthBootstrapPending}
+                  onFocus={() => focusStockDraftField("notes")}
+                  onBlur={() => blurStockDraftField("notes")}
+                  onChange={(event) => updateStockDraft((current) => ({ ...current, notes: event.target.value }))}
+                />
               </label>
               {!isLiveDay(monthId, selectedDay, now) && (
                 <p className="warning mt-4 flex items-start gap-1.5">

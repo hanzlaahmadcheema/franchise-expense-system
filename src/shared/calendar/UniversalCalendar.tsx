@@ -20,6 +20,7 @@ function fallbackStatus(monthId: string, dayNo: number, now: Date): UniversalDay
 }
 
 function statusDotClass(status: UniversalDayStatus) {
+  if (status === "loading") return "bg-slate-500";
   if (status === "open" || status === "today") return "bg-emerald-400";
   if (status === "reopened") return "bg-blue-400";
   if (status === "missing") return "bg-orange-400";

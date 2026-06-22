@@ -51,6 +51,7 @@ export function calendarCells(monthId: string) {
 }
 
 export function statusLabel(status: UniversalDayStatus) {
+  if (status === "loading") return "Loading";
   if (status === "futureDisabled") return "Future";
   if (status === "reopened") return "Re-Open";
   if (status === "today" || status === "open") return "Open";
@@ -60,6 +61,7 @@ export function statusLabel(status: UniversalDayStatus) {
 }
 
 export function statusChipClass(status: UniversalDayStatus) {
+  if (status === "loading") return "bg-slate-500/15 text-slate-300";
   if (status === "open" || status === "today") return "bg-emerald-400/15 text-emerald-200";
   if (status === "reopened") return "bg-blue-400/15 text-blue-200";
   if (status === "closed" || status === "locked") return "bg-red-400/15 text-red-200";

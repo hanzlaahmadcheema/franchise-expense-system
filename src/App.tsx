@@ -60,6 +60,14 @@ import { applyPwaUpdate } from "./pwa";
 import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
 import { JazzLoadModule } from "./modules/jazzLoad/components/JazzLoadModule";
 import { StockLedgerModule } from "./modules/stock/components/StockLedgerModule";
+import {
+  subscribeStockAccounts,
+  subscribeStockDays,
+  subscribeStockMonthlySummary,
+  subscribeStockMonths,
+  subscribeStockOpeningBalances,
+  subscribeStockProducts
+} from "./modules/stock/services/stockFirestore";
 import { UniversalCalendar } from "./shared/calendar/UniversalCalendar";
 import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/context/SidebarDayControlsContext";
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
@@ -71,7 +79,20 @@ import { runMasterRecalculation } from "./shared/services/masterRecalculationSer
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
-import { listJazzLoadBackup, restoreJazzLoadBackup, roleCanJazzLoad, setJazzLoadMonthStatus, subscribeJazzLoadMonths } from "./modules/jazzLoad/services/jazzLoadFirestore";
+import {
+  listJazzLoadBackup,
+  restoreJazzLoadBackup,
+  roleCanJazzLoad,
+  setJazzLoadMonthStatus,
+  subscribeJazzLoadDays,
+  subscribeJazzLoadDoAssignments,
+  subscribeJazzLoadDoLines,
+  subscribeJazzLoadDoNames,
+  subscribeJazzLoadDoProfiles,
+  subscribeJazzLoadMonthlySummary,
+  subscribeJazzLoadMonths,
+  subscribeJazzLoadRates
+} from "./modules/jazzLoad/services/jazzLoadFirestore";
 import {
   commitWorkbookImport,
   addRoleChangeAudit,
@@ -142,6 +163,14 @@ function emptyDay(dayNo: number): DailyLedgerInput {
     credits: [],
     ownerBalances: []
   };
+}
+
+function previousMonthIdForPrefetch(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return monthId;
+  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, "0")}`;
 }
 
 function creditSeedKey(row: { partyId?: string; partyName: string }) {
@@ -1769,6 +1798,41 @@ function App() {
     );
     return unsubscribe;
   }, [user, role]);
+
+  useEffect(() => {
+    if (!user || !role || view === "jazz-load") return;
+    const previousId = previousMonthIdForPrefetch(monthId);
+    const unsubscribers = [
+      subscribeJazzLoadRates((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDoProfiles((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDoNames((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDoLines((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDoAssignments(monthId, selectedDay, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message))
+    ];
+    if (previousId !== monthId) {
+      unsubscribers.push(subscribeJazzLoadDays(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
+    }
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [monthId, role, selectedDay, user, view]);
+
+  useEffect(() => {
+    if (!user || !role || view === "stock-ledger") return;
+    const previousId = previousMonthIdForPrefetch(monthId);
+    const unsubscribers = [
+      subscribeStockProducts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeStockAccounts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeStockOpeningBalances((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeStockMonths((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeStockDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeStockMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message))
+    ];
+    if (previousId !== monthId) {
+      unsubscribers.push(subscribeStockMonthlySummary(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
+    }
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [monthId, role, user, view]);
 
   useEffect(() => {
     if (!user || (role !== "owner" && role !== "admin")) {

@@ -39,8 +39,10 @@ export function useAutoSaveEntry<T>({
 }: Options<T>) {
   const [status, setStatus] = useState<AutoSaveStatus>(disabled ? "readOnly" : "saved");
   const [error, setError] = useState("");
+  const [retryToken, setRetryToken] = useState(0);
   const lastSavedRef = useRef("");
   const inFlightRef = useRef(false);
+  const saveAfterInFlightRef = useRef(false);
   const enabledRef = useRef(enabled);
   const disabledRef = useRef(Boolean(disabled));
   const generationRef = useRef(0);
@@ -90,9 +92,12 @@ export function useAutoSaveEntry<T>({
         generation !== generationRef.current ||
         disabledRef.current ||
         !enabledRef.current ||
-        signature === lastSavedRef.current ||
-        inFlightRef.current
+        signature === lastSavedRef.current
       ) return;
+      if (inFlightRef.current) {
+        saveAfterInFlightRef.current = true;
+        return;
+      }
       inFlightRef.current = true;
       setStatus("saving");
       setError("");
@@ -111,10 +116,14 @@ export function useAutoSaveEntry<T>({
           inFlightRef.current = false;
           activeSavingCount = Math.max(0, activeSavingCount - 1);
           window.dispatchEvent(new CustomEvent("autosave-active-count", { detail: activeSavingCount }));
+          if (saveAfterInFlightRef.current) {
+            saveAfterInFlightRef.current = false;
+            setRetryToken((current) => current + 1);
+          }
         });
     }, debounceMs);
     return () => window.clearTimeout(timer);
-  }, [data, debounceMs, disabled, enabled, savedStatus, signature, validationKey]);
+  }, [debounceMs, disabled, enabled, retryToken, savedStatus, signature, validationKey]);
 
   return {
     autoSaveStatus: status,
