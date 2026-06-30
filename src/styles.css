@@ -20,6 +20,19 @@ html[data-ui-mode="modern"] {
   --ui-table-cell-y: 0.75rem;
   --ui-border-width: 1px;
   --ui-section-gap: 1.25rem;
+  --app-bg: #020617;
+  --surface: #0f172a;
+  --surface-muted: #020617;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --border: #1e293b;
+  --calendar-open-bg: rgb(52 211 153 / 0.12);
+  --calendar-open-text: #d1fae5;
+  --calendar-closed-bg: rgb(248 113 113 / 0.12);
+  --calendar-closed-text: #fee2e2;
+  --calendar-reopen-bg: rgb(96 165 250 / 0.12);
+  --calendar-reopen-text: #dbeafe;
+  --calendar-selected-ring: #10b981;
 }
 
 html[data-ui-mode="classic"] {
@@ -160,12 +173,65 @@ html[data-ui-mode="classic"] {
 
   .table-wrap {
     @apply overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40;
+    height: auto !important;
+    max-height: none !important;
+    min-height: auto !important;
+    overflow-y: visible !important;
     scrollbar-width: none;
     -ms-overflow-style: none;
   }
 
   .table-wrap::-webkit-scrollbar {
     display: none;
+  }
+
+  .app-scrollbar {
+    scrollbar-color: transparent transparent;
+    scrollbar-width: thin;
+  }
+
+  .app-scrollbar:hover,
+  .app-scrollbar:focus-within {
+    scrollbar-color: rgb(52 211 153 / 0.45) transparent;
+  }
+
+  .app-scrollbar::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+
+  .app-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .app-scrollbar::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+
+  .app-scrollbar:hover::-webkit-scrollbar-thumb,
+  .app-scrollbar:focus-within::-webkit-scrollbar-thumb {
+    background-color: rgb(52 211 153 / 0.45);
+  }
+
+  .app-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(52 211 153 / 0.75);
+  }
+
+  .theme-light .app-scrollbar:hover,
+  .theme-light .app-scrollbar:focus-within {
+    scrollbar-color: rgb(15 118 110 / 0.38) transparent;
+  }
+
+  .theme-light .app-scrollbar:hover::-webkit-scrollbar-thumb,
+  .theme-light .app-scrollbar:focus-within::-webkit-scrollbar-thumb {
+    background-color: rgb(15 118 110 / 0.38);
+  }
+
+  .theme-light .app-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(15 118 110 / 0.68);
   }
 
   .loading-bar {
@@ -445,6 +511,19 @@ html[data-ui-mode="classic"] {
 }
 
 .theme-light {
+  --app-bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-muted: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --border: #dbe3ee;
+  --calendar-open-bg: #dcfce7;
+  --calendar-open-text: #065f46;
+  --calendar-closed-bg: #fee2e2;
+  --calendar-closed-text: #991b1b;
+  --calendar-reopen-bg: #dbeafe;
+  --calendar-reopen-text: #1e40af;
+  --calendar-selected-ring: #0f766e;
   background: linear-gradient(180deg, #f8fafc, #e8eef6) !important;
   color: #0f172a !important;
 }
@@ -466,13 +545,31 @@ html[data-ui-mode="classic"] {
 .theme-light .panel,
 .theme-light .card,
 .theme-light .table-wrap,
+.theme-light .calendar-shell,
+.theme-light [data-module-calendar],
+.theme-light .bg-gradient-to-br,
+.theme-light .rounded-lg.border.bg-slate-950\/20,
+.theme-light .rounded-lg.border.bg-slate-950\/30,
+.theme-light .rounded-lg.border.bg-slate-950\/40,
+.theme-light .rounded-xl.border.bg-slate-950\/20,
+.theme-light .rounded-xl.border.bg-slate-950\/30,
+.theme-light .rounded-xl.border.bg-slate-950\/40,
 .theme-light .rounded-xl.border.bg-slate-900\/90,
 .theme-light .rounded-xl.border.bg-slate-900\/80,
+.theme-light .rounded-xl.border.bg-slate-900\/60,
+.theme-light .rounded-xl.border.bg-slate-900\/50,
+.theme-light .rounded-2xl.border.bg-slate-950\/20,
+.theme-light .rounded-2xl.border.bg-slate-950\/30,
+.theme-light .rounded-2xl.border.bg-slate-950\/40,
 .theme-light .rounded-xl.border.bg-slate-950\/70,
 .theme-light .rounded-xl.border.bg-slate-950\/60,
 .theme-light .rounded-xl.border.bg-slate-950\/50,
+.theme-light .rounded-2xl.border.bg-gradient-to-br,
+.theme-light .rounded-2xl.border.bg-slate-900\/50,
+.theme-light .rounded-xl.border.bg-slate-900\/80,
 .theme-light .rounded-lg.border.bg-slate-950\/60 {
-  background: #ffffff !important;
+  background: var(--surface) !important;
+  background-image: none !important;
   border-color: #dbe3ee !important;
   color: #0f172a !important;
   box-shadow: 0 16px 36px rgb(15 23 42 / 0.08) !important;
@@ -501,15 +598,29 @@ html[data-ui-mode="classic"] {
 .theme-light .bg-slate-950\/60,
 .theme-light .bg-slate-950\/50,
 .theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-950\/30,
+.theme-light .bg-slate-950\/20,
 .theme-light .bg-slate-900,
 .theme-light .bg-slate-900\/90,
 .theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-900\/70,
+.theme-light .bg-slate-900\/60,
+.theme-light .bg-slate-900\/40,
 .theme-light .bg-slate-900\/50 {
-  background-color: #ffffff !important;
+  background-color: var(--surface) !important;
 }
 
-.theme-light .bg-slate-800 {
+.theme-light .bg-slate-800,
+.theme-light .bg-slate-800\/40,
+.theme-light .bg-slate-800\/50,
+.theme-light .hover\:bg-slate-800\/40:hover,
+.theme-light .hover\:bg-slate-800:hover {
   background-color: #f1f5f9 !important;
+}
+
+.theme-light .rounded.bg-slate-800 {
+  background-color: #e2e8f0 !important;
+  color: #334155 !important;
 }
 
 .theme-light .border-slate-900,
@@ -540,6 +651,44 @@ html[data-ui-mode="classic"] {
 .theme-light .text-slate-400,
 .theme-light .text-slate-500 {
   color: #64748b !important;
+}
+
+.theme-light .text-emerald-100,
+.theme-light .text-emerald-200,
+.theme-light .text-emerald-300 {
+  color: #047857 !important;
+}
+
+.theme-light .text-cyan-100,
+.theme-light .text-cyan-200,
+.theme-light .text-cyan-300 {
+  color: #0e7490 !important;
+}
+
+.theme-light .text-orange-100,
+.theme-light .text-orange-200,
+.theme-light .text-orange-300 {
+  color: #c2410c !important;
+}
+
+.theme-light .text-rose-100,
+.theme-light .text-rose-200,
+.theme-light .text-rose-300,
+.theme-light .text-red-100,
+.theme-light .text-red-200 {
+  color: #be123c !important;
+}
+
+.theme-light .text-amber-100,
+.theme-light .text-amber-200,
+.theme-light .text-amber-300 {
+  color: #b45309 !important;
+}
+
+.theme-light .text-blue-100,
+.theme-light .text-blue-200,
+.theme-light .text-blue-300 {
+  color: #1d4ed8 !important;
 }
 
 .theme-light th {
@@ -577,6 +726,13 @@ html[data-ui-mode="classic"] {
   color: #0f172a !important;
 }
 
+.theme-light .btn-secondary,
+.theme-light .btn-tab,
+.theme-light .btn-ghost,
+.theme-light .btn-icon {
+  box-shadow: 0 8px 20px rgb(15 23 42 / 0.06) !important;
+}
+
 .theme-light .btn-secondary:hover,
 .theme-light .btn-tab:hover,
 .theme-light .btn-ghost:hover,
@@ -600,6 +756,56 @@ html[data-ui-mode="classic"] {
   background-color: #dcfce7 !important;
   border-color: #10b981 !important;
   color: #065f46 !important;
+}
+
+.theme-light .border-emerald-400\/40,
+.theme-light .border-emerald-400 {
+  border-color: #10b981 !important;
+}
+
+.theme-light .border-red-400\/40,
+.theme-light .border-red-400 {
+  border-color: #ef4444 !important;
+}
+
+.theme-light .border-blue-400\/40,
+.theme-light .border-blue-400 {
+  border-color: #3b82f6 !important;
+}
+
+.theme-light .bg-emerald-400\/5,
+.theme-light .bg-emerald-400\/10,
+.theme-light .bg-emerald-400\/15,
+.theme-light .bg-emerald-500\/10 {
+  background-color: var(--calendar-open-bg) !important;
+}
+
+.theme-light .bg-red-400\/5,
+.theme-light .bg-red-400\/10,
+.theme-light .bg-red-400\/15 {
+  background-color: var(--calendar-closed-bg) !important;
+}
+
+.theme-light .bg-blue-400\/5,
+.theme-light .bg-blue-400\/10,
+.theme-light .bg-blue-400\/15 {
+  background-color: var(--calendar-reopen-bg) !important;
+}
+
+.theme-light [data-module-calendar] button:not(:disabled) {
+  box-shadow: 0 6px 14px rgb(15 23 42 / 0.05) !important;
+}
+
+.theme-light [data-module-calendar] button.border-emerald-400,
+.theme-light [data-module-calendar] button.border-red-400,
+.theme-light [data-module-calendar] button.border-blue-400 {
+  box-shadow: 0 0 0 2px var(--calendar-selected-ring), 0 8px 18px rgb(15 23 42 / 0.12) !important;
+}
+
+.theme-light [data-module-calendar] .bg-slate-800,
+.theme-light [data-module-calendar] .bg-slate-900\/40 {
+  background-color: #f8fafc !important;
+  color: #94a3b8 !important;
 }
 
 .theme-light .calendar-weekdays {
@@ -850,6 +1056,42 @@ html[data-ui-mode="classic"] .theme-light th {
 html[data-ui-mode="classic"].theme-light td,
 html[data-ui-mode="classic"] .theme-light td {
   color: rgb(15 23 42) !important;
+}
+
+.stock-entry-table th,
+.stock-entry-table td {
+  padding: 0.45rem 0.6rem !important;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.stock-entry-table input,
+.stock-entry-table select {
+  height: 2rem;
+  min-height: 2rem !important;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem !important;
+  font-size: 0.75rem !important;
+  line-height: 1.25rem !important;
+}
+
+.stock-entry-table .stock-entry-action {
+  min-height: 2rem !important;
+}
+
+html[data-ui-mode="classic"] .stock-entry-table th,
+html[data-ui-mode="classic"] .stock-entry-table td {
+  min-height: 0;
+  padding: 0.6rem 0.75rem !important;
+}
+
+html[data-ui-mode="classic"] .stock-entry-table input,
+html[data-ui-mode="classic"] .stock-entry-table select {
+  height: 2.25rem;
+  min-height: 2.25rem !important;
+  padding: 0.35rem 0.55rem !important;
+  font-size: 0.875rem !important;
+  line-height: 1.25rem !important;
 }
 
 @media print {

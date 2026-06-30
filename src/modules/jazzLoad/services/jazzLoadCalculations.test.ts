@@ -7,6 +7,8 @@ import {
   calculateMonthlySummary,
   latestEntryForDraft,
   previousEntryForDraftAcrossDays,
+  resolveJazzLoadRatesForDay,
+  snapshotResolvedRates,
   validateJazzLoadDrafts
 } from "./jazzLoadCalculations";
 import { rechainJazzLoadDays } from "./jazzLoadFirestore";
@@ -46,6 +48,18 @@ const rates: ActiveJazzLoadRates = {
     updatedAt: 1
   }
 };
+
+function ratesWithCommission1(percentage: number): ActiveJazzLoadRates {
+  return {
+    ...rates,
+    commission1Rate: {
+      ...rates.commission1Rate!,
+      id: `commission-1-${percentage}`,
+      name: `Commission 1 ${percentage}`,
+      percentage
+    }
+  };
+}
 
 describe("jazzLoadCalculations", () => {
   it("calculates Jazz Load values from owner-managed rate", () => {
@@ -101,6 +115,59 @@ describe("jazzLoadCalculations", () => {
     expect(summary.totalCommission).toBe(1975.06);
     expect(summary.commission1Rate?.percentage).toBe(2.6);
     expect(summary.commission2Rate?.percentage).toBe(1);
+  });
+
+  it("preserves a saved day rate snapshot when an old day is resaved after settings change", () => {
+    const savedRates = ratesWithCommission1(2);
+    const currentRates = ratesWithCommission1(3);
+    const savedEntry = calculateDoRow(
+      { id: "day-10-a", doName: "A", todayMlIssuanceBase: 1000, paymentReceivedBase: 500 },
+      savedRates,
+      { createdBy: "u", timestamp: 1 }
+    );
+    const savedDay: JazzLoadDay = {
+      id: "10",
+      monthId: "2026-05",
+      dayNo: 10,
+      date: "2026-05-10",
+      status: "reopen",
+      doEntries: [savedEntry],
+      lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, savedEntry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [savedEntry] }, savedRates, 1),
+      appliedRates: snapshotResolvedRates(savedRates, 1),
+      createdBy: "u",
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    const resolved = resolveJazzLoadRatesForDay({
+      dayRecord: savedDay,
+      activeRates: currentRates,
+      mode: "existing-day",
+      resolvedAt: 2
+    });
+    const resavedEntry = calculateDoRow(
+      { id: "day-10-a", doName: "A", todayMlIssuanceBase: 1000, paymentReceivedBase: 500 },
+      resolved.rates,
+      { createdBy: "u", previous: savedEntry, timestamp: 2 }
+    );
+    const summary = calculateDailySummary({ doEntries: [resavedEntry] }, resolved.rates, 2);
+
+    expect(resolved.source).toBe("saved-day");
+    expect(summary.commission1Rate?.percentage).toBe(2);
+    expect(summary.commission1Rate?.percentage).not.toBe(3);
+  });
+
+  it("uses current active settings for a new unsaved day", () => {
+    const currentRates = ratesWithCommission1(3);
+    const resolved = resolveJazzLoadRatesForDay({
+      activeRates: currentRates,
+      mode: "new-day",
+      resolvedAt: 1
+    });
+
+    expect(resolved.source).toBe("active-settings");
+    expect(resolved.rates.commission1Rate?.percentage).toBe(3);
   });
 
   it("derives daily lifting from total issuance Jazz Load", () => {
@@ -345,6 +412,125 @@ describe("jazzLoadCalculations", () => {
     expect(repaired.doEntries[0].todayMlIssuance.baseAmount).toBe(100);
     expect(repaired.doEntries[0].paymentReceived.baseAmount).toBe(50);
     expect(repaired.lifting.openingBalance).toBe(mayFinal.lifting.inHandBalance);
+  });
+
+  it("rebuilds daily summary openings from previous recalculated closings without changing unmatched DO fallback", () => {
+    const day10Entry = calculateDoRow(
+      { id: "day-10-a", doNameId: "name-a", doLineId: "line-a", doName: "A", doLine: "301", openingBase: 100, todayMlIssuanceBase: 1000, paymentReceivedBase: 200 },
+      rates,
+      { createdBy: "u", timestamp: 1 }
+    );
+    const staleDay11Entry = calculateDoRow(
+      { id: "day-11-b", doNameId: "name-b", doLineId: "line-b", doName: "B", doLine: "302", openingBase: 5000, todayMlIssuanceBase: 100, paymentReceivedBase: 50 },
+      rates,
+      { createdBy: "u", timestamp: 2 }
+    );
+    const day10: JazzLoadDay = {
+      id: "10",
+      monthId: "2026-05",
+      dayNo: 10,
+      date: "2026-05-10",
+      status: "open",
+      doEntries: [day10Entry],
+      lifting: calculateDailyLifting({ openingBalance: 3000, mlLifting: 500 }, day10Entry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [day10Entry] }, rates),
+      createdBy: "u",
+      createdAt: 1,
+      updatedAt: 1
+    };
+    const day11: JazzLoadDay = {
+      id: "11",
+      monthId: "2026-05",
+      dayNo: 11,
+      date: "2026-05-11",
+      status: "open",
+      doEntries: [staleDay11Entry],
+      lifting: calculateDailyLifting({ openingBalance: 9999, mlLifting: 0 }, staleDay11Entry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [staleDay11Entry] }, rates),
+      createdBy: "u",
+      createdAt: 2,
+      updatedAt: 2
+    };
+
+    const [repairedDay10, repairedDay11] = rechainJazzLoadDays([day10, day11], rates, "u", 3);
+
+    expect(repairedDay11.doEntries[0].openingBalance.baseAmount).toBe(5000);
+    expect(repairedDay11.summary.openingBase).toBe(repairedDay10.summary.closingBase);
+    expect(repairedDay11.summary.openingMl).toBe(repairedDay10.summary.closingMl);
+    expect(repairedDay11.summary.closingBase).toBe(repairedDay10.summary.closingBase + repairedDay11.summary.issuanceBase - repairedDay11.summary.paymentBase);
+    expect(repairedDay11.summary.closingMl).toBeCloseTo(repairedDay10.summary.closingMl + repairedDay11.summary.issuanceMl - repairedDay11.summary.paymentMl);
+    expect(repairedDay11.lifting.openingBalance).toBe(repairedDay10.lifting.inHandBalance);
+  });
+
+  it("preserves per-day rate snapshots during local master refresh", () => {
+    const currentRates = ratesWithCommission1(3);
+    const buildDay = (dayNo: number, dayRates: ActiveJazzLoadRates, includeSnapshots = true, includeSummaryRates = true): JazzLoadDay => {
+      const entry = calculateDoRow(
+        { id: `day-${dayNo}-a`, doName: "A", todayMlIssuanceBase: 1000, paymentReceivedBase: 500 },
+        dayRates,
+        { createdBy: "u", timestamp: dayNo }
+      );
+      const summary = calculateDailySummary({ doEntries: [entry] }, dayRates, dayNo);
+      return {
+        id: String(dayNo),
+        monthId: "2026-05",
+        dayNo,
+        date: `2026-05-${String(dayNo).padStart(2, "0")}`,
+        status: "open",
+        doEntries: [entry],
+        lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, entry.todayMlIssuance.calculatedAmount),
+        summary: includeSummaryRates ? summary : { ...summary, commission1Rate: undefined, commission2Rate: undefined },
+        appliedRates: includeSnapshots ? snapshotResolvedRates(dayRates, dayNo) : undefined,
+        createdBy: "u",
+        createdAt: dayNo,
+        updatedAt: dayNo
+      };
+    };
+
+    const [day1, day2, legacyDay] = rechainJazzLoadDays([
+      buildDay(1, ratesWithCommission1(2)),
+      buildDay(2, ratesWithCommission1(2.5)),
+      buildDay(3, ratesWithCommission1(1.5), false, false)
+    ], currentRates, "u", 10);
+
+    expect(day1.summary.commission1Rate?.percentage).toBe(2);
+    expect(day1.appliedRates?.commission1Rate?.percentage).toBe(2);
+    expect(day2.summary.commission1Rate?.percentage).toBe(2.5);
+    expect(day2.appliedRates?.commission1Rate?.percentage).toBe(2.5);
+    expect(legacyDay.summary.commission1Rate?.percentage).toBe(3);
+    expect(legacyDay.appliedRates?.commission1Rate?.percentage).toBe(3);
+  });
+
+  it("can seed Day 1 daily summary and lifting openings from the previous monthly summary", () => {
+    const juneEntry = calculateDoRow(
+      { id: "june-a", doNameId: "name-a", doLineId: "line-a", doName: "A", doLine: "301", openingBase: 0, todayMlIssuanceBase: 100, paymentReceivedBase: 25 },
+      rates,
+      { createdBy: "u", timestamp: 1 }
+    );
+    const juneDay: JazzLoadDay = {
+      id: "1",
+      monthId: "2026-06",
+      dayNo: 1,
+      date: "2026-06-01",
+      status: "open",
+      doEntries: [juneEntry],
+      lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 10 }, juneEntry.todayMlIssuance.calculatedAmount),
+      summary: calculateDailySummary({ doEntries: [juneEntry] }, rates),
+      createdBy: "u",
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    const [repaired] = rechainJazzLoadDays([juneDay], rates, "u", 2, [], {
+      totalClosingBase: 1234,
+      totalClosingMl: 1266,
+      latestInHandBalance: 9876
+    });
+
+    expect(repaired.summary.openingBase).toBe(1234);
+    expect(repaired.summary.openingMl).toBe(1266);
+    expect(repaired.summary.closingBase).toBe(1309);
+    expect(repaired.lifting.openingBalance).toBe(9876);
   });
 
   it("carries opening by fixed DO line even when the assigned name changes", () => {

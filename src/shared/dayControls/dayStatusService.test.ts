@@ -21,15 +21,12 @@ describe("shared day status helpers", () => {
   });
 
   it("maps universal statuses to client-safe labels", () => {
-    expect(statusLabel("futureDisabled")).toBe("Future");
-    expect(statusLabel("today")).toBe("Open");
-    expect(statusLabel("reopened")).toBe("Re-Open");
-    expect(statusLabel("missing")).toBe("Missing");
+    expect(statusLabel("open")).toBe("Open");
+    expect(statusLabel("reopen")).toBe("Reopen");
     expect(statusLabel("closed")).toBe("Closed");
-    expect(statusLabel("locked")).toBe("Closed");
   });
 
-  it("keeps a live day closed and only reports reopened after an explicit newer reopen", () => {
+  it("keeps a live day closed and only reports reopen after an explicit newer reopen", () => {
     const closedAt = now.getTime();
     expect(resolveUniversalDayStatus({
       exists: true,
@@ -43,8 +40,16 @@ describe("shared day status helpers", () => {
       exists: true,
       future: false,
       live: true,
-      day: { status: "open", lockedAt: closedAt, reopenedAt: closedAt + 1, reopenedByRole: "owner" },
+      day: { status: "reopen", lockedAt: closedAt, reopenedAt: closedAt + 1, reopenedByRole: "owner" },
       nowMs: closedAt + 2
-    })).toBe("reopened");
+    })).toBe("reopen");
+
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: false,
+      day: { status: "reopen" },
+      nowMs: closedAt + 2
+    })).toBe("reopen");
   });
 });

@@ -18,6 +18,7 @@ export type CommissionCategory = string;
 export type UserRole = "owner" | "admin" | "viewer";
 
 export type MonthStatus = "open" | "closed";
+export type CalendarDayStatus = "open" | "closed" | "reopen";
 
 export type NotificationSettings = {
   enabled: boolean;
@@ -56,6 +57,8 @@ export type CreditRow = {
   partyId?: string;
   partyName: string;
   description?: string;
+  loanDescription?: string;
+  receiveDescription?: string;
   opening: number;
   loan: number;
   receive: number;
@@ -83,9 +86,13 @@ export type DailyLedgerInput = {
   entryYear?: number;
   entryMonth?: number;
   entryDay?: number;
+  status?: CalendarDayStatus;
+  manualOverride?: boolean;
   lockedAt?: number;
   lockedBy?: string;
   lockedByRole?: UserRole;
+  closedAt?: number;
+  closedBy?: string;
   reopenedUntilAt?: number;
   reopenedAt?: number;
   reopenedBy?: string;

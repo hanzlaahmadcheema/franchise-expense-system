@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, Pencil, Plus, Save, Trash2, X } from "lucide-react";
+import { LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -11,8 +11,8 @@ import {
   type OwnerBalanceRow
 } from "../types/ledger";
 import { computeDay, parseLedgerNumber, resolveCreditClosingBalance } from "../lib/formulaEngine";
+import { resolveCreditDescriptions } from "../lib/creditDescriptions";
 import { useAutoSaveEntry } from "../shared/hooks/useAutoSaveEntry";
-import { SaveProgressDialog, type SaveProgressState } from "../shared/components/SaveProgressDialog";
 
 type Props = {
   dayNo: number;
@@ -57,8 +57,9 @@ function carryCreditsFromPrevious(dayNo: number, previousDay?: DailyLedgerInput)
     .map((row) => {
       const opening = resolveCreditClosingBalance(row);
       return {
-        ...row,
         id: `${dayNo}-credit-${crypto.randomUUID()}`,
+        partyId: row.partyId,
+        partyName: row.partyName,
         opening,
         loan: 0,
         today: 0,
@@ -124,7 +125,7 @@ function activeOrFallback(items: CatalogItem[], fallback: string[]) {
     id: slug(name),
     name,
     active: true,
-    sortOrder: index
+    sortOrder: index + 1
   }));
 }
 
@@ -222,7 +223,12 @@ function mergeCreditRows(rows: CreditRow[]) {
 }
 
 function isCreditMovementRow(row: CreditRow) {
-  return parseLedgerNumber(row.opening) !== 0 || parseLedgerNumber(row.loan ?? row.today) !== 0 || parseLedgerNumber(row.receive) !== 0;
+  return (
+    parseLedgerNumber(row.opening) !== 0 ||
+    parseLedgerNumber(row.loan ?? row.today) !== 0 ||
+    parseLedgerNumber(row.receive) !== 0 ||
+    Boolean(row.loanDescription?.trim() || row.receiveDescription?.trim() || row.description?.trim())
+  );
 }
 
 export function DailyEntryForm({
@@ -242,8 +248,6 @@ export function DailyEntryForm({
   locked,
   previousDay,
   onSave,
-  onSendEmail,
-  canSendEmail,
   canCreateCatalogs,
   onCreateCatalog,
   onPendingStateChange,
@@ -273,10 +277,11 @@ export function DailyEntryForm({
     expense: 0,
     received: 0
   });
-  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "description" | "loan" | "receive">>({
+  const [creditDraft, setCreditDraft] = useState<Pick<CreditRow, "partyId" | "partyName" | "loanDescription" | "receiveDescription" | "loan" | "receive">>({
     partyId: partyOptions[0]?.id ?? "",
     partyName: partyOptions[0]?.name ?? "",
-    description: "",
+    loanDescription: "",
+    receiveDescription: "",
     loan: 0,
     receive: 0
   });
@@ -297,8 +302,7 @@ export function DailyEntryForm({
   const [editingOwnerId, setEditingOwnerId] = useState<string | null>(null);
   const [editingCreditId, setEditingCreditId] = useState<string | null>(null);
   const [commissionFilter, setCommissionFilter] = useState("all");
-  const [saving, setSaving] = useState(false);
-  const [emailing, setEmailing] = useState(false);
+  const [, setSaving] = useState(false);
   const [creditVerifyMessage, setCreditVerifyMessage] = useState("");
   const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
   const [catalogName, setCatalogName] = useState("");
@@ -306,7 +310,6 @@ export function DailyEntryForm({
   const lastSavedRef = useRef("");
   const disabledRef = useRef(Boolean(disabled));
   const [saveInFlight, setSaveInFlight] = useState(false);
-  const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const [saveBaselineReady, setSaveBaselineReady] = useState(false);
 
   useEffect(() => {
@@ -365,7 +368,6 @@ export function DailyEntryForm({
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
-          description: row.description,
           opening,
           loan: 0,
           today: 0,
@@ -433,7 +435,6 @@ export function DailyEntryForm({
           id: `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: row.partyId,
           partyName: row.partyName,
-          description: row.description,
           opening: resolveCreditClosingBalance(row),
           loan: 0,
           today: 0,
@@ -493,7 +494,7 @@ export function DailyEntryForm({
     ]
   );
 
-  const { autoSaveStatus, hasPendingAutoSave } = useAutoSaveEntry({
+  const { hasPendingAutoSave } = useAutoSaveEntry({
     data: payload,
     enabled: true,
     disabled,
@@ -564,21 +565,6 @@ export function DailyEntryForm({
     }
   }
 
-  async function handleVerifiedSave() {
-    if (disabledRef.current) return;
-    setVerifiedSave({ status: "saving", title: "Saving Expense Day", message: "Writing the complete day snapshot to Firestore and waiting for confirmation..." });
-    setSaveInFlight(true);
-    try {
-      await onSave(payload, { awaitRemote: true });
-      lastSavedRef.current = JSON.stringify(payload);
-      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Day ${dayNo} was saved successfully and Firestore confirmed the write.` });
-    } catch (error) {
-      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
-    } finally {
-      setSaveInFlight(false);
-    }
-  }
-
   const manualSaveRef = useRef<() => Promise<boolean>>(handleManualSave);
   manualSaveRef.current = handleManualSave;
 
@@ -588,20 +574,6 @@ export function DailyEntryForm({
     onManualSaveReady(save);
     return () => onManualSaveReady(null);
   }, [onManualSaveReady]);
-
-  async function handleSendEmail() {
-    if (!onSendEmail) return;
-    setEmailing(true);
-    try {
-      if (hasPendingChanges) {
-        const saved = await handleManualSave();
-        if (!saved) return;
-      }
-      await onSendEmail(payload);
-    } finally {
-      setEmailing(false);
-    }
-  }
 
   function addExpense() {
     if (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0) return;
@@ -699,6 +671,7 @@ export function DailyEntryForm({
     if (!creditDraft.partyId) return;
     const opening = currentCreditOpening(creditDraft.partyId, creditDraft.partyName, editingCreditId);
     setCredits((rows) => {
+      const editingRow = editingCreditId ? rows.find((row) => row.id === editingCreditId) : undefined;
       const remainingRows = editingCreditId ? rows.filter((row) => row.id !== editingCreditId) : rows;
       const duplicateRow = remainingRows.find(
         (row) =>
@@ -706,13 +679,15 @@ export function DailyEntryForm({
           normalizeKey(row.partyName) === normalizeKey(creditDraft.partyName)
       );
       if (duplicateRow) {
+        const existingDescriptions = resolveCreditDescriptions(duplicateRow);
         return remainingRows.map((row) =>
           row.id === duplicateRow.id
             ? {
                 ...row,
                 partyId: creditDraft.partyId,
                 partyName: creditDraft.partyName,
-                description: creditDraft.description?.trim() || row.description,
+                loanDescription: creditDraft.loanDescription?.trim() || existingDescriptions.loanDescription,
+                receiveDescription: creditDraft.receiveDescription?.trim() || existingDescriptions.receiveDescription,
                 loan: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
                 today: parseLedgerNumber(row.loan ?? row.today) + parseLedgerNumber(creditDraft.loan),
                 receive: parseLedgerNumber(row.receive) + parseLedgerNumber(creditDraft.receive)
@@ -726,7 +701,9 @@ export function DailyEntryForm({
           id: editingCreditId ?? `${dayNo}-credit-${crypto.randomUUID()}`,
           partyId: creditDraft.partyId,
           partyName: creditDraft.partyName,
-          description: creditDraft.description?.trim() || undefined,
+          ...(editingRow?.description !== undefined ? { description: editingRow.description } : {}),
+          loanDescription: creditDraft.loanDescription?.trim() ?? "",
+          receiveDescription: creditDraft.receiveDescription?.trim() ?? "",
           opening,
           loan: creditDraft.loan,
           receive: creditDraft.receive
@@ -736,7 +713,8 @@ export function DailyEntryForm({
     setCreditDraft({
       partyId: partyOptions[0]?.id ?? "",
       partyName: partyOptions[0]?.name ?? "",
-      description: "",
+      loanDescription: "",
+      receiveDescription: "",
       loan: 0,
       receive: 0
     });
@@ -745,10 +723,12 @@ export function DailyEntryForm({
 
   function editCredit(row: CreditRow) {
     if (!window.confirm(`Edit credit entry for ${row.partyName}?`)) return;
+    const descriptions = resolveCreditDescriptions(row);
     setCreditDraft({
       partyId: row.partyId ?? "",
       partyName: row.partyName ?? "",
-      description: row.description ?? "",
+      loanDescription: descriptions.loanDescription,
+      receiveDescription: descriptions.receiveDescription,
       loan: parseLedgerNumber(row.loan ?? row.today),
       receive: parseLedgerNumber(row.receive)
     });
@@ -758,6 +738,14 @@ export function DailyEntryForm({
   function deleteCredit(row: CreditRow) {
     if (!window.confirm(`Delete credit entry for ${row.partyName}?`)) return;
     setCredits((rows) => rows.filter((r) => r.id !== row.id));
+  }
+
+  function updateCreditDescription(
+    rowId: string,
+    field: "loanDescription" | "receiveDescription",
+    value: string
+  ) {
+    setCredits((rows) => rows.map((row) => row.id === rowId ? { ...row, [field]: value } : row));
   }
 
   const visibleCommissions = sortCommissions(
@@ -819,17 +807,17 @@ export function DailyEntryForm({
       const config = {
         expense: {
           catalog: "expenseCategories" as const,
-          sortOrder: expenseCategories.length,
+          sortOrder: expenseCategories.length + 1,
           apply: (item: CatalogItem) => setExpenseDraft((draft) => ({ ...draft, categoryId: item.id, category: item.name }))
         },
         commission: {
           catalog: "commissionCategories" as const,
-          sortOrder: commissionCategories.length,
+          sortOrder: commissionCategories.length + 1,
           apply: (item: CatalogItem) => setCommissionDraft((draft) => ({ ...draft, category: item.name }))
         },
         credit: {
           catalog: "creditParties" as const,
-          sortOrder: creditParties.length,
+          sortOrder: creditParties.length + 1,
           apply: (item: CatalogItem) => setCreditDraft((draft) => ({ ...draft, partyId: item.id, partyName: item.name }))
         }
       }[catalogModal];
@@ -845,14 +833,12 @@ export function DailyEntryForm({
 
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
-      <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {catalogModal && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-2xl shadow-black/40">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase text-emerald-300">Create Option</p>
-                <h3 className="mt-1 text-lg font-semibold">
+                <h3 className="text-lg font-semibold">
                   {catalogModal === "expense" ? "Expense Category" : catalogModal === "commission" ? "Commission Category" : "Credit Party"}
                 </h3>
               </div>
@@ -880,88 +866,7 @@ export function DailyEntryForm({
         <section className="panel">
           <div className="panel-title">
             <div>
-              <h2>{dayNo === 32 ? "FINAL Entry" : `Day ${dayNo} Entry`}</h2>
-            </div>
-            <div className="hidden items-center gap-3 md:flex">
-              <span className={`text-xs font-semibold uppercase ${
-                disabled
-                  ? "text-slate-400"
-                  : autoSaveStatus === "error"
-                  ? "text-rose-300"
-                  : autoSaveStatus === "saving"
-                    ? "text-amber-300"
-                    : "text-emerald-300"
-              }`}>
-                {disabled
-                  ? "Autosave off"
-                  : autoSaveStatus === "error"
-                  ? "Autosave failed"
-                  : autoSaveStatus === "saving"
-                    ? "Autosaving..."
-                    : "Autosave on"}
-              </span>
-              <button
-                className="btn-primary"
-                disabled={disabled || saving || emailing || saveInFlight}
-                title={disabled ? "Reopen the day before saving." : "Write now and wait for Firestore confirmation"}
-                onClick={() => void handleVerifiedSave()}
-              >
-                <Save />
-                Save Now & Verify
-              </button>
-              {onSendEmail && (
-                <button
-                  className="btn-secondary"
-                  disabled={!canSendEmail || saving || emailing || saveInFlight}
-                  title={!canSendEmail ? "Email sending is disabled until Firebase Functions deployment is available." : "Send email report"}
-                  onClick={() => void handleSendEmail()}
-                >
-                  {emailing && <LoadingIcon label="Sending email" />}
-                  {emailing ? "Sending..." : "Send Email"}
-                </button>
-              )}
-            </div>
-          </div>
-          <div className="grid two">
-            <label>
-              Opening Balance
-              <input value={preview.openingBalance.toLocaleString()} disabled readOnly />
-            </label>
-            <label>
-              Notes
-              <input value={notes} disabled={disabled} onChange={(event) => setNotes(event.target.value)} />
-            </label>
-          </div>
-        </section>
-
-        <div className="mobile-entry-actions md:hidden">
-          <div className="flex flex-col gap-0.5">
-            <p className={`text-[11px] font-semibold uppercase ${
-              disabled
-                ? "text-slate-400"
-                : autoSaveStatus === "error"
-                ? "text-rose-300"
-                : autoSaveStatus === "saving"
-                  ? "text-amber-300"
-                  : "text-emerald-300"
-            }`}>
-              {disabled ? "Autosave off" : autoSaveStatus === "error" ? "Autosave failed" : autoSaveStatus === "saving" ? "Autosaving..." : "Autosave on"}
-            </p>
-            <p className="mt-0.5 text-xs text-slate-400">
-              {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
-            </p>
-          </div>
-          <button className="btn-primary" disabled={disabled || saving || saveInFlight} onClick={() => void handleVerifiedSave()}>
-            <Save />
-            Save & Verify
-          </button>
-        </div>
-
-        <section className="panel">
-          <div className="panel-title">
-            <div>
               <h3>Commission</h3>
-              <p>Add amount entries, then review them in fixed order</p>
             </div>
           </div>
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
@@ -1078,7 +983,6 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h3>Expense</h3>
-              <p>Add expense entries, then review them in list</p>
             </div>
           </div>
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr_1fr_auto]">
@@ -1210,7 +1114,6 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h3>Franchise Owner</h3>
-              <p>Add owner balance entries, then review them in list</p>
             </div>
           </div>
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr_1fr_1fr_1fr_auto]">
@@ -1330,7 +1233,6 @@ export function DailyEntryForm({
           <div className="panel-title">
             <div>
               <h3>Credit Parties</h3>
-              <p>Add party credit/debit entries, then review them in list</p>
             </div>
             <button
               className="btn-secondary"
@@ -1341,7 +1243,7 @@ export function DailyEntryForm({
             </button>
           </div>
           {creditVerifyMessage && <pre className="status whitespace-pre-wrap font-sans text-sm">{creditVerifyMessage}</pre>}
-          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1.4fr_1.6fr_1fr_1fr_1fr_auto]">
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[repeat(6,minmax(0,1fr))_auto]">
             <label>
               Party
               <select
@@ -1364,17 +1266,26 @@ export function DailyEntryForm({
               <input value={creditOpeningPreview.toLocaleString()} disabled readOnly />
             </label>
             <label>
-              Description
+              Loan Description
               <input
-                value={creditDraft.description ?? ""}
+                value={creditDraft.loanDescription ?? ""}
                 disabled={disabled || !creditDraft.partyId}
-                onChange={(event) => setCreditDraft((draft) => ({ ...draft, description: event.target.value }))}
-                placeholder="Reason, detail, reference"
+                onChange={(event) => setCreditDraft((draft) => ({ ...draft, loanDescription: event.target.value }))}
+                placeholder="Loan reason or reference"
               />
             </label>
             <label>
               Loan
               {inputText(creditDraft.loan ?? 0, (loan) => setCreditDraft((draft) => ({ ...draft, loan })), disabled)}
+            </label>
+            <label>
+              Receive Description
+              <input
+                value={creditDraft.receiveDescription ?? ""}
+                disabled={disabled || !creditDraft.partyId}
+                onChange={(event) => setCreditDraft((draft) => ({ ...draft, receiveDescription: event.target.value }))}
+                placeholder="Receive reason or reference"
+              />
             </label>
             <label>
               Receive
@@ -1396,6 +1307,7 @@ export function DailyEntryForm({
           <div className="mobile-card-list md:hidden">
             {derivedCredits.map((row) => {
               const balance = resolveCreditClosingBalance(row);
+              const descriptions = resolveCreditDescriptions(row);
               return (
                 <article className="mobile-list-card" key={row.id}>
                   <div className="mobile-card-head">
@@ -1406,11 +1318,35 @@ export function DailyEntryForm({
                     <span className="mobile-pill">{balance.toLocaleString()}</span>
                   </div>
                   <dl className="mobile-kv-grid mt-3">
-                    <div><dt>Description</dt><dd>{row.description || "-"}</dd></div>
                     <div><dt>Opening</dt><dd>{row.opening.toLocaleString()}</dd></div>
+                    <div>
+                      <dt>Loan Description</dt>
+                      <dd>
+                        <input
+                          value={descriptions.loanDescription}
+                          disabled={disabled}
+                          onChange={(event) => updateCreditDescription(row.id, "loanDescription", event.target.value)}
+                          placeholder="-"
+                        />
+                      </dd>
+                    </div>
                     <div><dt>Loan</dt><dd>{(row.loan ?? row.today ?? 0).toLocaleString()}</dd></div>
+                    <div>
+                      <dt>Receive Description</dt>
+                      <dd>
+                        <input
+                          value={descriptions.receiveDescription}
+                          disabled={disabled}
+                          onChange={(event) => updateCreditDescription(row.id, "receiveDescription", event.target.value)}
+                          placeholder="-"
+                        />
+                      </dd>
+                    </div>
                     <div><dt>Receive</dt><dd>{row.receive.toLocaleString()}</dd></div>
                   </dl>
+                  {descriptions.legacyDescription && (
+                    <p className="mt-2 text-xs text-amber-300">Legacy description: {descriptions.legacyDescription}</p>
+                  )}
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button className="btn-ghost" disabled={disabled} onClick={() => editCredit(row)}>
                       <Pencil /> Edit
@@ -1429,9 +1365,10 @@ export function DailyEntryForm({
               <thead>
                 <tr>
                   <th>Party</th>
-                  <th>Description</th>
                   <th>Opening</th>
+                  <th>Loan Description</th>
                   <th>Loan</th>
+                  <th>Receive Description</th>
                   <th>Receive</th>
                   <th>Balance</th>
                   <th>Actions</th>
@@ -1440,12 +1377,31 @@ export function DailyEntryForm({
               <tbody>
                 {derivedCredits.map((row) => {
                   const balance = resolveCreditClosingBalance(row);
+                  const descriptions = resolveCreditDescriptions(row);
                   return (
                     <tr key={row.id}>
                       <td>{row.partyName}</td>
-                      <td>{row.description || "-"}</td>
                       <td>{row.opening.toLocaleString()}</td>
+                      <td>
+                        <input
+                          value={descriptions.loanDescription}
+                          disabled={disabled}
+                          onChange={(event) => updateCreditDescription(row.id, "loanDescription", event.target.value)}
+                          placeholder="-"
+                        />
+                        {descriptions.legacyDescription && (
+                          <span className="mt-1 block text-xs text-amber-300">Legacy: {descriptions.legacyDescription}</span>
+                        )}
+                      </td>
                       <td>{(row.loan ?? row.today ?? 0).toLocaleString()}</td>
+                      <td>
+                        <input
+                          value={descriptions.receiveDescription}
+                          disabled={disabled}
+                          onChange={(event) => updateCreditDescription(row.id, "receiveDescription", event.target.value)}
+                          placeholder="-"
+                        />
+                      </td>
                       <td>{row.receive.toLocaleString()}</td>
                       <td>{balance.toLocaleString()}</td>
                       <td>
@@ -1473,7 +1429,7 @@ export function DailyEntryForm({
                 })}
                 {derivedCredits.length === 0 && (
                   <tr>
-                    <td colSpan={7}>No credit entries.</td>
+                    <td colSpan={8}>No credit entries.</td>
                   </tr>
                 )}
               </tbody>

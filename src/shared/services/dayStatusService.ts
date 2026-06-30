@@ -51,22 +51,15 @@ export function calendarCells(monthId: string) {
 }
 
 export function statusLabel(status: UniversalDayStatus) {
-  if (status === "loading") return "Loading";
-  if (status === "futureDisabled") return "Future";
-  if (status === "reopened") return "Re-Open";
-  if (status === "today" || status === "open") return "Open";
-  if (status === "missing") return "Missing";
-  if (status === "closed" || status === "locked") return "Closed";
+  if (status === "reopen") return "Reopen";
+  if (status === "closed") return "Closed";
   return "Open";
 }
 
 export function statusChipClass(status: UniversalDayStatus) {
-  if (status === "loading") return "bg-slate-500/15 text-slate-300";
-  if (status === "open" || status === "today") return "bg-emerald-400/15 text-emerald-200";
-  if (status === "reopened") return "bg-blue-400/15 text-blue-200";
-  if (status === "closed" || status === "locked") return "bg-red-400/15 text-red-200";
-  if (status === "missing") return "bg-orange-400/15 text-orange-200";
-  return "bg-slate-800 text-slate-500";
+  if (status === "reopen") return "bg-blue-400/15 text-blue-200";
+  if (status === "closed") return "bg-red-400/15 text-red-200";
+  return "bg-emerald-400/15 text-emerald-200";
 }
 
 export function resolveUniversalDayStatus(input: {
@@ -76,11 +69,11 @@ export function resolveUniversalDayStatus(input: {
   day?: ReopenedDayState | null;
   nowMs?: number;
 }): UniversalDayStatus {
-  if (input.future) return "futureDisabled";
-  if (isActiveReopenWindow(input.day, input.nowMs)) return "reopened";
+  void input.exists;
+  void input.future;
+  void input.live;
+  if (input.day?.status === "reopen" || isActiveReopenWindow(input.day, input.nowMs)) return "reopen";
   if (input.day?.status === "closed" || input.day?.lockedAt != null || input.day?.closedAt != null) return "closed";
-  if (!input.exists) return "missing";
-  if (input.live) return "today";
   return "open";
 }
 

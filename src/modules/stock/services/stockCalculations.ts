@@ -150,7 +150,7 @@ export function buildStockEntry(
       paymentTrackingEnabled: false,
       paymentReceived: 0,
       dueBalance: 0,
-      displayOrder: product.displayOrder
+      displayOrder: product.sortOrder ?? product.displayOrder
     };
   });
 
@@ -332,11 +332,11 @@ export function recalculateStockMonthEntries(
 }
 
 export function productsSorted(products: StockProduct[]) {
-  return [...products].sort((a, b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name));
+  return [...products].sort((a, b) => (a.sortOrder ?? a.displayOrder) - (b.sortOrder ?? b.displayOrder) || a.name.localeCompare(b.name));
 }
 
 export function accountsSorted(accounts: StockAccountProfile[]) {
-  return [...accounts].sort((a, b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name));
+  return [...accounts].sort((a, b) => (a.sortOrder ?? a.displayOrder) - (b.sortOrder ?? b.displayOrder) || a.name.localeCompare(b.name));
 }
 
 export function findPreviousEntry(
@@ -373,6 +373,7 @@ export function buildStockDayRecord(input: {
     entryDay: input.dayNo,
     date: input.date,
     status: input.previous?.status ?? "open",
+    manualOverride: input.previous?.manualOverride ?? false,
     entries: [...input.entries].sort((a, b) => a.accountName.localeCompare(b.accountName)),
     stockOut: [...input.entries].sort((a, b) => a.accountName.localeCompare(b.accountName)),
     stockIn: input.stockIn ?? input.previous?.stockIn ?? [],

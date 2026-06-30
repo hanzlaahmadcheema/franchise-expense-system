@@ -135,6 +135,7 @@ describe("formulaEngine", () => {
               partyName: "Masjid Account",
               opening: 1000,
               loan: 250,
+              loanDescription: "Day 29 loan",
               receive: 50
             }
           ],
@@ -151,7 +152,8 @@ describe("formulaEngine", () => {
               partyName: "Masjid Account",
               opening: "0" as unknown as number,
               loan: "75" as unknown as number,
-              receive: "25" as unknown as number
+              receive: "25" as unknown as number,
+              receiveDescription: "Day 30 receive"
             }
           ],
           ownerBalances: []
@@ -168,12 +170,16 @@ describe("formulaEngine", () => {
     );
 
     expect(month.days[0].creditRows[0].balance).toBe(1200);
+    expect(month.days[0].creditRows[0].loanDescription).toBe("Day 29 loan");
     expect(month.days[1].creditRows[0].opening).toBe(1200);
     expect(month.days[1].creditRows[0].loan).toBe(75);
     expect(month.days[1].creditRows[0].receive).toBe(25);
     expect(month.days[1].creditRows[0].balance).toBe(1250);
+    expect(month.days[1].creditRows[0].receiveDescription).toBe("Day 30 receive");
     expect(month.days[2].creditRows[0].opening).toBe(1250);
     expect(month.days[2].creditRows[0].balance).toBe(1250);
+    expect(month.days[2].creditRows[0].loanDescription).toBeUndefined();
+    expect(month.days[2].creditRows[0].receiveDescription).toBeUndefined();
   });
 
   it("rebuilds credit openings day-by-day from day 28 through day 30 while preserving manual movement", () => {

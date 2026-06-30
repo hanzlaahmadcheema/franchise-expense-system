@@ -6,7 +6,6 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager
 } from "firebase/firestore";
-import { getFunctions } from "firebase/functions";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? "",
@@ -34,4 +33,3 @@ export const db = app
           : memoryLocalCache()
     })
   : null;
-export const functions = app ? getFunctions(app) : null;

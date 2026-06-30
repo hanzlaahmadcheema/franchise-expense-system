@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -22,12 +22,15 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Bell,
+  CalendarDays,
+  CreditCard,
   Shield,
   Sun,
   Tags,
   Upload,
   Users,
-  X
+  X,
+  GripVertical
 } from "lucide-react";
 import { AuditLogsView } from "./components/AuditLogsView";
 import { DailyEntryForm } from "./components/DailyEntryForm";
@@ -46,6 +49,7 @@ import type {
 } from "./types/ledger";
 import type { JazzLoadMonth } from "./modules/jazzLoad/types/jazzLoad.types";
 import { computeMonth, resolveCreditClosingBalance } from "./lib/formulaEngine";
+import { resolveCreditDescriptions } from "./lib/creditDescriptions";
 import {
   exportDailyPdf,
   exportDailyXlsx,
@@ -73,11 +77,13 @@ import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/con
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
 import { MasterCalculationRefreshModal } from "./shared/dayControls/MasterCalculationRefreshModal";
 import { UniversalDayControlBar } from "./shared/dayControls/UniversalDayControlBar";
-import { canEditOperationalDailyEntry, canReopenOperationalDay, isAdminEditableReopenedDay } from "./shared/services/dayEditPermissions";
+import { canEditOperationalDailyEntry, canReopenOperationalDay, isActiveReopenWindow, isAdminEditableReopenedDay } from "./shared/services/dayEditPermissions";
 import { resolveUniversalDayStatus } from "./shared/services/dayStatusService";
 import { runMasterRecalculation } from "./shared/services/masterRecalculationService";
+import { MASTER_REFRESH_ACCESS } from "./shared/services/masterRefreshPermissions";
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
+import { resolveLedgerUiReadDecision } from "./shared/ledger/ledgerReadMode";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
 import {
   listJazzLoadBackup,
@@ -132,8 +138,10 @@ import {
   subscribeUsers,
   upsertAuthorizedEmail,
   updateUserProfile,
+  updateCatalogSortOrder,
   upsertCatalogItem
 } from "./lib/firestoreService";
+import { applySortOrder, reorderItems } from "./shared/services/orderUtils";
 
 type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
 type ExpenseSection = "daily-entry" | "previous-records" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
@@ -153,11 +161,14 @@ type BackupPackage = {
 };
 
 const LOGIN_DISABLED = true;
+const SHOW_LEDGER_V2_SHADOW_WARNING = false;
 
 function emptyDay(dayNo: number): DailyLedgerInput {
   return {
     dayNo,
     label: dayNo === 32 ? "FINAL" : `Day ${dayNo}`,
+    status: "open",
+    manualOverride: false,
     expenses: [],
     commissions: [],
     credits: [],
@@ -283,7 +294,7 @@ function isLiveDay(monthId: string, dayNo: number, now: Date) {
 }
 
 function isReopenActive(day: DailyLedgerInput | undefined, now: Date) {
-  return Boolean(day?.reopenedAt || (day?.reopenedUntilAt && day.reopenedUntilAt > now.getTime()));
+  return isActiveReopenWindow(day, now.getTime());
 }
 
 function LoadingIcon({ label = "Loading" }: { label?: string }) {
@@ -359,9 +370,11 @@ function dayWithMonthDate(monthId: string, dayNo: number, day?: DailyLedgerInput
     dayNo,
     label: day?.label ?? (dayNo === 32 ? "FINAL" : `Day ${dayNo}`),
     date: day?.date ?? dateLabelFor(monthId, dayNo),
-    entryYear: day?.entryYear ?? parts.entryYear,
-    entryMonth: day?.entryMonth ?? parts.entryMonth,
-    entryDay: day?.entryDay ?? parts.entryDay
+      entryYear: day?.entryYear ?? parts.entryYear,
+      entryMonth: day?.entryMonth ?? parts.entryMonth,
+    entryDay: day?.entryDay ?? parts.entryDay,
+    status: day?.status ?? "open",
+    manualOverride: day?.manualOverride ?? false
   };
 }
 
@@ -401,6 +414,57 @@ function clampSelectedDay(dayNo: number, monthId: string, now: Date) {
   return Math.min(dayNo, availableDays.at(-1) ?? 1);
 }
 
+const LAST_CALENDAR_SELECTION_KEY_PREFIX = "ledger:lastCalendarSelection:v1:";
+const LAST_ACTIVE_MODULE_KEY_PREFIX = "ledger:lastActiveModule:v1:";
+const persistedModuleToView: Record<string, View> = {
+  expense: "expense",
+  jazzLoad: "jazz-load",
+  stock: "stock-ledger"
+};
+const viewToPersistedModule: Partial<Record<View, string>> = {
+  expense: "expense",
+  "jazz-load": "jazzLoad",
+  "stock-ledger": "stock"
+};
+
+function calendarSelectionKey(uid: string) {
+  return `${LAST_CALENDAR_SELECTION_KEY_PREFIX}${uid}`;
+}
+
+function activeModuleKey(uid: string) {
+  return `${LAST_ACTIVE_MODULE_KEY_PREFIX}${uid}`;
+}
+
+function isValidMonthId(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}$/.test(value)) return false;
+  const [yearText, monthText] = value.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  return Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12;
+}
+
+function readStoredCalendarSelection(uid: string, now = new Date()) {
+  try {
+    const raw = localStorage.getItem(calendarSelectionKey(uid));
+    if (!raw) return currentDateState(now);
+    const parsed = JSON.parse(raw) as { monthId?: unknown; day?: unknown };
+    if (!isValidMonthId(parsed.monthId)) return currentDateState(now);
+    if (compareMonthIds(parsed.monthId, currentDateState(now).monthId) > 0) return currentDateState(now);
+    const parsedDay = typeof parsed.day === "number" && Number.isFinite(parsed.day) ? Math.trunc(parsed.day) : currentDateState(now).dayNo;
+    return {
+      monthId: parsed.monthId,
+      dayNo: clampSelectedDay(parsedDay, parsed.monthId, now)
+    };
+  } catch {
+    return currentDateState(now);
+  }
+}
+
+function readStoredView(uid: string): View {
+  const stored = localStorage.getItem(activeModuleKey(uid));
+  return stored ? persistedModuleToView[stored] ?? "dashboard" : "dashboard";
+}
+
 function liveClockText(now: Date) {
   return new Intl.DateTimeFormat("en", {
     weekday: "long",
@@ -438,12 +502,18 @@ function CatalogItemEditor({
   item,
   canEdit,
   onSave,
-  onDelete
+  onDelete,
+  onDragStart,
+  onDragOver,
+  onDrop
 }: {
   item: CatalogItem;
   canEdit: boolean;
   onSave: (item: CatalogItem) => Promise<void>;
   onDelete: (itemId: string) => Promise<void>;
+  onDragStart: (id: string) => void;
+  onDragOver: (event: DragEvent<HTMLTableRowElement>) => void;
+  onDrop: (id: string) => void;
 }) {
   const [draft, setDraft] = useState({
     name: item.name,
@@ -488,7 +558,19 @@ function CatalogItemEditor({
   }, [canEdit, draft.active, draft.name, draft.sortOrder, item, onSave]);
 
   return (
-    <tr>
+    <tr
+      draggable={canEdit}
+      onDragStart={() => onDragStart(item.id)}
+      onDragOver={onDragOver}
+      onDrop={() => onDrop(item.id)}
+    >
+      <td>
+        {canEdit ? (
+          <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
+            <GripVertical className="h-4 w-4" />
+          </button>
+        ) : null}
+      </td>
       <td>{item.id}</td>
       <td>
         <input
@@ -498,12 +580,7 @@ function CatalogItemEditor({
         />
       </td>
       <td>
-        <input
-          type="number"
-          value={draft.sortOrder}
-          disabled={!canEdit}
-          onChange={(event) => setDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))}
-        />
+        {item.sortOrder}
       </td>
       <td>
         <button
@@ -538,12 +615,16 @@ function CatalogItemCard({
   item,
   canEdit,
   onSave,
-  onDelete
+  onDelete,
+  onDragStart,
+  onDrop
 }: {
   item: CatalogItem;
   canEdit: boolean;
   onSave: (item: CatalogItem) => Promise<void>;
   onDelete: (itemId: string) => Promise<void>;
+  onDragStart: (id: string) => void;
+  onDrop: (id: string) => void;
 }) {
   const [draft, setDraft] = useState({
     name: item.name,
@@ -588,12 +669,23 @@ function CatalogItemCard({
   }, [canEdit, draft.active, draft.name, draft.sortOrder, item, onSave]);
 
   return (
-    <article className="mobile-list-card">
+    <article
+      className="mobile-list-card"
+      draggable={canEdit}
+      onDragStart={() => onDragStart(item.id)}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={() => onDrop(item.id)}
+    >
       <div className="mobile-card-head">
         <div>
           <p className="mobile-label">ID</p>
           <h3 className="mobile-card-title">{item.id}</h3>
         </div>
+        {canEdit && (
+          <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
+            <GripVertical className="h-4 w-4" />
+          </button>
+        )}
         <span className={draft.active ? "mobile-pill mobile-pill-good" : "mobile-pill"}>{draft.active ? "Active" : "Inactive"}</span>
       </div>
       <div className="mt-3 grid grid-cols-1 gap-3">
@@ -605,15 +697,7 @@ function CatalogItemCard({
             onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
           />
         </label>
-        <label>
-          Order
-          <input
-            type="number"
-            value={draft.sortOrder}
-            disabled={!canEdit}
-            onChange={(event) => setDraft((current) => ({ ...current, sortOrder: Number(event.target.value) }))}
-          />
-        </label>
+        <p className="text-xs text-slate-500">Order {item.sortOrder}</p>
       </div>
       {canEdit && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -647,7 +731,8 @@ function CatalogManager({
   canEdit,
   lockedMessage,
   onSave,
-  onDelete
+  onDelete,
+  onReorder
 }: {
   title: string;
   items: CatalogItem[];
@@ -655,8 +740,20 @@ function CatalogManager({
   lockedMessage?: string;
   onSave: (item: CatalogItem) => Promise<void>;
   onDelete: (itemId: string) => Promise<void>;
+  onReorder: (before: CatalogItem[], after: CatalogItem[]) => Promise<void>;
 }) {
   const [name, setName] = useState("");
+  const [displayItems, setDisplayItems] = useState(items);
+  const draggedIdRef = useRef<string | null>(null);
+  useEffect(() => setDisplayItems(items), [items]);
+  function handleDrop(overId: string) {
+    const activeId = draggedIdRef.current;
+    draggedIdRef.current = null;
+    if (!canEdit || !activeId || activeId === overId) return;
+    const reordered = applySortOrder(reorderItems(displayItems, activeId, overId));
+    setDisplayItems(reordered);
+    void onReorder(displayItems, reordered);
+  }
   return (
     <section className="panel">
       <div className="panel-title">
@@ -677,7 +774,7 @@ function CatalogManager({
             disabled={!name.trim()}
             onClick={async () => {
               const clean = name.trim();
-              await onSave({ id: slug(clean), name: clean, active: true, sortOrder: items.length });
+              await onSave({ id: slug(clean), name: clean, active: true, sortOrder: displayItems.length + 1 });
               setName("");
             }}
           >
@@ -688,16 +785,18 @@ function CatalogManager({
       <div className="mobile-card-list md:hidden">
         {canEdit ? (
           <>
-            {items.map((item) => (
+            {displayItems.map((item) => (
               <CatalogItemCard
                 key={item.id}
                 item={item}
                 canEdit={canEdit}
                 onSave={onSave}
                 onDelete={onDelete}
+                onDragStart={(id) => { draggedIdRef.current = id; }}
+                onDrop={handleDrop}
               />
             ))}
-            {items.length === 0 && <p className="mobile-empty">No catalog items yet.</p>}
+            {displayItems.length === 0 && <p className="mobile-empty">No catalog items yet.</p>}
           </>
         ) : (
           <p className="mobile-empty">{lockedMessage ?? "Only owner can manage this section."}</p>
@@ -707,6 +806,7 @@ function CatalogManager({
         <table>
           <thead>
             <tr>
+              {canEdit && <th>Move</th>}
               <th>ID</th>
               <th>Name</th>
               <th>Order</th>
@@ -716,18 +816,21 @@ function CatalogManager({
           </thead>
           <tbody>
             {canEdit ? (
-              items.map((item) => (
+              displayItems.map((item) => (
                 <CatalogItemEditor
                   key={item.id}
                   item={item}
                   canEdit={canEdit}
                   onSave={onSave}
                   onDelete={onDelete}
+                  onDragStart={(id) => { draggedIdRef.current = id; }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={handleDrop}
                 />
               ))
             ) : (
               <tr>
-                <td colSpan={lockedMessage ? 5 : 4}>{lockedMessage ?? "Only owner can manage this section."}</td>
+                <td colSpan={4}>{lockedMessage ?? "Only owner can manage this section."}</td>
               </tr>
             )}
           </tbody>
@@ -1335,20 +1438,29 @@ function RecordsView({
             />
             <RecordTable
               title="Credit Parties"
-              headers={["Party", "Opening", "Loan", "Receive", "Balance"]}
+              headers={["Party", "Opening", "Loan Description", "Loan", "Receive Description", "Receive", "Legacy Description", "Balance"]}
               rows={[
-                ...dayComputed.creditRows.map((row) => [
-                  row.partyName,
-                  currency(row.opening),
-                  currency(row.loan ?? row.today ?? 0),
-                  currency(row.receive),
-                  currency(row.balance ?? 0)
-                ]),
+                ...dayComputed.creditRows.map((row) => {
+                  const descriptions = resolveCreditDescriptions(row);
+                  return [
+                    row.partyName,
+                    currency(row.opening),
+                    descriptions.loanDescription || "-",
+                    currency(row.loan ?? row.today ?? 0),
+                    descriptions.receiveDescription || "-",
+                    currency(row.receive),
+                    descriptions.legacyDescription || "-",
+                    currency(row.balance ?? 0)
+                  ];
+                }),
                 [
                   "Total",
                   currency(dayComputed.creditTotals.opening),
+                  "-",
                   currency(dayComputed.creditTotals.today),
+                  "-",
                   currency(dayComputed.creditTotals.receive),
+                  "-",
                   currency(dayComputed.creditTotals.balance)
                 ]
               ]}
@@ -1467,7 +1579,7 @@ function AuthPanel({
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">
       <section className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/40">
-        <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
+        <p className="text-xs font-semibold uppercase text-emerald-300">Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
         <p className="mt-4 text-sm text-slate-400">
           Sign in with an authorized account.
@@ -1561,7 +1673,20 @@ function App() {
   const [uiMode, setUiMode] = useState<UiMode>(() => (localStorage.getItem("uiMode") === "classic" ? "classic" : "modern"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
+  const expenseReadDecision = useMemo(
+    () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "expense", role, monthId }),
+    [ledgerReadModeConfig, monthId, role]
+  );
+  const jazzLoadReadDecision = useMemo(
+    () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "jazzLoad", role, monthId }),
+    [ledgerReadModeConfig, monthId, role]
+  );
+  const stockReadDecision = useMemo(
+    () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "stock", role, monthId }),
+    [ledgerReadModeConfig, monthId, role]
+  );
   const [authReady, setAuthReady] = useState(false);
+  const [calendarSelectionReady, setCalendarSelectionReady] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
@@ -1573,7 +1698,6 @@ function App() {
     title: "",
     progress: []
   });
-  const syncedLiveDateRef = useRef(false);
   const creatingMonthsRef = useRef(new Set<string>());
   const pendingWritesRef = useRef(false);
   const syncErrorRef = useRef(false);
@@ -1623,6 +1747,7 @@ function App() {
     const firebaseAuth = auth;
     if (!firebaseAuth) return;
     return onAuthStateChanged(firebaseAuth, async (nextUser) => {
+      setCalendarSelectionReady(false);
       if (!nextUser) {
         setUser(null);
         setRole(null);
@@ -1640,6 +1765,11 @@ function App() {
       }
       try {
         const nextRole = await getUserRole(nextUser.uid, nextUser.email);
+        const restoredSelection = readStoredCalendarSelection(nextUser.uid);
+        setMonthId(restoredSelection.monthId);
+        setSelectedDay(restoredSelection.dayNo);
+        setView(readStoredView(nextUser.uid));
+        setCalendarSelectionReady(true);
         setUser(nextUser);
         setRole(nextRole);
         setAuthStatus(CONNECTED_STATUS);
@@ -1659,6 +1789,23 @@ function App() {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!user || !calendarSelectionReady) return;
+    localStorage.setItem(calendarSelectionKey(user.uid), JSON.stringify({
+      monthId,
+      day: selectedDay,
+      updatedAt: Date.now()
+    }));
+  }, [calendarSelectionReady, monthId, selectedDay, user]);
+
+  useEffect(() => {
+    if (!user || !calendarSelectionReady) return;
+    const moduleKey = viewToPersistedModule[view];
+    if (moduleKey) {
+      localStorage.setItem(activeModuleKey(user.uid), moduleKey);
+    }
+  }, [calendarSelectionReady, user, view]);
 
   useEffect(() => {
     document.documentElement.dataset.uiMode = uiMode;
@@ -1764,15 +1911,12 @@ function App() {
       setStatus("Stayed on the current day because changes are still pending save.");
       return;
     }
-    const liveDateOnLoad = currentDateState();
     setStatus("");
     setLoadingMessage("Loading month data...");
     setLoading(true);
     setMonthId(nextMonthId);
-    if (!syncedLiveDateRef.current && nextMonthId === liveDateOnLoad.monthId) {
-      setSelectedDay(liveDateOnLoad.dayNo);
-      syncedLiveDateRef.current = true;
-    }
+    const nextSelectedDay = clampSelectedDay(selectedDay, nextMonthId, now);
+    if (nextSelectedDay !== selectedDay) setSelectedDay(nextSelectedDay);
   }
 
   useEffect(() => {
@@ -1800,42 +1944,42 @@ function App() {
   }, [user, role]);
 
   useEffect(() => {
-    if (!user || !role || view === "jazz-load") return;
+    if (!user || !role || !calendarSelectionReady || view === "jazz-load") return;
     const previousId = previousMonthIdForPrefetch(monthId);
     const unsubscribers = [
       subscribeJazzLoadRates((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeJazzLoadDoProfiles((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeJazzLoadDoNames((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeJazzLoadDoLines((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
+      subscribeJazzLoadDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: jazzLoadReadDecision }),
+      subscribeJazzLoadMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: jazzLoadReadDecision }),
       subscribeJazzLoadDoAssignments(monthId, selectedDay, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message))
     ];
     if (previousId !== monthId) {
       unsubscribers.push(subscribeJazzLoadDays(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
     }
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [monthId, role, selectedDay, user, view]);
+  }, [calendarSelectionReady, jazzLoadReadDecision, monthId, role, selectedDay, user, view]);
 
   useEffect(() => {
-    if (!user || !role || view === "stock-ledger") return;
+    if (!user || !role || !calendarSelectionReady || view === "stock-ledger") return;
     const previousId = previousMonthIdForPrefetch(monthId);
     const unsubscribers = [
       subscribeStockProducts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeStockAccounts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeStockOpeningBalances((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
       subscribeStockMonths((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message))
+      subscribeStockDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: stockReadDecision }),
+      subscribeStockMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: stockReadDecision })
     ];
     if (previousId !== monthId) {
       unsubscribers.push(subscribeStockMonthlySummary(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
     }
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [monthId, role, user, view]);
+  }, [calendarSelectionReady, monthId, role, stockReadDecision, user, view]);
 
   useEffect(() => {
-    if (!user || (role !== "owner" && role !== "admin")) {
+    if (!user || !calendarSelectionReady || (role !== "owner" && role !== "admin")) {
       setExpenseMismatchCount(0);
       return;
     }
@@ -1849,7 +1993,7 @@ function App() {
       (err) => handleFirestoreError(err.message)
     );
     return unsubscribe;
-  }, [monthId, role, user]);
+  }, [calendarSelectionReady, monthId, role, user]);
 
   useEffect(() => {
     if (!user || !role) {
@@ -1867,7 +2011,7 @@ function App() {
   }, [role, user]);
 
   useEffect(() => {
-    if (!user || !role) return;
+    if (!user || !role || !calendarSelectionReady) return;
     if (roleCan(role, "catalogs")) void ensureDefaultCatalogs().catch((err) => setStatus(err instanceof Error ? err.message : "Could not seed catalogs."));
 
     const unsubscribers = [
@@ -1911,7 +2055,6 @@ function App() {
 
   useEffect(() => {
     if (!user || !role) return;
-    const liveDateOnLoad = currentDateState();
     let monthRecordReceived = false;
     let monthDaysReceived = false;
 
@@ -1968,10 +2111,6 @@ function App() {
               .catch(() => {});
           }
           setMonthStatusState(record.status);
-          if (!syncedLiveDateRef.current && record.id === liveDateOnLoad.monthId) {
-            setSelectedDay(liveDateOnLoad.dayNo);
-            syncedLiveDateRef.current = true;
-          }
           monthRecordReceived = true;
           checkComplete();
         },
@@ -1993,14 +2132,15 @@ function App() {
           handleFirestoreError(err.message);
           monthDaysReceived = true;
           checkComplete();
-        }
+        },
+        { readDecision: expenseReadDecision }
       )
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [monthId, role, user]);
+  }, [calendarSelectionReady, expenseReadDecision, monthId, role, user]);
 
   useEffect(() => {
-    if (!user || !role) {
+    if (!user || !role || !calendarSelectionReady) {
       setExpenseCarryForwardSeed(null);
       return;
     }
@@ -2016,7 +2156,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [monthId, role, user]);
+  }, [calendarSelectionReady, monthId, role, user]);
 
   const calculatedOpeningBalance = expenseCarryForwardSeed?.openingBalance ?? openingBalance;
   const calculatedOwnerOpeningBalance = expenseCarryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
@@ -2102,14 +2242,12 @@ function App() {
       setStatus("Your role can view this month but cannot close days.");
       return;
     }
-    if (role === "admin" && !isSelectedLiveDay) {
-      setStatus("Admins can only close the current running day.");
-      return;
-    }
     const timestamp = Date.now();
     const dayKey = `${monthId}/${day.dayNo}`;
     const lockedDay = {
       ...day,
+      status: "closed" as const,
+      manualOverride: true,
       lockedAt: timestamp,
       lockedBy: user?.uid,
       lockedByRole: role ?? undefined,
@@ -2162,40 +2300,27 @@ function App() {
   }
 
   async function reopenDay(dayNo: number) {
-    if (!roleCan(role, "daily")) {
-      setStatus("Your role can view this month but cannot reopen days.");
-      return;
-    }
-    const isLiveReopen = isLiveDay(monthId, dayNo, now);
-    if (role === "admin" && !isLiveReopen) {
-      setStatus("Only owner can reopen previous days or correction periods.");
+    if (!canReopenOperationalDay({ role, isLiveDay: isLiveDay(monthId, dayNo, now) })) {
+      setStatus("Only owner can reopen days.");
       return;
     }
     const day = days.find((entry) => entry.dayNo === dayNo) ?? emptyDay(dayNo);
     closedExpenseDayKeysRef.current.delete(`${monthId}/${dayNo}`);
-    const reopenedDay = isLiveReopen
-      ? {
-          ...day,
-          lockedAt: undefined,
-          lockedBy: undefined,
-          lockedByRole: undefined,
-          reopenedUntilAt: undefined,
-          reopenedAt: Date.now(),
-          reopenedBy: user?.uid,
-          reopenedByRole: role ?? undefined
-        }
-      : {
-          ...day,
-          reopenedUntilAt: undefined,
-          reopenedAt: Date.now(),
-          reopenedBy: user?.uid,
-          reopenedByRole: role ?? undefined
-        };
+    const reopenedDay = {
+      ...day,
+      status: "reopen" as const,
+      manualOverride: true,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
+      reopenedUntilAt: undefined,
+      reopenedAt: Date.now(),
+      reopenedBy: user?.uid,
+      reopenedByRole: role ?? undefined
+    };
     setDays((currentDays) => replaceDay(currentDays, reopenedDay));
     handleQueuedWrite(
-      isLiveReopen
-        ? reopenCurrentDayUntilClose(monthId, dayNo, role)
-        : reopenPreviousDayUntilClose(monthId, dayNo, role),
+      reopenPreviousDayUntilClose(monthId, dayNo, role),
       "Could not queue day reopen."
     );
     setStatus(
@@ -2220,19 +2345,26 @@ function App() {
       setStatus("Stayed on the current day because changes are still pending save.");
       return;
     }
-    if (scope === "selected" && isLiveDay(monthId, selectedDay, now)) {
+    if (scope === "selected") {
+      if (!selectedDayLocked) {
+        setStatus("Only closed days can be reopened.");
+        return;
+      }
       await reopenDay(selectedDay);
       return;
     }
 
-    const dayNumbers = scope === "selected"
-      ? [selectedDay]
-      : availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now));
+    const dayNumbers = availableDayNumbers(monthId, now).filter((dayNo) => {
+      const day = days.find((entry) => entry.dayNo === dayNo);
+      return day?.status === "closed" || Boolean(day?.lockedAt);
+    });
     const reopenAt = Date.now();
     const nextReopenedDays = dayNumbers.map((dayNo) => {
       const existing = days.find((entry) => entry.dayNo === dayNo);
       return {
         ...dayWithMonthDate(monthId, dayNo, existing),
+        status: "reopen" as const,
+        manualOverride: true,
         reopenedUntilAt: undefined,
         reopenedAt: reopenAt,
         reopenedBy: user?.uid,
@@ -2253,7 +2385,7 @@ function App() {
         reopenMonthDaysUntilClose(monthId, nextReopenedDays, role),
         "Could not queue month day reopen."
       );
-      const dayText = scope === "selected" ? `Day ${selectedDay}` : `${nextReopenedDays.length} days`;
+      const dayText = `${nextReopenedDays.length} days`;
       setStatus(`${dayText} reopened locally until manually closed. Firestore will sync automatically.`);
     } finally {
       setBulkReopening(null);
@@ -2281,6 +2413,8 @@ function App() {
         if (existing?.lockedAt && !isReopenActive(existing, now)) return [];
         const day: DailyLedgerInput = {
           ...dayWithMonthDate(monthId, dayNo, existing),
+          status: "closed" as const,
+          manualOverride: true,
           lockedAt: timestamp,
           lockedBy: user?.uid,
           lockedByRole: role ?? undefined,
@@ -2361,74 +2495,36 @@ function App() {
   }
 
   async function recalc() {
-    if (!roleCan(role, "masterRefresh")) {
+    if (!roleCan(role, MASTER_REFRESH_ACCESS)) {
       setStatus("Manual recalculation is restricted to owner/admin access.");
       return;
     }
     const adapter = createExpenseRecalculationAdapter({
       monthId,
-      canRun: roleCan(role, "masterRefresh"),
+      canRun: roleCan(role, MASTER_REFRESH_ACCESS),
       disabledReason: "Only owner/admin can run Expense master refresh.",
       run: async (emit) => {
-        emit({ step: "Resolving previous month final balances..." });
+        emit({ step: "Loading month data and recalculating daily balances locally..." });
+        await recalculateMonth(monthId);
+        emit({ step: "Loading recalculated records..." });
+        const records = await refreshMonthList();
+        const refreshedMonth = records.find((month) => month.id === monthId);
+        const nextDays = await fetchMonthDays(monthId, { readDecision: expenseReadDecision });
         const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
-        const repairedOpeningBalance = carryForwardSeed?.openingBalance ?? openingBalance;
-        const repairedOwnerOpeningBalance = carryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
-        const repairedMonth = {
-          ...(months.find((month) => month.id === monthId) ?? createMonth(monthId, repairedOpeningBalance, repairedOwnerOpeningBalance)),
-          openingBalance: repairedOpeningBalance,
-          ownerOpeningBalance: repairedOwnerOpeningBalance
-        };
+        const repairedOpeningBalance = refreshedMonth?.openingBalance ?? carryForwardSeed?.openingBalance ?? openingBalance;
+        const repairedOwnerOpeningBalance = refreshedMonth?.ownerOpeningBalance ?? carryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
+        const nextComputed = computeMonth(nextDays, repairedOpeningBalance, monthId, repairedOwnerOpeningBalance, carryForwardSeed ?? undefined);
         setExpenseCarryForwardSeed(carryForwardSeed);
         setOpeningBalance(repairedOpeningBalance);
         setOwnerOpeningBalance(repairedOwnerOpeningBalance);
-        emit({ step: "Saving latest local month state..." });
-        await saveMonthRecord(
-          repairedMonth,
-          days,
-          {
-            onlyWriteEditableDays: true,
-            carryForwardSeed,
-            debugSource: "master-refresh-save-latest",
-            debugPathMode: "client-save"
-          }
-        );
-        emit({ step: "Recalculating daily balances..." });
-        let usedLocalFallback = false;
-        try {
-          await recalculateMonth(monthId);
-        } catch (err) {
-          console.warn("Cloud recalculation failed/unavailable on Spark plan. Falling back to local client-side recalculation:", err);
-          emit({ step: "Recalculating daily balances (local fallback)..." });
-          const fallbackComputed = computeMonth(days, repairedOpeningBalance, monthId, repairedOwnerOpeningBalance, carryForwardSeed ?? undefined);
-          const computedByDay = new Map(fallbackComputed.days.map((day) => [day.dayNo, day]));
-          const repairedDays = days.map((day) => {
-            const computedDay = computedByDay.get(day.dayNo);
-            return computedDay ? { ...day, credits: computedDay.creditRows, ownerBalances: computedDay.ownerBalances } : day;
-          });
-          await saveMonthRecord(repairedMonth, repairedDays, {
-            suppressPerDayAudit: true,
-            carryForwardSeed,
-            recalculationWrite: true,
-            debugSource: "master-refresh-local-fallback",
-            debugPathMode: "local-fallback"
-          });
-          usedLocalFallback = true;
-        }
-        emit({ step: "Loading recalculated records..." });
-        const nextDays = await fetchMonthDays(monthId);
-        const nextComputed = computeMonth(nextDays, repairedOpeningBalance, monthId, repairedOwnerOpeningBalance, carryForwardSeed ?? undefined);
         setDays(nextDays);
         setComputed(nextComputed);
-        await refreshMonthList();
         emit({ step: "Completed successfully." });
         return {
           daysChecked: nextDays.length,
           mismatchesCorrected: nextDays.length,
           monthlySummariesUpdated: 1,
-          message: usedLocalFallback
-            ? "Day openings now follow the previous closing balance using local fallback repair."
-            : "Day openings now follow the previous closing balance."
+          message: "Day openings now follow the previous closing balance."
         };
       }
     });
@@ -2645,6 +2741,7 @@ function App() {
         monthId,
         dayNo,
         status: statusValue,
+        future,
         saved: Boolean(day),
         dateLabel: dateLabelFor(monthId, dayNo),
         reopenedUntilAt: day?.reopenedUntilAt,
@@ -2653,7 +2750,7 @@ function App() {
       };
     });
   }, [days, monthId, now]);
-  const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? (selectedDay === 32 ? "closed" : "missing");
+  const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? (selectedDay === 32 ? "closed" : "open");
   const topActivityActive = loading || isAutosaving || syncState === "syncing" || pageActivityLoading || authBusy || !authReady;
   const topActivityLabel = loading
     ? loadingMessage
@@ -2668,7 +2765,7 @@ function App() {
             : "";
 
   if (!isFirebaseConfigured) return <FirebaseMissing />;
-  if (!authReady || !user || !role) {
+  if (!authReady || !user || !role || !calendarSelectionReady) {
     return (
       <>
         <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
@@ -2686,7 +2783,18 @@ function App() {
   const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed);
   const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
   const isClosed = monthStatus === "closed";
-  const selectedDayLocked = Boolean(selectedDayInput.lockedAt) && !selectedDayReopenActive;
+  const isSelectedCanonicalReopen = selectedDayInput.status === "reopen";
+  const isSelectedCanonicalClosed = selectedDayInput.status === "closed";
+  const isSelectedLegacyLocked =
+    !isSelectedCanonicalReopen &&
+    (
+      selectedDayInput.closedAt != null ||
+      selectedDayInput.lockedAt != null ||
+      selectedDayInput.reopenedUntilAt != null
+    );
+  const selectedDayLocked =
+    isSelectedCanonicalClosed ||
+    isSelectedLegacyLocked;
   const canEditDaily = roleCan(role, "daily") && !isClosed;
   const liveDate = currentDateState(now);
   const canEditSelectedDay = canEditOperationalDailyEntry({
@@ -2700,8 +2808,8 @@ function App() {
   });
   const canCloseSelectedDay =
     canEditDaily &&
-    (role === "owner" || (role === "admin" && isSelectedLiveDay)) &&
-    ((isSelectedLiveDay && !selectedDayLocked) || (!isSelectedLiveDay && selectedDayReopenActive));
+    (role === "owner" || role === "admin") &&
+    !selectedDayLocked;
   const canReopenSelectedDay =
     canEditDaily &&
     selectedDayLocked &&
@@ -2709,13 +2817,18 @@ function App() {
     !selectedDayReopenActive;
   const selectedDayReopenLabel = "Reopen Until Close";
   const selectedDayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
-  const ownerBulkReopenDayCount = availableDayNumbers(monthId, now).filter((dayNo) => !isLiveDay(monthId, dayNo, now)).length;
+  const ownerBulkReopenDayCount = availableDayNumbers(monthId, now)
+    .filter((dayNo) => {
+      const day = days.find((entry) => entry.dayNo === dayNo);
+      return day?.status !== "reopen" && (day?.status === "closed" || Boolean(day?.lockedAt || day?.closedAt || day?.reopenedUntilAt));
+    })
+    .length;
   const canOwnerBulkReopenSelected =
     role === "owner" &&
     canEditDaily &&
     selectedDay !== 32 &&
     !selectedDayReopenActive &&
-    (!isSelectedLiveDay || selectedDayLocked);
+    selectedDayLocked;
   const canOwnerBulkReopenAll = role === "owner" && canEditDaily && ownerBulkReopenDayCount > 0;
   const canOwnerCloseAllExceptToday = role === "owner" && canEditDaily && ownerBulkReopenDayCount > 0;
   const canManageCatalogs = roleCan(role, "catalogs");
@@ -2740,6 +2853,11 @@ function App() {
     ledgerReadModeConfig.expenseReadMode === "v2-shadow" ? "Expense" : null,
     ledgerReadModeConfig.jazzLoadReadMode === "v2-shadow" ? "Jazz Load" : null,
     ledgerReadModeConfig.stockReadMode === "v2-shadow" ? "Stock" : null
+  ].filter((item): item is string => Boolean(item));
+  const v2ActiveModules = [
+    expenseReadDecision.readSource === "v2" ? "Expense" : null,
+    jazzLoadReadDecision.readSource === "v2" ? "Jazz Load" : null,
+    stockReadDecision.readSource === "v2" ? "Stock" : null
   ].filter((item): item is string => Boolean(item));
   const shadowAllowedRoles = ledgerReadModeConfig.enabledForRoles ?? ["owner", "admin"];
   const showExpenseV2ShadowPanel =
@@ -2943,9 +3061,9 @@ function App() {
           canReopenSelectedDay: expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
           canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
           canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
-          canRunMasterRefresh: Boolean(user) && roleCan(role, "masterRefresh"),
+          canRunMasterRefresh: Boolean(user) && roleCan(role, MASTER_REFRESH_ACCESS),
           closeDisabledReason: selectedDayLocked ? "This day is already closed." : "This day cannot be closed for your role.",
-          reopenDisabledReason: "Only owner can reopen previous days. Admin can reopen the current day only.",
+          reopenDisabledReason: "Only owner can reopen days.",
           reopenAllDisabledReason: "Only owner can reopen all days.",
           closePreviousDisabledReason: "Only owner can close previous days.",
           masterRefreshDisabledReason: "Only owner/admin can run master refresh."
@@ -2955,11 +3073,7 @@ function App() {
           void closeDay(selectedDayInput);
         }}
         onReopenSelectedDay={() => {
-          if (canReopenSelectedDay) {
-            void reopenDay(selectedDay);
-            return;
-          }
-          void reopenMonthDays("selected");
+          void reopenDay(selectedDay);
         }}
         onReopenAllDays={() => void reopenMonthDays("all")}
         onClosePreviousDaysExceptToday={closeAllDaysExceptToday}
@@ -2998,7 +3112,7 @@ function App() {
       }}
     >
     <SidebarDayControlsProvider>
-    <main className={`min-h-screen ${shellTone}`}>
+    <main className={`flex min-h-screen flex-col overflow-x-auto ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
       <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
       <MasterCalculationRefreshModal
@@ -3073,12 +3187,12 @@ function App() {
           </div>
         </section>
       )}
-      <div className={`min-h-screen lg:grid ${shellGrid}`}>
+      <div className={`flex-1 lg:grid ${shellGrid}`}>
         <aside className="hidden min-w-0 border-b border-slate-800 bg-slate-950/95 p-3 text-slate-100 sm:p-4 lg:block lg:border-b-0 lg:border-r">
           <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-start justify-between" : "flex-col items-center"}`}>
             {sidebarOpen && (
               <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase text-emerald-300">Name Software</p>
+                <p className="text-xs font-semibold uppercase text-emerald-300">Software</p>
                 <h1 className="text-xl font-semibold leading-tight">Jazz Franchise - 7301</h1>
               </div>
             )}
@@ -3235,9 +3349,14 @@ function App() {
           {showExpenseV2ShadowPanel && role && (
             <LedgerShadowStatusPanel config={ledgerReadModeConfig} role={role} />
           )}
-          {!showExpenseV2ShadowPanel && (role === "owner" || role === "admin") && v2ShadowModules.length > 0 && (
+          {SHOW_LEDGER_V2_SHADOW_WARNING && !showExpenseV2ShadowPanel && (role === "owner" || role === "admin") && v2ShadowModules.length > 0 && (
             <p className="warning">
               ledgerV2 shadow read verification is active for {v2ShadowModules.join(", ")}. The UI is still reading v1 until the reviewed verification report enables cutover.
+            </p>
+          )}
+          {(role === "owner" || role === "admin") && v2ActiveModules.length > 0 && (
+            <p className="status">
+              LedgerV2 UI reads are active for {v2ActiveModules.join(", ")}.
             </p>
           )}
           {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
@@ -3247,6 +3366,22 @@ function App() {
                 ? `Day ${selectedDay} is closed.`
                 : `Day ${selectedDay} is closed. Reopen it to edit until it is manually closed.`}
             </p>
+          )}
+          {isSelectedCanonicalReopen && (
+            <p className="status">Day {selectedDay} is reopened. You can edit it until the owner closes it again.</p>
+          )}
+
+          {view === "expense" && (
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h2 className="text-2xl font-semibold text-white">Expense Ledger</h2>
+                <p className="mt-1 text-sm text-slate-400">{formatMonth(monthId)} · {monthStatus} · {syncLabel}</p>
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Active Month</p>
+                <p className="mt-1 text-sm font-medium text-white">{formatMonth(monthId)}</p>
+              </div>
+            </div>
           )}
 
           {view === "dashboard" && (
@@ -3287,18 +3422,18 @@ function App() {
           )}
 
           {view === "expense" && (
-            <section>
+            <section className="mt-4">
               <nav className="mb-5 flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2 text-slate-100 shadow-xl shadow-black/20">
                 {(
                   [
-                    { id: "daily-entry", label: "Daily Entry", locked: false },
-                    { id: "previous-records", label: "Previous Records", locked: false },
-                    { id: "expense-dashboard", label: "Dashboard", locked: false },
-                    { id: "expense-categories", label: "Expense Categories", locked: !canManageCatalogs },
-                    { id: "credit-parties", label: "Credit Parties", locked: !canManageCatalogs },
-                    { id: "commission-categories", label: "Commission/Application Categories", locked: !canManageCatalogs }
-                  ] as Array<{ id: ExpenseSection; label: string; locked: boolean }>
-                ).map(({ id, label, locked }) => (
+                    { id: "daily-entry", label: "Daily Entry", locked: false, icon: CalendarDays },
+                    { id: "previous-records", label: "Previous Records", locked: false, icon: ScrollText },
+                    { id: "expense-dashboard", label: "Dashboard", locked: false, icon: LayoutDashboard },
+                    { id: "expense-categories", label: "Expense Categories", locked: !canManageCatalogs, icon: Tags },
+                    { id: "credit-parties", label: "Credit Parties", locked: !canManageCatalogs, icon: CreditCard },
+                    { id: "commission-categories", label: "Commission/Application Categories", locked: !canManageCatalogs, icon: FileSpreadsheet }
+                  ] as Array<{ id: ExpenseSection; label: string; locked: boolean; icon: typeof CalendarDays }>
+                ).map(({ id, label, locked, icon: Icon }) => (
                   <button
                     className={`${expenseSection === id ? "btn-tab btn-tab-active" : "btn-tab"} ${locked ? "cursor-not-allowed opacity-60" : ""}`}
                     disabled={locked}
@@ -3316,6 +3451,7 @@ function App() {
                       setExpenseSection(id);
                     }}
                   >
+                    <Icon />
                     {label}
                   </button>
                 ))}
@@ -3373,6 +3509,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("expenseCategories", item)}
                   onDelete={(itemId) => removeCatalogItem("expenseCategories", itemId)}
+                  onReorder={(before, after) => updateCatalogSortOrder("expenseCategories", before, after)}
                 />
               )}
               {expenseSection === "credit-parties" && (
@@ -3383,6 +3520,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("creditParties", item)}
                   onDelete={(itemId) => removeCatalogItem("creditParties", itemId)}
+                  onReorder={(before, after) => updateCatalogSortOrder("creditParties", before, after)}
                 />
               )}
               {expenseSection === "commission-categories" && (
@@ -3393,6 +3531,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("commissionCategories", item)}
                   onDelete={(itemId) => removeCatalogItem("commissionCategories", itemId)}
+                  onReorder={(before, after) => updateCatalogSortOrder("commissionCategories", before, after)}
                 />
               )}
             </section>
@@ -3413,6 +3552,7 @@ function App() {
               onExportBackup={exportBackup}
               onImportBackup={importBackup}
               onTriggerMasterRefresh={triggerMasterRefresh}
+              ledgerReadModeConfig={ledgerReadModeConfig}
             />
           )}
 
@@ -3429,6 +3569,7 @@ function App() {
               onQueueWrite={handleQueuedWrite}
               onStatus={setStatus}
               onTriggerMasterRefresh={triggerMasterRefresh}
+              ledgerReadModeConfig={ledgerReadModeConfig}
             />
           )}
 

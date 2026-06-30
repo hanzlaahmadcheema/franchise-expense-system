@@ -1,5 +1,5 @@
 import type { ModuleKey, UniversalDaySnapshot, UniversalDayStatus } from "../types/dayControl.types";
-import { calendarCells, daysInMonth, isFutureDay, statusChipClass, statusLabel } from "../services/dayStatusService";
+import { calendarCells, daysInMonth, statusChipClass, statusLabel } from "../services/dayStatusService";
 
 type Props = {
   moduleKey: ModuleKey;
@@ -16,16 +16,34 @@ type Props = {
 };
 
 function fallbackStatus(monthId: string, dayNo: number, now: Date): UniversalDayStatus {
-  return isFutureDay(monthId, dayNo, now) ? "futureDisabled" : "missing";
+  void monthId;
+  void dayNo;
+  void now;
+  return "open";
 }
 
 function statusDotClass(status: UniversalDayStatus) {
-  if (status === "loading") return "bg-slate-500";
-  if (status === "open" || status === "today") return "bg-emerald-400";
-  if (status === "reopened") return "bg-blue-400";
-  if (status === "missing") return "bg-orange-400";
-  if (status === "closed" || status === "locked") return "bg-red-500";
-  return "bg-slate-600";
+  if (status === "reopen") return "bg-blue-400";
+  if (status === "closed") return "bg-red-500";
+  return "bg-emerald-400";
+}
+
+function selectedCellClass(status: UniversalDayStatus) {
+  if (status === "reopen") return "border-blue-400 bg-blue-400/10 text-blue-100";
+  if (status === "closed") return "border-red-400 bg-red-400/10 text-red-100";
+  return "border-emerald-400 bg-emerald-400/10 text-emerald-100";
+}
+
+function unselectedCellClass(status: UniversalDayStatus) {
+  if (status === "reopen") return "border-blue-400/40 bg-blue-400/5 text-blue-100";
+  if (status === "closed") return "border-red-400/40 bg-red-400/5 text-red-100";
+  return "border-emerald-400/40 bg-emerald-400/5 text-emerald-100";
+}
+
+function futureCellClass(selected: boolean) {
+  return selected
+    ? "border-slate-500 bg-slate-800/50 text-slate-300"
+    : "border-slate-800 bg-slate-900/40 text-slate-500";
 }
 
 export function UniversalCalendar({
@@ -54,7 +72,7 @@ export function UniversalCalendar({
           if (cell.dayNo == null) return <span key={`empty-${index}`} className={mini ? "min-h-10" : "min-h-16"} aria-hidden="true" />;
           const snapshot = dayByNo.get(cell.dayNo);
           const status = snapshot?.status ?? fallbackStatus(monthId, cell.dayNo, now);
-          const future = status === "futureDisabled";
+          const future = snapshot?.future ?? false;
           const selected = selectedDay === cell.dayNo;
           const label = statusLabel(status);
           return (
@@ -63,18 +81,24 @@ export function UniversalCalendar({
               type="button"
               className={[
                 mini ? "min-h-10 flex-col rounded-md border px-1 py-1 text-[10px]" : "min-h-16 flex-col rounded-lg border px-2 py-2 text-xs",
-                selected ? "border-emerald-400 bg-emerald-400/10 text-emerald-100" : "border-slate-800 bg-slate-900/70 text-slate-200",
-                future ? "opacity-40" : ""
+                future
+                  ? futureCellClass(selected)
+                  : selected
+                    ? selectedCellClass(status)
+                    : unselectedCellClass(status),
+                future ? "cursor-not-allowed opacity-60" : "",
               ].join(" ")}
               disabled={disabled || future}
               onClick={() => onSelect(cell.dayNo!)}
-              title={snapshot?.disabledReason ?? `${snapshot?.dateLabel ?? `Day ${cell.dayNo}`} - ${label}`}
+              title={future ? snapshot?.disabledReason ?? "Future days are disabled." : snapshot?.disabledReason ?? `${snapshot?.dateLabel ?? `Day ${cell.dayNo}`} - ${label}`}
             >
               <span className={`${mini ? "text-xs" : "text-sm"} font-semibold`}>{cell.dayNo}</span>
               {mini ? (
-                <span className={`mt-1 h-1.5 w-1.5 rounded-full ${statusDotClass(status)}`} aria-label={label} />
+                <span className={`mt-1 h-1.5 w-1.5 rounded-full ${future ? "bg-slate-500" : statusDotClass(status)}`} aria-label={future ? "Future" : label} />
               ) : (
-                <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${statusChipClass(status)}`}>{label}</span>
+                <span className={`mt-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${future ? "bg-slate-800 text-slate-400" : statusChipClass(status)}`}>
+                  {future ? "Future" : label}
+                </span>
               )}
               {selected && !mini && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
             </button>

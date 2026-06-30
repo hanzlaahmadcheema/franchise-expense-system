@@ -1,17 +1,9 @@
 import type { ReactNode } from "react";
-import type { UserRole } from "../../types/ledger";
+import type { CalendarDayStatus, UserRole } from "../../types/ledger";
 
 export type ModuleKey = "expense" | "jazzLoad" | "stock";
 
-export type UniversalDayStatus =
-  | "loading"
-  | "missing"
-  | "open"
-  | "closed"
-  | "locked"
-  | "reopened"
-  | "today"
-  | "futureDisabled";
+export type UniversalDayStatus = CalendarDayStatus;
 
 export type AutoSaveStatus =
   | "idle"
@@ -30,6 +22,7 @@ export type UniversalDaySnapshot = {
   monthId: string;
   dayNo: number;
   status: UniversalDayStatus;
+  future?: boolean;
   dateLabel?: string;
   saved?: boolean;
   reopenedUntilAt?: number;

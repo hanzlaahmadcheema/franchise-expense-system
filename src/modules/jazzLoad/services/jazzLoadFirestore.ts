@@ -3,6 +3,7 @@ import {
   deleteField,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   orderBy,
@@ -17,21 +18,35 @@ import type { User } from "firebase/auth";
 import { auth, db } from "../../../lib/firebase";
 import { buildAuditLogDocument, writeAuditLog } from "../../../lib/auditLogService";
 import { LEDGER_CALC_VERSION } from "../../../shared/ledger/ledgerTypes";
+import { assertLedgerV2UiReadAllowed, type LedgerUiReadDecision } from "../../../shared/ledger/ledgerReadMode";
+import { ChunkedFirestoreBatch, type FirestoreBatchWriter } from "../../../shared/services/chunkedFirestoreBatch";
+import { assertMasterRefreshAccess, canRunMasterRefresh, MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
+import { canReopenDay } from "../../../shared/services/dayEditPermissions";
+import { changedSortOrderPatches, orderedBySortOrder } from "../../../shared/services/orderUtils";
 import type { UserRole } from "../../../types/ledger";
 import {
+  calculateChainedDailySummary,
   calculateDailyLifting,
   calculateDailySummary,
   calculateDoRow,
-  calculateMonthlySummary
+  calculateMonthlySummary,
+  resolveDoLineBindingForDate,
+  resolveJazzLoadRatesForDay,
+  snapshotResolvedRates
 } from "./jazzLoadCalculations";
 import type {
   ActiveJazzLoadRates,
+  CalculatedMoney,
   JazzLoadAuditEvent,
   JazzLoadBackup,
   JazzLoadCommissionRule,
   JazzLoadDoAssignment,
+  JazzLoadDoBindingBackfillMode,
+  JazzLoadDoBindingBackfillPreview,
+  JazzLoadDoBindingBackfillSample,
   JazzLoadDay,
   JazzLoadDoEntry,
+  JazzLoadDoLineBinding,
   JazzLoadDoLine,
   JazzLoadDoName,
   JazzLoadDoProfile,
@@ -41,6 +56,10 @@ import type {
 } from "../types/jazzLoad.types";
 
 export type FirestoreSnapshotMeta = Pick<SnapshotMetadata, "fromCache" | "hasPendingWrites">;
+
+type LedgerUiReadOptions = {
+  readDecision?: LedgerUiReadDecision;
+};
 
 function now() {
   return Date.now();
@@ -98,6 +117,10 @@ function doLineCollection() {
   return collection(requireDb(), "jazzLoadSettings", "doLines", "items");
 }
 
+function doLineBindingCollection() {
+  return collection(requireDb(), "jazzLoadSettings", "doLineBindings", "items");
+}
+
 function doAssignmentCollection(monthId: string, dayNo: number) {
   return collection(dayRef(monthId, dayNo), "doAssignments");
 }
@@ -118,8 +141,121 @@ function ledgerV2JazzLoadRawEntries(monthId: string, dayNo: number) {
   return collection(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "days", String(dayNo), "rawEntries");
 }
 
+function ledgerV2JazzLoadDay(monthId: string, dayNo: number) {
+  return doc(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "days", String(dayNo));
+}
+
+function numberValue(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function calculatedMoney(baseAmount: number, calculatedAmount = baseAmount): CalculatedMoney {
+  return {
+    baseAmount,
+    calculatedAmount,
+    appliedRateId: "ledger-v2",
+    appliedRateName: "LedgerV2",
+    appliedRatePercentage: 0,
+    calculatedAt: now()
+  };
+}
+
+async function hydrateJazzLoadV2Day(monthId: string, dayNo: number): Promise<JazzLoadDay> {
+  const [legacySnap, rawSnap, projectionSnap, dayV2Snap] = await Promise.all([
+    getDoc(dayRef(monthId, dayNo)),
+    getDocs(ledgerV2JazzLoadRawEntries(monthId, dayNo)),
+    getDocs(collection(ledgerV2JazzLoadDay(monthId, dayNo), "projections")),
+    getDoc(ledgerV2JazzLoadDay(monthId, dayNo))
+  ]);
+  const legacyDay = legacySnap.exists() ? mapDayData(legacySnap.data() as Partial<JazzLoadDay>, legacySnap.id) : null;
+  const projectionByRawId = new Map<string, Record<string, unknown>>();
+
+  projectionSnap.docs.forEach((projectionDoc) => {
+    const projection = projectionDoc.data() as Record<string, unknown>;
+    const rawEntryId = typeof projection.rawEntryId === "string" ? projection.rawEntryId : null;
+    if (rawEntryId) projectionByRawId.set(rawEntryId, projection);
+  });
+  const liftingProjection = projectionSnap.docs
+    .map((projectionDoc) => projectionDoc.data() as Record<string, unknown>)
+    .find((projection) => projection.type === "dailyLiftingBalance");
+
+  const doEntries = rawSnap.docs.flatMap((entryDoc): JazzLoadDoEntry[] => {
+    const entry = entryDoc.data() as { id?: string; type?: string; raw?: Record<string, unknown> };
+    if (entry.type !== "doEntry") return [];
+    const raw = entry.raw ?? {};
+    const projection = projectionByRawId.get(entry.id ?? entryDoc.id);
+    const calculated = projection?.calculated && typeof projection.calculated === "object"
+      ? projection.calculated as Record<string, unknown>
+      : {};
+    const id = String(entry.id ?? entryDoc.id).replace(/^do-/, "");
+    const issuanceBase = numberValue(calculated.issuance ?? raw.todayMlIssuanceBase);
+    const paymentBase = numberValue(calculated.payment ?? raw.paymentReceivedBase);
+    const openingBase = numberValue(calculated.opening);
+    const closingBase = numberValue(calculated.closing);
+    return [{
+      id,
+      doProfileId: typeof raw.doProfileId === "string" ? raw.doProfileId : undefined,
+      doNameId: typeof raw.doNameId === "string" ? raw.doNameId : undefined,
+      doLineId: typeof raw.doLineId === "string" ? raw.doLineId : undefined,
+      assignmentId: typeof raw.assignmentId === "string" ? raw.assignmentId : undefined,
+      doLineSortOrder: typeof raw.doLineSortOrder === "number" ? raw.doLineSortOrder : undefined,
+      doName: String(raw.doName ?? projection?.doName ?? ""),
+      doLine: typeof raw.doLine === "string" ? raw.doLine : typeof projection?.doLine === "string" ? projection.doLine : undefined,
+      bindingEffectiveFromMonthId: typeof raw.bindingEffectiveFromMonthId === "string" ? raw.bindingEffectiveFromMonthId : undefined,
+      bindingEffectiveFromDay: typeof raw.bindingEffectiveFromDay === "number" ? raw.bindingEffectiveFromDay : undefined,
+      bindingUpdatedAt: typeof raw.bindingUpdatedAt === "number" ? raw.bindingUpdatedAt : undefined,
+      bindingUpdatedBy: typeof raw.bindingUpdatedBy === "string" ? raw.bindingUpdatedBy : undefined,
+      bindingBackfillId: typeof raw.bindingBackfillId === "string" ? raw.bindingBackfillId : undefined,
+      bindingBackfillMode: raw.bindingBackfillMode === "current-binding-history-repair" ? raw.bindingBackfillMode : undefined,
+      openingBalance: calculatedMoney(openingBase, numberValue(calculated.openingMl ?? openingBase)),
+      todayMlIssuance: calculatedMoney(issuanceBase, numberValue(calculated.issuanceMl ?? issuanceBase)),
+      dayTotal: calculatedMoney(openingBase + issuanceBase, numberValue(calculated.openingMl ?? openingBase) + numberValue(calculated.issuanceMl ?? issuanceBase)),
+      paymentReceived: calculatedMoney(paymentBase, numberValue(calculated.paymentMl ?? paymentBase)),
+      closingBalance: calculatedMoney(closingBase, numberValue(calculated.closingMl ?? closingBase)),
+      notes: typeof raw.notes === "string" ? raw.notes : undefined,
+      createdBy: legacyDay?.createdBy ?? "",
+      createdAt: legacyDay?.createdAt ?? 0,
+      updatedBy: legacyDay?.updatedBy,
+      updatedAt: legacyDay?.updatedAt ?? 0
+    }];
+  });
+  const fallbackSummary = calculateDailySummary({ doEntries });
+  const liftingCalculated = liftingProjection?.calculated && typeof liftingProjection.calculated === "object"
+    ? liftingProjection.calculated as Record<string, unknown>
+    : {};
+  const liftingRaw = rawSnap.docs.find((entryDoc) => (entryDoc.data() as { type?: string }).type === "lifting")?.data() as { raw?: Record<string, unknown> } | undefined;
+  const dayV2 = dayV2Snap.exists() ? dayV2Snap.data() as Partial<JazzLoadDay> : {};
+
+  return {
+    ...(legacyDay ?? mapDayData({}, String(dayNo))),
+    id: String(dayNo),
+    monthId,
+    dayNo,
+    doEntries,
+    lifting: {
+      openingBalance: numberValue(liftingCalculated.opening),
+      mlLifting: numberValue(liftingCalculated.lifting ?? liftingRaw?.raw?.mlLifting),
+      totalBalance: numberValue(liftingCalculated.opening) + numberValue(liftingCalculated.lifting ?? liftingRaw?.raw?.mlLifting),
+      todayMlIssuance: numberValue(liftingCalculated.issuance),
+      inHandBalance: numberValue(liftingCalculated.closing)
+    },
+    summary: { ...fallbackSummary, ...(dayV2.summary ?? {}) },
+    notes: legacyDay?.notes ?? (typeof liftingRaw?.raw?.notes === "string" ? liftingRaw.raw.notes : undefined)
+  };
+}
+
+async function loadJazzLoadV2Days(monthId: string): Promise<JazzLoadDay[]> {
+  const snap = await getDocs(query(collection(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "days"), orderBy("dayNo", "asc")));
+  if (snap.empty) {
+    throw new Error(`ledgerV2 Jazz Load projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`);
+  }
+  const days = await Promise.all(snap.docs.map((item) => hydrateJazzLoadV2Day(monthId, Number(item.data().dayNo ?? item.id))));
+  return days.sort((a, b) => a.dayNo - b.dayNo);
+}
+
 async function syncJazzLoadLedgerV2RawEntriesInBatch(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   day: JazzLoadDay,
   actorUid: string,
   timestamp: number
@@ -138,6 +274,12 @@ async function syncJazzLoadLedgerV2RawEntriesInBatch(
         doLineSortOrder: entry.doLineSortOrder,
         doName: entry.doName,
         doLine: entry.doLine,
+        bindingEffectiveFromMonthId: entry.bindingEffectiveFromMonthId,
+        bindingEffectiveFromDay: entry.bindingEffectiveFromDay,
+        bindingUpdatedAt: entry.bindingUpdatedAt,
+        bindingUpdatedBy: entry.bindingUpdatedBy,
+        bindingBackfillId: entry.bindingBackfillId,
+        bindingBackfillMode: entry.bindingBackfillMode,
         todayMlIssuanceBase: entry.todayMlIssuance.baseAmount,
         paymentReceivedBase: entry.paymentReceived.baseAmount,
         notes: entry.notes,
@@ -195,7 +337,7 @@ function jazzSettingsSummary(action: string, targetType: string, targetId: strin
 }
 
 function stageUnifiedAudit(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   input: Parameters<typeof buildAuditLogDocument>[0],
   actorRole: UserRole
 ) {
@@ -219,6 +361,7 @@ function mapDayData(data: Partial<JazzLoadDay>, id: string): JazzLoadDay {
     dayNo: Number(data.dayNo ?? id),
     date: data.date ?? "",
     status: data.status ?? "open",
+    manualOverride: data.manualOverride ?? false,
     doEntries,
     lifting: data.lifting ?? {
       openingBalance: 0,
@@ -242,19 +385,120 @@ function mapDayData(data: Partial<JazzLoadDay>, id: string): JazzLoadDay {
     reopenedAt: data.reopenedAt,
     reopenedBy: data.reopenedBy,
     reopenedByRole: data.reopenedByRole,
-    reopenedUntilAt: data.reopenedUntilAt
+    reopenedUntilAt: data.reopenedUntilAt,
+    lastDoBindingBackfillAt: data.lastDoBindingBackfillAt,
+    lastDoBindingBackfillBy: data.lastDoBindingBackfillBy,
+    lastDoBindingBackfillMode: data.lastDoBindingBackfillMode,
+    lastDoBindingBackfillId: data.lastDoBindingBackfillId
   };
 }
 
 export function roleCanJazzLoad(
   role: UserRole | null,
-  permission: "read" | "daily" | "settings" | "backup" | "monthControls"
+  permission: "read" | "daily" | "settings" | "backup" | "monthControls" | typeof MASTER_REFRESH_ACCESS
 ) {
   if (!role) return false;
   if (permission === "read") return true;
+  if (permission === MASTER_REFRESH_ACCESS) return canRunMasterRefresh(role);
   if (role === "owner") return true;
   if (role === "admin") return permission === "daily";
   return false;
+}
+
+function activeRateFor(
+  rates: JazzLoadRateConfig[],
+  primaryType: JazzLoadRateConfig["type"],
+  legacyTypes: JazzLoadRateConfig["type"][] = []
+) {
+  return rates.find((rate) => rate.active && rate.type === primaryType) ??
+    rates.find((rate) => rate.active && legacyTypes.includes(rate.type)) ??
+    null;
+}
+
+function previousMonthId(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return null;
+  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, "0")}`;
+}
+
+function parseMonthId(monthId: string) {
+  const [yearText, monthText] = monthId.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error(`Invalid month: ${monthId}`);
+  }
+  return { year, month };
+}
+
+function compareMonthIds(left: string, right: string) {
+  return left.localeCompare(right);
+}
+
+function nextMonthId(monthId: string) {
+  const { year, month } = parseMonthId(monthId);
+  return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
+}
+
+function monthIdsInRange(fromMonthId: string, toMonthId: string) {
+  parseMonthId(fromMonthId);
+  parseMonthId(toMonthId);
+  if (compareMonthIds(fromMonthId, toMonthId) > 0) {
+    throw new Error("From month must be before or equal to To month.");
+  }
+  const months: string[] = [];
+  let cursor = fromMonthId;
+  while (compareMonthIds(cursor, toMonthId) <= 0) {
+    months.push(cursor);
+    if (months.length > 120) throw new Error("Month range is too large.");
+    cursor = nextMonthId(cursor);
+  }
+  return months;
+}
+
+function currentJazzLoadBindingDate(date = new Date()) {
+  return {
+    monthId: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+    dayNo: date.getDate()
+  };
+}
+
+async function loadActiveJazzLoadRates(): Promise<ActiveJazzLoadRates> {
+  const ratesSnap = await getDocs(query(rateCollection(), orderBy("updatedAt", "desc")));
+  const rates = ratesSnap.docs.map((rateDoc) => rateDoc.data() as JazzLoadRateConfig);
+  return {
+    mlRate: activeRateFor(rates, "ml_addition"),
+    commission1Rate: activeRateFor(rates, "commission1_adjustment", ["adjustment"]),
+    commission2Rate: activeRateFor(rates, "commission2_payment", ["commission"])
+  };
+}
+
+async function loadJazzLoadMonthForRefresh(monthId: string, user: User | null, role: UserRole | null) {
+  const monthSnap = await getDoc(monthRef(monthId));
+  if (monthSnap.exists()) return monthSnap.data() as JazzLoadMonth;
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  return {
+    id: monthId,
+    label: monthId,
+    status: "open" as const,
+    createdBy: currentActor.userId,
+    updatedBy: currentActor.userId,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  } satisfies JazzLoadMonth;
+}
+
+async function loadJazzLoadMonthlySummary(monthId: string) {
+  const summarySnap = await getDoc(doc(monthRef(monthId), "summary", "monthly"));
+  return summarySnap.exists() ? (summarySnap.data() as JazzLoadMonthlySummary) : null;
+}
+
+async function loadJazzLoadDoLineBindings() {
+  const snap = await getDocs(doLineBindingCollection());
+  return snap.docs.map((item) => item.data() as JazzLoadDoLineBinding);
 }
 
 export function subscribeJazzLoadRates(
@@ -262,9 +506,9 @@ export function subscribeJazzLoadRates(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(rateCollection(), orderBy("updatedAt", "desc")),
+    rateCollection(),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((rateDoc) => rateDoc.data() as JazzLoadRateConfig), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((rateDoc) => rateDoc.data() as JazzLoadRateConfig)), snap.metadata),
     onError
   );
 }
@@ -298,9 +542,9 @@ export function subscribeJazzLoadDoNames(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(doNameCollection(), orderBy("name", "asc")),
+    doNameCollection(),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((nameDoc) => nameDoc.data() as JazzLoadDoName), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((nameDoc) => nameDoc.data() as JazzLoadDoName)), snap.metadata),
     onError
   );
 }
@@ -310,9 +554,21 @@ export function subscribeJazzLoadDoLines(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(doLineCollection(), orderBy("line", "asc")),
+    doLineCollection(),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((lineDoc) => lineDoc.data() as JazzLoadDoLine), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((lineDoc) => lineDoc.data() as JazzLoadDoLine)), snap.metadata),
+    onError
+  );
+}
+
+export function subscribeJazzLoadDoLineBindings(
+  onNext: (bindings: JazzLoadDoLineBinding[], metadata: FirestoreSnapshotMeta) => void,
+  onError?: (error: FirestoreError) => void
+) {
+  return onSnapshot(
+    doLineBindingCollection(),
+    { includeMetadataChanges: true },
+    (snap) => onNext(snap.docs.map((bindingDoc) => bindingDoc.data() as JazzLoadDoLineBinding), snap.metadata),
     onError
   );
 }
@@ -346,8 +602,31 @@ export function subscribeJazzLoadMonths(
 export function subscribeJazzLoadDays(
   monthId: string,
   onNext: (days: JazzLoadDay[], metadata: FirestoreSnapshotMeta) => void,
-  onError?: (error: FirestoreError) => void
+  onError?: (error: FirestoreError | Error) => void,
+  options: LedgerUiReadOptions = {}
 ) {
+  if (options.readDecision?.mode === "v2") {
+    try {
+      assertLedgerV2UiReadAllowed(options.readDecision);
+    } catch (error) {
+      setTimeout(() => onError?.(error as Error), 0);
+      return () => {};
+    }
+    return onSnapshot(
+      query(collection(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "days"), orderBy("dayNo", "asc")),
+      { includeMetadataChanges: true },
+      (snap) => {
+        if (snap.empty) {
+          onError?.(new Error(`ledgerV2 Jazz Load projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`));
+          return;
+        }
+        void Promise.all(snap.docs.map((item) => hydrateJazzLoadV2Day(monthId, Number(item.data().dayNo ?? item.id))))
+          .then((days) => onNext(days.sort((a, b) => a.dayNo - b.dayNo), snap.metadata))
+          .catch((error: Error) => onError?.(error));
+      },
+      onError as (error: FirestoreError) => void
+    );
+  }
   return onSnapshot(
     query(collection(monthRef(monthId), "days"), orderBy("dayNo", "asc")),
     { includeMetadataChanges: true },
@@ -359,8 +638,23 @@ export function subscribeJazzLoadDays(
 export function subscribeJazzLoadMonthlySummary(
   monthId: string,
   onNext: (summary: JazzLoadMonthlySummary | null, metadata: FirestoreSnapshotMeta) => void,
-  onError?: (error: FirestoreError) => void
+  onError?: (error: FirestoreError | Error) => void,
+  options: LedgerUiReadOptions = {}
 ) {
+  if (options.readDecision?.mode === "v2") {
+    try {
+      assertLedgerV2UiReadAllowed(options.readDecision);
+    } catch (error) {
+      setTimeout(() => onError?.(error as Error), 0);
+      return () => {};
+    }
+    return onSnapshot(
+      doc(requireDb(), "ledgerV2", "jazzLoad", "months", monthId, "summary", "home"),
+      { includeMetadataChanges: true },
+      (snap) => onNext(snap.exists() ? (snap.data() as JazzLoadMonthlySummary) : null, snap.metadata),
+      onError as (error: FirestoreError) => void
+    );
+  }
   return onSnapshot(
     doc(monthRef(monthId), "summary", "monthly"),
     { includeMetadataChanges: true },
@@ -374,7 +668,11 @@ async function listJazzLoadDays(monthId: string) {
   return snap.docs.map((item) => mapDayData(item.data() as Partial<JazzLoadDay>, item.id));
 }
 
-export async function loadJazzLoadDays(monthId: string) {
+export async function loadJazzLoadDays(monthId: string, options: LedgerUiReadOptions = {}) {
+  if (options.readDecision?.mode === "v2") {
+    assertLedgerV2UiReadAllowed(options.readDecision);
+    return loadJazzLoadV2Days(monthId);
+  }
   return listJazzLoadDays(monthId);
 }
 
@@ -387,6 +685,7 @@ export async function upsertJazzLoadRate(
   const timestamp = now();
   const rate: JazzLoadRateConfig = {
     ...input,
+    sortOrder: Number(input.sortOrder) || 1,
     createdBy: input.createdBy ?? currentActor.userId,
     createdAt: input.createdAt ?? timestamp,
     updatedBy: currentActor.userId,
@@ -420,6 +719,45 @@ export async function upsertJazzLoadRate(
     },
     currentActor.userRole ?? "viewer"
   );
+  await batch.commit();
+}
+
+export async function deleteJazzLoadRate(
+  id: string,
+  user?: User | null,
+  role?: UserRole | null
+) {
+  const currentActor = user ? actor(user, role) : null;
+  const timestamp = now();
+  const batch = writeBatch(requireDb());
+  batch.delete(doc(rateCollection(), id));
+  if (currentActor) {
+    const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+    batch.set(doc(settingsAuditCollection(), auditId), cleanForFirestore({
+      id: auditId,
+      action: "delete-rate",
+      ...currentActor,
+      targetType: "rate",
+      targetId: id,
+      createdAt: timestamp
+    }));
+    stageUnifiedAudit(
+      batch,
+      {
+        id: auditId,
+        createdAt: timestamp,
+        module: "settings",
+        action: mapJazzSettingsAction("delete-rate"),
+        summary: jazzSettingsSummary("delete-rate", "rate", id),
+        actorUid: currentActor.userId,
+        actorEmail: currentActor.userEmail,
+        targetType: "rate",
+        targetId: id,
+        sourcePath: `jazzLoadSettings/audit/items/${auditId}`
+      },
+      currentActor.userRole ?? "viewer"
+    );
+  }
   await batch.commit();
 }
 
@@ -516,7 +854,7 @@ export async function upsertJazzLoadDoName(
 ) {
   const currentActor = user ? actor(user, role) : null;
   const timestamp = now();
-  const nextName = { ...name, createdAt: name.createdAt ?? timestamp, updatedAt: timestamp };
+  const nextName = { ...name, sortOrder: Number(name.sortOrder) || 1, createdAt: name.createdAt ?? timestamp, updatedAt: timestamp };
   const batch = writeBatch(requireDb());
   batch.set(doc(doNameCollection(), name.id), cleanForFirestore(nextName), { merge: true });
   if (currentActor) {
@@ -596,7 +934,7 @@ export async function upsertJazzLoadDoLine(
 ) {
   const currentActor = user ? actor(user, role) : null;
   const timestamp = now();
-  const nextLine = { ...line, createdAt: line.createdAt ?? timestamp, updatedAt: timestamp };
+  const nextLine = { ...line, sortOrder: Number(line.sortOrder) || 1, createdAt: line.createdAt ?? timestamp, updatedAt: timestamp };
   const batch = writeBatch(requireDb());
   batch.set(doc(doLineCollection(), line.id), cleanForFirestore(nextLine), { merge: true });
   if (currentActor) {
@@ -627,6 +965,84 @@ export async function upsertJazzLoadDoLine(
       currentActor.userRole ?? "viewer"
     );
   }
+  await batch.commit();
+}
+
+export async function upsertJazzLoadDoLineBinding(
+  binding: Omit<JazzLoadDoLineBinding, "createdBy" | "createdAt" | "updatedAt"> & Partial<Pick<JazzLoadDoLineBinding, "createdBy" | "createdAt">>,
+  user: User | null,
+  role: UserRole | null
+) {
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  const nextBinding: JazzLoadDoLineBinding = {
+    ...binding,
+    createdBy: binding.createdBy ?? currentActor.userId,
+    createdAt: binding.createdAt ?? timestamp,
+    updatedBy: currentActor.userId,
+    updatedAt: timestamp
+  };
+  const batch = writeBatch(requireDb());
+  const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+  batch.set(doc(doLineBindingCollection(), nextBinding.id), cleanForFirestore(nextBinding), { merge: true });
+  batch.set(doc(settingsAuditCollection(), auditId), cleanForFirestore({
+    id: auditId,
+    action: "upsert-do-line-binding",
+    ...currentActor,
+    targetType: "doLineBinding",
+    targetId: nextBinding.id,
+    after: nextBinding,
+    createdAt: timestamp
+  }));
+  stageUnifiedAudit(
+    batch,
+    {
+      id: auditId,
+      createdAt: timestamp,
+      module: "settings",
+      action: "jazz-do-change",
+      summary: `Updated DO line binding ${nextBinding.doLineName ?? nextBinding.doLineId}`,
+      actorUid: currentActor.userId,
+      actorEmail: currentActor.userEmail,
+      targetType: "doLineBinding",
+      targetId: nextBinding.id,
+      sourcePath: `jazzLoadSettings/audit/items/${auditId}`
+    },
+    currentActor.userRole ?? "viewer"
+  );
+  await batch.commit();
+}
+
+export async function updateJazzLoadRateSortOrder(before: JazzLoadRateConfig[], after: JazzLoadRateConfig[]) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(doc(rateCollection(), item.id), cleanForFirestore({ sortOrder: item.sortOrder, updatedAt: timestamp }), { merge: true });
+  });
+  await batch.commit();
+}
+
+export async function updateJazzLoadDoNameSortOrder(before: JazzLoadDoName[], after: JazzLoadDoName[]) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(doc(doNameCollection(), item.id), cleanForFirestore({ sortOrder: item.sortOrder, updatedAt: timestamp }), { merge: true });
+  });
+  await batch.commit();
+}
+
+export async function updateJazzLoadDoLineSortOrder(before: JazzLoadDoLine[], after: JazzLoadDoLine[]) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(doc(doLineCollection(), item.id), cleanForFirestore({ sortOrder: item.sortOrder, updatedAt: timestamp }), { merge: true });
+  });
   await batch.commit();
 }
 
@@ -748,6 +1164,7 @@ export async function saveJazzLoadDay(
   role: UserRole | null,
   action: "save-day" | "close-day" | "reopen-day" = "save-day"
 ) {
+  if (action === "reopen-day" && !canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const currentActor = actor(user, role);
   const timestamp = now();
   const nextDays = [...allDays.filter((item) => item.dayNo !== day.dayNo), day].sort((a, b) => a.dayNo - b.dayNo);
@@ -847,48 +1264,88 @@ function matchingPreviousEntry(
   return undefined;
 }
 
+type PreviousJazzLoadMonthSummarySeed = Pick<
+  JazzLoadMonthlySummary,
+  "totalClosingBase" | "totalClosingMl" | "latestInHandBalance"
+>;
+
 export function rechainJazzLoadDays(
   days: JazzLoadDay[],
   activeRates: ActiveJazzLoadRates,
   userId: string,
   timestamp: number,
-  previousMonthDays: JazzLoadDay[] = []
+  previousMonthDays: JazzLoadDay[] = [],
+  previousMonthSummary?: PreviousJazzLoadMonthSummarySeed | null,
+  doLineBindings: JazzLoadDoLineBinding[] = []
 ) {
   const sortedDays = [...days].sort((a, b) => a.dayNo - b.dayNo);
   const seedDays = [...previousMonthDays].sort((a, b) => a.dayNo - b.dayNo);
+  const finalSeedDay = seedDays.at(-1);
+  let previousSummaryClosing = previousMonthSummary
+    ? {
+        closingBase: previousMonthSummary.totalClosingBase,
+        closingMl: previousMonthSummary.totalClosingMl
+      }
+    : finalSeedDay?.summary
+      ? {
+          closingBase: finalSeedDay.summary.closingBase,
+          closingMl: finalSeedDay.summary.closingMl
+        }
+      : undefined;
+  const seedInHandBalance = previousMonthSummary?.latestInHandBalance ?? finalSeedDay?.lifting.inHandBalance;
   const recalculatedDays: JazzLoadDay[] = [];
 
   for (const day of sortedDays) {
+    const resolvedRates = resolveJazzLoadRatesForDay({
+      dayRecord: day,
+      activeRates,
+      mode: "master-refresh",
+      resolvedAt: timestamp
+    });
     const doEntries = day.doEntries.map((entry) => {
       const previous = matchingPreviousEntry([...seedDays, ...recalculatedDays], entry);
+      const savedDoName = (entry.doName ?? "").trim();
+      const binding = resolveDoLineBindingForDate(doLineBindings, entry.doLineId, day.monthId, day.dayNo);
+      const bindingMatchesSavedName = Boolean(
+        binding &&
+        savedDoName &&
+        (
+          (entry.doNameId && entry.doNameId === binding.doNameId) ||
+          savedDoName.localeCompare(binding.doName, undefined, { sensitivity: "base" }) === 0
+        )
+      );
+      const shouldUseBindingName = !savedDoName;
       return calculateDoRow(
         {
           id: entry.id,
           doProfileId: entry.doProfileId,
-          doNameId: entry.doNameId,
+          doNameId: entry.doNameId ?? (shouldUseBindingName ? binding?.doNameId : undefined),
           doLineId: entry.doLineId,
           assignmentId: entry.assignmentId,
           doLineSortOrder: entry.doLineSortOrder,
-          doName: entry.doName,
-          doLine: entry.doLine,
+          doName: savedDoName ? entry.doName : binding?.doName || "",
+          doLine: entry.doLine || binding?.doLineName,
+          bindingEffectiveFromMonthId: entry.bindingEffectiveFromMonthId ?? (shouldUseBindingName || bindingMatchesSavedName ? binding?.effectiveFromMonthId : undefined),
+          bindingEffectiveFromDay: entry.bindingEffectiveFromDay ?? (shouldUseBindingName || bindingMatchesSavedName ? binding?.effectiveFromDay : undefined),
           openingBase: previous?.closingBalance.baseAmount ?? entry.openingBalance.baseAmount,
           todayMlIssuanceBase: entry.todayMlIssuance.baseAmount,
           paymentReceivedBase: entry.paymentReceived.baseAmount,
           notes: entry.notes
         },
-        activeRates,
+        resolvedRates.rates,
         { createdBy: userId, previous: entry, timestamp }
       );
     });
-    const summary = calculateDailySummary({ doEntries }, activeRates, timestamp);
-    const previousDay = recalculatedDays.at(-1) ?? seedDays.at(-1);
+    const summary = calculateChainedDailySummary({ doEntries }, resolvedRates.rates, timestamp, previousSummaryClosing);
+    const previousDay = recalculatedDays.at(-1);
     recalculatedDays.push({
       ...day,
       doEntries,
       summary,
+      appliedRates: snapshotResolvedRates(resolvedRates.rates, timestamp),
       lifting: calculateDailyLifting(
         {
-          openingBalance: previousDay?.lifting.inHandBalance ?? day.lifting.openingBalance,
+          openingBalance: previousDay?.lifting.inHandBalance ?? seedInHandBalance ?? day.lifting.openingBalance,
           mlLifting: day.lifting.mlLifting
         },
         summary.issuanceMl
@@ -896,25 +1353,37 @@ export function rechainJazzLoadDays(
       updatedBy: userId,
       updatedAt: timestamp
     });
+    previousSummaryClosing = {
+      closingBase: summary.closingBase,
+      closingMl: summary.closingMl
+    };
   }
 
   return recalculatedDays;
 }
 
-export function recalculateJazzLoadMonth(
+export async function recalculateJazzLoadMonth(
   month: JazzLoadMonth,
   days: JazzLoadDay[],
   activeRates: ActiveJazzLoadRates,
   user: User | null,
   role: UserRole | null,
-  options: { previousMonthDays?: JazzLoadDay[] } = {}
+  options: { previousMonthDays?: JazzLoadDay[]; previousMonthSummary?: PreviousJazzLoadMonthSummarySeed | null; doLineBindings?: JazzLoadDoLineBinding[] } = {}
 ) {
   if (!activeRates.mlRate) throw new Error("Active Jazz Load Addition Rate is required before recalculating.");
   const currentActor = actor(user, role);
   const timestamp = now();
-  const recalculatedDays = rechainJazzLoadDays(days, activeRates, currentActor.userId, timestamp, options.previousMonthDays ?? []);
+  const recalculatedDays = rechainJazzLoadDays(
+    days,
+    activeRates,
+    currentActor.userId,
+    timestamp,
+    options.previousMonthDays ?? [],
+    options.previousMonthSummary ?? null,
+    options.doLineBindings ?? []
+  );
   const summary = calculateMonthlySummary(month.id, recalculatedDays);
-  const batch = writeBatch(requireDb());
+  const batch = new ChunkedFirestoreBatch(requireDb(), `jazzLoad:${month.id}:recalculateMonth`);
   const nextMonth: JazzLoadMonth = {
     ...month,
     closingBalance: summary.totalClosingBase,
@@ -929,7 +1398,12 @@ export function recalculateJazzLoadMonth(
 
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
   recalculatedDays.forEach((day) => {
-    batch.set(dayRef(month.id, day.dayNo), cleanForFirestore(day), { merge: true });
+    batch.set(dayRef(month.id, day.dayNo), cleanForFirestore({
+      ...day,
+      recalculatedAt: timestamp,
+      recalculatedBy: currentActor.userId,
+      recalculatedByRole: currentActor.userRole
+    }), { merge: true });
     day.doEntries.forEach((entry) => {
       batch.set(doc(dayRef(month.id, day.dayNo), "doEntries", entry.id), cleanForFirestore(entry), { merge: true });
     });
@@ -961,7 +1435,332 @@ export function recalculateJazzLoadMonth(
     currentActor.userRole ?? "viewer"
   );
 
-  return batch.commit().then(() => ({ month: nextMonth, days: recalculatedDays, summary }));
+  await batch.commit();
+  return { month: nextMonth, days: recalculatedDays, summary };
+}
+
+export async function recalculateJazzLoadLedgerLocal(
+  monthId: string,
+  user: User | null,
+  role: UserRole | null
+) {
+  assertMasterRefreshAccess(role, "Jazz Load master refresh");
+  const previousId = previousMonthId(monthId);
+  const [month, days, previousMonthDays, previousMonthSummary, activeRates, doLineBindings] = await Promise.all([
+    loadJazzLoadMonthForRefresh(monthId, user, role),
+    loadJazzLoadDays(monthId),
+    previousId ? loadJazzLoadDays(previousId).catch(() => []) : Promise.resolve([]),
+    previousId ? loadJazzLoadMonthlySummary(previousId).catch(() => null) : Promise.resolve(null),
+    loadActiveJazzLoadRates(),
+    loadJazzLoadDoLineBindings()
+  ]);
+  const result = await recalculateJazzLoadMonth(month, days, activeRates, user, role, {
+    previousMonthDays,
+    previousMonthSummary,
+    doLineBindings
+  });
+  return {
+    ok: true,
+    calcRunId: undefined,
+    invariantIssueCount: 0,
+    dayCount: result.days.length,
+    ...result
+  };
+}
+
+const DO_BINDING_BACKFILL_MODE: JazzLoadDoBindingBackfillMode = "current-binding-history-repair";
+
+type JazzLoadDoBindingBackfillInput = {
+  fromMonthId: string;
+  toMonthId: string;
+  currentBindingMonthId?: string;
+  currentBindingDayNo?: number;
+  backfillId?: string;
+};
+
+type JazzLoadDoBindingBackfillChangedDay = {
+  day: JazzLoadDay;
+  updatedEntries: JazzLoadDoEntry[];
+  changedEntries: JazzLoadDoEntry[];
+};
+
+function doBindingSnapshotIncomplete(entry: JazzLoadDoEntry) {
+  return !entry.doNameId ||
+    !entry.doName.trim() ||
+    !entry.bindingEffectiveFromMonthId ||
+    !entry.bindingEffectiveFromDay;
+}
+
+function doBindingEntryNeedsChange(entry: JazzLoadDoEntry, binding: JazzLoadDoLineBinding) {
+  const nextLine = binding.doLineName ?? entry.doLine;
+  return entry.doNameId !== binding.doNameId ||
+    entry.doName !== binding.doName ||
+    entry.doLine !== nextLine ||
+    entry.bindingEffectiveFromMonthId !== binding.effectiveFromMonthId ||
+    entry.bindingEffectiveFromDay !== binding.effectiveFromDay;
+}
+
+function doBindingBackfillSample(
+  day: JazzLoadDay,
+  entry: JazzLoadDoEntry,
+  binding: JazzLoadDoLineBinding
+): JazzLoadDoBindingBackfillSample {
+  return {
+    monthId: day.monthId,
+    dayNo: day.dayNo,
+    rowId: entry.id,
+    doLineId: entry.doLineId,
+    doLine: entry.doLine ?? binding.doLineName,
+    oldDoName: entry.doName,
+    newDoName: binding.doName
+  };
+}
+
+function buildDoBindingBackfillPlan(input: {
+  daysByMonth: Array<{ monthId: string; days: JazzLoadDay[] }>;
+  doLineBindings: JazzLoadDoLineBinding[];
+  fromMonthId: string;
+  toMonthId: string;
+  currentBindingMonthId: string;
+  currentBindingDayNo: number;
+  backfillId: string;
+  actorUid?: string;
+  timestamp?: number;
+}) {
+  const preview: JazzLoadDoBindingBackfillPreview = {
+    backfillId: input.backfillId,
+    fromMonthId: input.fromMonthId,
+    toMonthId: input.toMonthId,
+    currentBindingMonthId: input.currentBindingMonthId,
+    currentBindingDayNo: input.currentBindingDayNo,
+    daysScanned: 0,
+    rowsScanned: 0,
+    rowsThatWillChange: 0,
+    rowsAlreadyCorrect: 0,
+    rowsMissingBinding: 0,
+    rowsSkippedNoCurrentBinding: 0,
+    sampleChanges: []
+  };
+  const changedDays: JazzLoadDoBindingBackfillChangedDay[] = [];
+  const timestamp = input.timestamp ?? now();
+
+  for (const month of input.daysByMonth) {
+    for (const day of month.days) {
+      preview.daysScanned += 1;
+      const changedEntries: JazzLoadDoEntry[] = [];
+      const updatedEntries = day.doEntries.map((entry) => {
+        preview.rowsScanned += 1;
+        if (doBindingSnapshotIncomplete(entry)) preview.rowsMissingBinding += 1;
+        if (!entry.doLineId) {
+          preview.rowsSkippedNoCurrentBinding += 1;
+          return entry;
+        }
+        const binding = resolveDoLineBindingForDate(
+          input.doLineBindings,
+          entry.doLineId,
+          input.currentBindingMonthId,
+          input.currentBindingDayNo
+        );
+        if (!binding) {
+          preview.rowsSkippedNoCurrentBinding += 1;
+          return entry;
+        }
+        if (!doBindingEntryNeedsChange(entry, binding)) {
+          preview.rowsAlreadyCorrect += 1;
+          return entry;
+        }
+        preview.rowsThatWillChange += 1;
+        if (preview.sampleChanges.length < 8) {
+          preview.sampleChanges.push(doBindingBackfillSample(day, entry, binding));
+        }
+        const updatedEntry: JazzLoadDoEntry = {
+          ...entry,
+          doNameId: binding.doNameId,
+          doName: binding.doName,
+          doLine: binding.doLineName ?? entry.doLine,
+          bindingEffectiveFromMonthId: binding.effectiveFromMonthId,
+          bindingEffectiveFromDay: binding.effectiveFromDay,
+          bindingUpdatedAt: timestamp,
+          bindingUpdatedBy: input.actorUid,
+          bindingBackfillId: input.backfillId,
+          bindingBackfillMode: DO_BINDING_BACKFILL_MODE
+        };
+        changedEntries.push(updatedEntry);
+        return updatedEntry;
+      });
+      if (changedEntries.length > 0) {
+        changedDays.push({ day, updatedEntries, changedEntries });
+      }
+    }
+  }
+
+  return { preview, changedDays };
+}
+
+async function loadJazzLoadBackfillScope(input: JazzLoadDoBindingBackfillInput) {
+  const currentBindingDate = input.currentBindingMonthId && input.currentBindingDayNo
+    ? { monthId: input.currentBindingMonthId, dayNo: input.currentBindingDayNo }
+    : currentJazzLoadBindingDate();
+  const months = monthIdsInRange(input.fromMonthId, input.toMonthId);
+  const [doLineBindings, daysByMonth] = await Promise.all([
+    loadJazzLoadDoLineBindings(),
+    Promise.all(months.map(async (scopeMonthId) => ({
+      monthId: scopeMonthId,
+      days: await listJazzLoadDays(scopeMonthId)
+    })))
+  ]);
+  return {
+    doLineBindings,
+    daysByMonth,
+    currentBindingMonthId: currentBindingDate.monthId,
+    currentBindingDayNo: currentBindingDate.dayNo,
+    backfillId: input.backfillId ?? `${now()}-${Math.random().toString(36).slice(2, 8)}`
+  };
+}
+
+export async function previewJazzLoadDoBindingBackfill(
+  input: JazzLoadDoBindingBackfillInput
+): Promise<JazzLoadDoBindingBackfillPreview> {
+  const scope = await loadJazzLoadBackfillScope(input);
+  return buildDoBindingBackfillPlan({
+    daysByMonth: scope.daysByMonth,
+    doLineBindings: scope.doLineBindings,
+    fromMonthId: input.fromMonthId,
+    toMonthId: input.toMonthId,
+    currentBindingMonthId: scope.currentBindingMonthId,
+    currentBindingDayNo: scope.currentBindingDayNo,
+    backfillId: scope.backfillId
+  }).preview;
+}
+
+function backfilledSummaryDoBalances(
+  summary: JazzLoadMonthlySummary,
+  doLineBindings: JazzLoadDoLineBinding[],
+  currentBindingMonthId: string,
+  currentBindingDayNo: number
+): JazzLoadMonthlySummary["doBalances"] {
+  return summary.doBalances.map((balance) => {
+    if (!balance.doLineId) return balance;
+    const binding = resolveDoLineBindingForDate(doLineBindings, balance.doLineId, currentBindingMonthId, currentBindingDayNo);
+    if (!binding) return balance;
+    return {
+      ...balance,
+      doNameId: binding.doNameId,
+      doName: binding.doName,
+      doLine: binding.doLineName ?? balance.doLine
+    };
+  });
+}
+
+export async function applyJazzLoadDoBindingBackfill(
+  input: JazzLoadDoBindingBackfillInput,
+  user: User | null,
+  role: UserRole | null
+): Promise<JazzLoadDoBindingBackfillPreview> {
+  if (role !== "owner") throw new Error("Only owner can run Jazz Load DO binding repair.");
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  const scope = await loadJazzLoadBackfillScope(input);
+  const { preview, changedDays } = buildDoBindingBackfillPlan({
+    daysByMonth: scope.daysByMonth,
+    doLineBindings: scope.doLineBindings,
+    fromMonthId: input.fromMonthId,
+    toMonthId: input.toMonthId,
+    currentBindingMonthId: scope.currentBindingMonthId,
+    currentBindingDayNo: scope.currentBindingDayNo,
+    backfillId: scope.backfillId,
+    actorUid: currentActor.userId,
+    timestamp
+  });
+  if (changedDays.length === 0) return preview;
+
+  const batch = new ChunkedFirestoreBatch(requireDb(), `jazzLoad:doBindingBackfill:${scope.backfillId}`);
+  const changedDaysByMonth = new Map<string, JazzLoadDoBindingBackfillChangedDay[]>();
+
+  for (const changedDay of changedDays) {
+    const day = changedDay.day;
+    changedDaysByMonth.set(day.monthId, [...(changedDaysByMonth.get(day.monthId) ?? []), changedDay]);
+    batch.set(dayRef(day.monthId, day.dayNo), cleanForFirestore({
+      doEntries: changedDay.updatedEntries,
+      lastDoBindingBackfillAt: timestamp,
+      lastDoBindingBackfillBy: currentActor.userId,
+      lastDoBindingBackfillMode: DO_BINDING_BACKFILL_MODE,
+      lastDoBindingBackfillId: scope.backfillId
+    }), { merge: true });
+
+    const existingRawSnap = await getDocs(ledgerV2JazzLoadRawEntries(day.monthId, day.dayNo));
+    const existingRawIds = new Set(existingRawSnap.docs.map((item) => item.id));
+    for (const entry of changedDay.changedEntries) {
+      const patch = cleanForFirestore({
+        doNameId: entry.doNameId,
+        doName: entry.doName,
+        doLine: entry.doLine,
+        bindingEffectiveFromMonthId: entry.bindingEffectiveFromMonthId,
+        bindingEffectiveFromDay: entry.bindingEffectiveFromDay,
+        bindingUpdatedAt: entry.bindingUpdatedAt,
+        bindingUpdatedBy: entry.bindingUpdatedBy,
+        bindingBackfillId: entry.bindingBackfillId,
+        bindingBackfillMode: entry.bindingBackfillMode
+      });
+      batch.set(doc(dayRef(day.monthId, day.dayNo), "doEntries", entry.id), patch, { merge: true });
+      const rawId = `do-${entry.id}`;
+      if (existingRawIds.has(rawId)) {
+        batch.set(doc(ledgerV2JazzLoadRawEntries(day.monthId, day.dayNo), rawId), cleanForFirestore({
+          monthId: day.monthId,
+          dayNo: day.dayNo,
+          raw: patch,
+          meta: {
+            updatedAt: timestamp,
+            updatedBy: currentActor.userId,
+            status: typeof navigator !== "undefined" && navigator.onLine ? "pending" : "preview",
+            calculationVersion: LEDGER_CALC_VERSION
+          }
+        }), { merge: true });
+      }
+    }
+  }
+
+  for (const [summaryMonthId] of changedDaysByMonth) {
+    const summary = await loadJazzLoadMonthlySummary(summaryMonthId);
+    if (!summary) continue;
+    batch.set(doc(monthRef(summaryMonthId), "summary", "monthly"), cleanForFirestore({
+      doBalances: backfilledSummaryDoBalances(
+        summary,
+        scope.doLineBindings,
+        scope.currentBindingMonthId,
+        scope.currentBindingDayNo
+      )
+    }), { merge: true });
+  }
+
+  const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+  batch.set(doc(settingsAuditCollection(), auditId), cleanForFirestore({
+    id: auditId,
+    action: "do-binding-backfill",
+    ...currentActor,
+    targetType: "doBindingBackfill",
+    targetId: scope.backfillId,
+    after: preview,
+    createdAt: timestamp
+  }));
+  stageUnifiedAudit(
+    batch,
+    {
+      id: auditId,
+      createdAt: timestamp,
+      module: "jazzLoad",
+      action: "do-binding-backfill",
+      summary: `Applied Jazz Load DO binding repair to ${preview.rowsThatWillChange} row${preview.rowsThatWillChange === 1 ? "" : "s"}`,
+      actorUid: currentActor.userId,
+      actorEmail: currentActor.userEmail,
+      targetType: "doBindingBackfill",
+      targetId: scope.backfillId,
+      sourcePath: `jazzLoadSettings/audit/items/${auditId}`
+    },
+    currentActor.userRole ?? "viewer"
+  );
+  await batch.commit();
+  return preview;
 }
 
 export function reopenJazzLoadDaysFor15Minutes(
@@ -972,6 +1771,7 @@ export function reopenJazzLoadDaysFor15Minutes(
   role: UserRole | null,
   reopenUntilAt?: number
 ) {
+  if (!canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const currentActor = actor(user, role);
   const timestamp = now();
   const nextDays = allDays
@@ -995,7 +1795,13 @@ export function reopenJazzLoadDaysFor15Minutes(
   reopenedDays.forEach((day) => {
     const payload = cleanForFirestore({
       ...day,
-      status: "open" as const,
+      status: "reopen" as const,
+      manualOverride: true,
+      closedAt: undefined,
+      closedBy: undefined,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
       reopenedAt: timestamp,
       reopenedBy: currentActor.userId,
       reopenedByRole: currentActor.userRole,
@@ -1005,7 +1811,15 @@ export function reopenJazzLoadDaysFor15Minutes(
     });
     batch.set(
       dayRef(month.id, day.dayNo),
-      reopenUntilAt ? payload : { ...payload, reopenedUntilAt: deleteField() },
+      reopenUntilAt ? payload : {
+        ...payload,
+        closedAt: deleteField(),
+        closedBy: deleteField(),
+        lockedAt: deleteField(),
+        lockedBy: deleteField(),
+        lockedByRole: deleteField(),
+        reopenedUntilAt: deleteField()
+      },
       { merge: true }
     );
   });
@@ -1076,6 +1890,7 @@ export function closeJazzLoadDaysExceptToday(
     const payload = cleanForFirestore({
       ...day,
       status: "closed",
+      manualOverride: true,
       closedAt: timestamp,
       closedBy: currentActor.userId,
       lockedAt: timestamp,
@@ -1197,9 +2012,10 @@ export async function listJazzLoadBackup(): Promise<JazzLoadBackup> {
     getDocs(query(commissionCollection(), orderBy("updatedAt", "desc"))),
     getDocs(query(doProfileCollection(), orderBy("name", "asc")))
   ]);
-  const [namesSnap, linesSnap] = await Promise.all([
+  const [namesSnap, linesSnap, lineBindingsSnap] = await Promise.all([
     getDocs(query(doNameCollection(), orderBy("name", "asc"))),
-    getDocs(query(doLineCollection(), orderBy("line", "asc")))
+    getDocs(query(doLineCollection(), orderBy("line", "asc"))),
+    getDocs(doLineBindingCollection())
   ]);
   const months = monthsSnap.docs.map((item) => item.data() as JazzLoadMonth);
   const daysNested = await Promise.all(months.map((month) => listJazzLoadDays(month.id)));
@@ -1217,6 +2033,7 @@ export async function listJazzLoadBackup(): Promise<JazzLoadBackup> {
     doProfiles: profilesSnap.docs.map((item) => item.data() as JazzLoadDoProfile),
     doNames: namesSnap.docs.map((item) => item.data() as JazzLoadDoName),
     doLines: linesSnap.docs.map((item) => item.data() as JazzLoadDoLine),
+    doLineBindings: lineBindingsSnap.docs.map((item) => item.data() as JazzLoadDoLineBinding),
     doAssignments: assignmentsNested.flat()
   };
 }
@@ -1232,6 +2049,7 @@ export async function restoreJazzLoadBackup(
   for (const profile of backup.doProfiles ?? []) batch.set(doc(doProfileCollection(), profile.id), cleanForFirestore(profile), { merge: true });
   for (const name of backup.doNames ?? []) batch.set(doc(doNameCollection(), name.id), cleanForFirestore(name), { merge: true });
   for (const line of backup.doLines ?? []) batch.set(doc(doLineCollection(), line.id), cleanForFirestore(line), { merge: true });
+  for (const binding of backup.doLineBindings ?? []) batch.set(doc(doLineBindingCollection(), binding.id), cleanForFirestore(binding), { merge: true });
   for (const month of backup.months ?? []) batch.set(monthRef(month.id), cleanForFirestore(month), { merge: true });
   for (const day of backup.days ?? []) {
     batch.set(dayRef(day.monthId, day.dayNo), cleanForFirestore(day), { merge: true });

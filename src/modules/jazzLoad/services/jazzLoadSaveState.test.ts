@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getJazzLoadSaveState } from "./jazzLoadSaveState";
-import type { ActiveJazzLoadRates } from "../types/jazzLoad.types";
+import type { ActiveJazzLoadRates, JazzLoadCalculationRates } from "../types/jazzLoad.types";
 
 const activeRates: ActiveJazzLoadRates = {
   mlRate: { id: "ml", name: "ML", type: "ml_addition", percentage: 2.6, active: true, createdBy: "u", createdAt: 1, updatedAt: 1 },
@@ -59,5 +59,18 @@ describe("jazzLoadSaveState", () => {
       validation: { valid: false, errors: ["301 issuance cannot be negative."] }
     }).reason).toBe("Invalid input");
     expect(getJazzLoadSaveState({ ...validInput, saving: true }).reason).toBe("Save already in progress");
+  });
+
+  it("accepts saved rate snapshots as usable rates for existing-day saves", () => {
+    const savedSnapshotRates: JazzLoadCalculationRates = {
+      mlRate: { rateId: "old-ml", rateName: "Old ML", rateType: "ml_addition", percentage: 2.6, appliedAt: 1 },
+      commission1Rate: { rateId: "old-c1", rateName: "Old C1", rateType: "commission1_adjustment", percentage: 2, appliedAt: 1 },
+      commission2Rate: { rateId: "old-c2", rateName: "Old C2", rateType: "commission2_payment", percentage: 1, appliedAt: 1 }
+    };
+
+    expect(getJazzLoadSaveState({
+      ...validInput,
+      activeRates: savedSnapshotRates
+    }).canSave).toBe(true);
   });
 });

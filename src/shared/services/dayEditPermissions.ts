@@ -1,7 +1,8 @@
-import type { UserRole } from "../../types/ledger";
+import type { CalendarDayStatus, UserRole } from "../../types/ledger";
 
 export type ReopenedDayState = {
-  status?: "open" | "closed" | null;
+  status?: CalendarDayStatus | null;
+  manualOverride?: boolean | null;
   lockedAt?: number | null;
   closedAt?: number | null;
   reopenedUntilAt?: number | null;
@@ -10,15 +11,18 @@ export type ReopenedDayState = {
 };
 
 export function isActiveReopenWindow(day: ReopenedDayState | undefined | null, nowMs = Date.now()) {
-  if (typeof day?.reopenedAt === "number") {
-    const closedAt = Math.max(day.lockedAt ?? 0, day.closedAt ?? 0);
-    return day.reopenedAt > closedAt;
-  }
-  return typeof day?.reopenedUntilAt === "number" && day.reopenedUntilAt > nowMs;
+  void nowMs;
+  return day?.status === "reopen";
 }
 
 export function isAdminEditableReopenedDay(day: ReopenedDayState | undefined | null, nowMs = Date.now()) {
   return isActiveReopenWindow(day, nowMs) && (!day?.reopenedByRole || day.reopenedByRole === "owner");
+}
+
+export function isOperationalDayClosed(day: ReopenedDayState | undefined | null, nowMs = Date.now()) {
+  if (!day) return false;
+  if (isActiveReopenWindow(day, nowMs)) return false;
+  return day.status === "closed" || day.lockedAt != null || day.closedAt != null;
 }
 
 export function canEditOperationalDailyEntry(input: {
@@ -33,8 +37,9 @@ export function canEditOperationalDailyEntry(input: {
 }) {
   if (!input.canWriteDaily || input.monthClosed || input.isFutureDay) return false;
   const activeReopen = isActiveReopenWindow(input.day, input.nowMs);
-  if (input.dayClosed && !activeReopen) return false;
-  if (input.role === "owner") return input.isLiveDay || !input.dayClosed || activeReopen;
+  const dayClosed = input.dayClosed || isOperationalDayClosed(input.day, input.nowMs);
+  if (dayClosed && !activeReopen) return false;
+  if (input.role === "owner") return input.isLiveDay || !dayClosed || activeReopen;
   if (input.role === "admin") return input.isLiveDay || isAdminEditableReopenedDay(input.day, input.nowMs);
   return false;
 }
@@ -43,5 +48,10 @@ export function canReopenOperationalDay(input: {
   role: UserRole | null;
   isLiveDay: boolean;
 }) {
-  return input.role === "owner" || (input.role === "admin" && input.isLiveDay);
+  void input.isLiveDay;
+  return canReopenDay(input.role);
+}
+
+export function canReopenDay(role: UserRole | null) {
+  return role === "owner";
 }

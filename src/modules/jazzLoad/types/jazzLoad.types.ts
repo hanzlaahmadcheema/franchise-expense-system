@@ -1,10 +1,12 @@
-import type { UserRole } from "../../../types/ledger";
+import type { CalendarDayStatus, UserRole } from "../../../types/ledger";
 
 export type JazzLoadMonthStatus = "open" | "closed";
-export type JazzLoadDayStatus = "open" | "closed";
+export type JazzLoadDayStatus = CalendarDayStatus;
 export type JazzLoadRateType = "ml_addition" | "commission1_adjustment" | "commission2_payment" | "commission" | "adjustment" | "custom";
 export type JazzLoadCommissionRuleType = "payment_based" | "issuance_based" | "adjustment_based" | "custom";
 export type JazzLoadCommissionAppliesTo = "paymentReceived" | "todayMlIssuance" | "closingBalance" | "custom";
+export type JazzLoadRateSnapshotSource = "saved-day" | "legacy-row" | "legacy-summary" | "active-settings";
+export type JazzLoadDoBindingBackfillMode = "current-binding-history-repair";
 
 export type CalculatedMoney = {
   baseAmount: number;
@@ -21,6 +23,7 @@ export type JazzLoadRateConfig = {
   type: JazzLoadRateType;
   percentage: number;
   active: boolean;
+  sortOrder?: number;
   description?: string;
   createdBy: string;
   updatedBy?: string;
@@ -50,11 +53,39 @@ export type JazzLoadCommissionResult = {
 };
 
 export type JazzLoadAppliedRateSnapshot = {
-  rateId: string;
-  rateName: string;
-  rateType: JazzLoadRateType;
+  rateId?: string;
+  rateName?: string;
+  rateType?: JazzLoadRateType;
+  id?: string;
+  name?: string;
   percentage: number;
-  appliedAt: number;
+  appliedAt?: number;
+};
+
+export type JazzLoadCalculationRate = {
+  id?: string;
+  name?: string;
+  type?: JazzLoadRateType;
+  rateId?: string;
+  rateName?: string;
+  rateType?: JazzLoadRateType;
+  percentage: number;
+  active?: boolean;
+  appliedAt?: number;
+};
+
+export type JazzLoadCalculationRates = {
+  mlRate: JazzLoadCalculationRate | null;
+  commission1Rate: JazzLoadCalculationRate | null;
+  commission2Rate: JazzLoadCalculationRate | null;
+};
+
+export type JazzLoadAppliedRates = {
+  mlRate?: JazzLoadAppliedRateSnapshot;
+  commission1Rate?: JazzLoadAppliedRateSnapshot;
+  commission2Rate?: JazzLoadAppliedRateSnapshot;
+  source?: JazzLoadRateSnapshotSource;
+  resolvedAt?: number;
 };
 
 export type JazzLoadDoProfile = {
@@ -71,6 +102,7 @@ export type JazzLoadDoName = {
   id: string;
   name: string;
   active: boolean;
+  sortOrder?: number;
   notes?: string;
   createdAt: number;
   updatedAt: number;
@@ -84,6 +116,20 @@ export type JazzLoadDoLine = {
   notes?: string;
   createdAt: number;
   updatedAt: number;
+};
+
+export type JazzLoadDoLineBinding = {
+  id: string;
+  doLineId: string;
+  doLineName?: string;
+  doNameId: string;
+  doName: string;
+  effectiveFromMonthId: string;
+  effectiveFromDay: number;
+  createdBy: string;
+  createdAt: number;
+  updatedBy?: string;
+  updatedAt?: number;
 };
 
 export type JazzLoadDoAssignment = {
@@ -112,6 +158,12 @@ export type JazzLoadDoEntryDraft = {
   doLineSortOrder?: number;
   doName: string;
   doLine?: string;
+  bindingEffectiveFromMonthId?: string;
+  bindingEffectiveFromDay?: number;
+  bindingUpdatedAt?: number;
+  bindingUpdatedBy?: string;
+  bindingBackfillId?: string;
+  bindingBackfillMode?: JazzLoadDoBindingBackfillMode;
   openingBase?: number;
   todayMlIssuanceBase: number;
   paymentReceivedBase: number;
@@ -127,6 +179,12 @@ export type JazzLoadDoEntry = {
   doLineSortOrder?: number;
   doName: string;
   doLine?: string;
+  bindingEffectiveFromMonthId?: string;
+  bindingEffectiveFromDay?: number;
+  bindingUpdatedAt?: number;
+  bindingUpdatedBy?: string;
+  bindingBackfillId?: string;
+  bindingBackfillMode?: JazzLoadDoBindingBackfillMode;
   openingBalance: CalculatedMoney;
   todayMlIssuance: CalculatedMoney;
   dayTotal: CalculatedMoney;
@@ -178,14 +236,11 @@ export type JazzLoadDay = {
   dayNo: number;
   date: string;
   status: JazzLoadDayStatus;
+  manualOverride?: boolean;
   doEntries: JazzLoadDoEntry[];
   lifting: JazzLoadDailyLifting;
   summary: JazzLoadDailySummary;
-  appliedRates?: {
-    mlRate?: JazzLoadAppliedRateSnapshot;
-    commission1Rate?: JazzLoadAppliedRateSnapshot;
-    commission2Rate?: JazzLoadAppliedRateSnapshot;
-  };
+  appliedRates?: JazzLoadAppliedRates;
   notes?: string;
   createdBy: string;
   updatedBy?: string;
@@ -200,6 +255,10 @@ export type JazzLoadDay = {
   reopenedBy?: string;
   reopenedByRole?: UserRole;
   reopenedUntilAt?: number;
+  lastDoBindingBackfillAt?: number;
+  lastDoBindingBackfillBy?: string;
+  lastDoBindingBackfillMode?: JazzLoadDoBindingBackfillMode;
+  lastDoBindingBackfillId?: string;
 };
 
 export type JazzLoadMonth = {
@@ -283,6 +342,31 @@ export type JazzLoadAuditEvent = {
   createdAt: number;
 };
 
+export type JazzLoadDoBindingBackfillSample = {
+  monthId: string;
+  dayNo: number;
+  rowId: string;
+  doLineId?: string;
+  doLine?: string;
+  oldDoName?: string;
+  newDoName: string;
+};
+
+export type JazzLoadDoBindingBackfillPreview = {
+  backfillId: string;
+  fromMonthId: string;
+  toMonthId: string;
+  currentBindingMonthId: string;
+  currentBindingDayNo: number;
+  daysScanned: number;
+  rowsScanned: number;
+  rowsThatWillChange: number;
+  rowsAlreadyCorrect: number;
+  rowsMissingBinding: number;
+  rowsSkippedNoCurrentBinding: number;
+  sampleChanges: JazzLoadDoBindingBackfillSample[];
+};
+
 export type ValidationResult = {
   valid: boolean;
   errors: string[];
@@ -296,5 +380,6 @@ export type JazzLoadBackup = {
   doProfiles: JazzLoadDoProfile[];
   doNames?: JazzLoadDoName[];
   doLines?: JazzLoadDoLine[];
+  doLineBindings?: JazzLoadDoLineBinding[];
   doAssignments?: JazzLoadDoAssignment[];
 };

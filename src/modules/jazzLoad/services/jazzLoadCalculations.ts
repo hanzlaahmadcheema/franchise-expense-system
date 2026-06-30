@@ -1,6 +1,9 @@
 import type {
   ActiveJazzLoadRates,
   JazzLoadAppliedRateSnapshot,
+  JazzLoadAppliedRates,
+  JazzLoadCalculationRate,
+  JazzLoadCalculationRates,
   CalculatedMoney,
   JazzLoadCommissionResult,
   JazzLoadCommissionRule,
@@ -8,10 +11,12 @@ import type {
   JazzLoadDailyLiftingInput,
   JazzLoadDailySummary,
   JazzLoadDay,
+  JazzLoadDoLineBinding,
   JazzLoadDoEntry,
   JazzLoadDoEntryDraft,
   JazzLoadMonthlySummary,
   JazzLoadRateConfig,
+  JazzLoadRateSnapshotSource,
   ValidationResult
 } from "../types/jazzLoad.types";
 import { daysInMonth, normalizeDoKey, roundMoney } from "../utils/jazzLoadFormatters";
@@ -26,30 +31,197 @@ function doNameIdentityKey(input: Pick<JazzLoadDoEntryDraft, "doNameId" | "doNam
   return input.doNameId ?? normalizeDoKey(name);
 }
 
+function rateId(rate: JazzLoadCalculationRate) {
+  return rate.rateId ?? rate.id ?? "";
+}
+
+function rateName(rate: JazzLoadCalculationRate) {
+  return rate.rateName ?? rate.name ?? "";
+}
+
+function rateType(rate: JazzLoadCalculationRate, fallback: JazzLoadRateConfig["type"]) {
+  return rate.rateType ?? rate.type ?? fallback;
+}
+
+export function hasUsableJazzLoadRate(rate: JazzLoadCalculationRate | null | undefined): rate is JazzLoadCalculationRate {
+  return Boolean(rate && rate.active !== false && Number.isFinite(rate.percentage));
+}
+
+function normalizeRateSnapshot(
+  rate: JazzLoadCalculationRate | null | undefined,
+  fallbackType: JazzLoadRateConfig["type"],
+  fallbackAppliedAt = Date.now()
+): JazzLoadAppliedRateSnapshot | undefined {
+  if (!hasUsableJazzLoadRate(rate)) return undefined;
+  return {
+    rateId: rateId(rate),
+    rateName: rateName(rate),
+    rateType: rateType(rate, fallbackType),
+    percentage: rate.percentage,
+    appliedAt: rate.appliedAt ?? fallbackAppliedAt
+  };
+}
+
+function snapshotFromCalculatedMoney(
+  money: CalculatedMoney | undefined,
+  fallbackType: JazzLoadRateConfig["type"]
+): JazzLoadAppliedRateSnapshot | undefined {
+  if (!money || !Number.isFinite(money.appliedRatePercentage)) return undefined;
+  return {
+    rateId: money.appliedRateId,
+    rateName: money.appliedRateName,
+    rateType: fallbackType,
+    percentage: money.appliedRatePercentage,
+    appliedAt: money.calculatedAt
+  };
+}
+
+function legacyMlRateFromRows(dayRecord: Pick<JazzLoadDay, "doEntries"> | null | undefined) {
+  const moneyFields = ["todayMlIssuance", "paymentReceived", "openingBalance", "closingBalance", "dayTotal"] as const;
+  for (const entry of dayRecord?.doEntries ?? []) {
+    for (const field of moneyFields) {
+      const snapshot = snapshotFromCalculatedMoney(entry[field], "ml_addition");
+      if (snapshot) return snapshot;
+    }
+  }
+  return undefined;
+}
+
+function activeRateSnapshot(
+  activeRates: ActiveJazzLoadRates,
+  key: keyof ActiveJazzLoadRates,
+  fallbackType: JazzLoadRateConfig["type"],
+  warnings: string[],
+  resolvedAt: number
+) {
+  const snapshot = normalizeRateSnapshot(activeRates[key] as JazzLoadCalculationRate | null, fallbackType, resolvedAt);
+  if (!snapshot) warnings.push(`No historical ${fallbackType} snapshot was found; active settings fallback was unavailable.`);
+  return snapshot;
+}
+
+function completeRates(rates: JazzLoadCalculationRates) {
+  return hasUsableJazzLoadRate(rates.mlRate) &&
+    hasUsableJazzLoadRate(rates.commission1Rate) &&
+    hasUsableJazzLoadRate(rates.commission2Rate);
+}
+
+function bindingDateValue(monthId: string, dayNo: number) {
+  const [yearText, monthText] = monthId.split("-");
+  return (Number(yearText) || 0) * 10000 + (Number(monthText) || 0) * 100 + dayNo;
+}
+
+export function resolveDoLineBindingForDate(
+  bindings: JazzLoadDoLineBinding[],
+  doLineId: string | undefined,
+  monthId: string,
+  dayNo: number
+) {
+  if (!doLineId) return undefined;
+  const selected = bindingDateValue(monthId, dayNo);
+  return bindings
+    .filter((binding) => binding.doLineId === doLineId)
+    .filter((binding) => bindingDateValue(binding.effectiveFromMonthId, binding.effectiveFromDay) <= selected)
+    .sort((left, right) =>
+      bindingDateValue(right.effectiveFromMonthId, right.effectiveFromDay) -
+      bindingDateValue(left.effectiveFromMonthId, left.effectiveFromDay)
+    )[0];
+}
+
+export function snapshotResolvedRates(
+  rates: JazzLoadCalculationRates,
+  appliedAt = Date.now()
+): JazzLoadAppliedRates {
+  return {
+    mlRate: normalizeRateSnapshot(rates.mlRate, "ml_addition", appliedAt),
+    commission1Rate: normalizeRateSnapshot(rates.commission1Rate, "commission1_adjustment", appliedAt),
+    commission2Rate: normalizeRateSnapshot(rates.commission2Rate, "commission2_payment", appliedAt)
+  };
+}
+
+export function resolveJazzLoadRatesForDay(params: {
+  dayRecord?: JazzLoadDay | null;
+  activeRates: ActiveJazzLoadRates;
+  mode: "new-day" | "existing-day" | "master-refresh";
+  resolvedAt?: number;
+}): {
+  rates: JazzLoadCalculationRates;
+  source: JazzLoadRateSnapshotSource;
+  warnings: string[];
+} {
+  const { dayRecord, activeRates, mode } = params;
+  const resolvedAt = params.resolvedAt ?? Date.now();
+  const warnings: string[] = [];
+  const activeSettingsRates = (): JazzLoadCalculationRates => ({
+    mlRate: activeRateSnapshot(activeRates, "mlRate", "ml_addition", warnings, resolvedAt) ?? null,
+    commission1Rate: activeRateSnapshot(activeRates, "commission1Rate", "commission1_adjustment", warnings, resolvedAt) ?? null,
+    commission2Rate: activeRateSnapshot(activeRates, "commission2Rate", "commission2_payment", warnings, resolvedAt) ?? null
+  });
+
+  if (mode === "new-day" || !dayRecord) {
+    return { rates: activeSettingsRates(), source: "active-settings", warnings };
+  }
+
+  const savedDayRates: JazzLoadCalculationRates = {
+    mlRate: normalizeRateSnapshot(dayRecord.appliedRates?.mlRate, "ml_addition", resolvedAt) ?? null,
+    commission1Rate: normalizeRateSnapshot(dayRecord.appliedRates?.commission1Rate, "commission1_adjustment", resolvedAt) ?? null,
+    commission2Rate: normalizeRateSnapshot(dayRecord.appliedRates?.commission2Rate, "commission2_payment", resolvedAt) ?? null
+  };
+  if (completeRates(savedDayRates)) {
+    return { rates: savedDayRates, source: "saved-day", warnings };
+  }
+
+  const legacyRowMlRate = legacyMlRateFromRows(dayRecord);
+  const summaryCommission1Rate = normalizeRateSnapshot(dayRecord.summary?.commission1Rate, "commission1_adjustment", resolvedAt);
+  const summaryCommission2Rate = normalizeRateSnapshot(dayRecord.summary?.commission2Rate, "commission2_payment", resolvedAt);
+  const activeFallback = activeSettingsRates();
+  const rates: JazzLoadCalculationRates = {
+    mlRate: savedDayRates.mlRate ?? legacyRowMlRate ?? activeFallback.mlRate,
+    commission1Rate: savedDayRates.commission1Rate ?? summaryCommission1Rate ?? activeFallback.commission1Rate,
+    commission2Rate: savedDayRates.commission2Rate ?? summaryCommission2Rate ?? activeFallback.commission2Rate
+  };
+
+  if (legacyRowMlRate) {
+    if (!savedDayRates.mlRate) warnings.push("Recovered Jazz Load ML rate from legacy row-level applied rate metadata.");
+    return { rates, source: "legacy-row", warnings };
+  }
+  if (summaryCommission1Rate || summaryCommission2Rate) {
+    warnings.push("Recovered Jazz Load commission rates from legacy daily summary metadata.");
+    if (!savedDayRates.mlRate) warnings.push("No ML snapshot was found on this legacy day; active ML settings were used as fallback.");
+    return { rates, source: "legacy-summary", warnings };
+  }
+
+  warnings.push("No Jazz Load rate snapshot was found for this saved day; active settings were used as fallback.");
+  return { rates, source: "active-settings", warnings };
+}
+
 export function calculateAmountWithRate(
   baseAmount: number,
-  rate: JazzLoadRateConfig,
+  rate: JazzLoadCalculationRate,
   calculatedAt = Date.now()
 ): CalculatedMoney {
   const base = roundMoney(baseAmount);
   return {
     baseAmount: base,
     calculatedAmount: roundMoney(base + (base * rate.percentage) / 100),
-    appliedRateId: rate.id,
-    appliedRateName: rate.name,
+    appliedRateId: rateId(rate),
+    appliedRateName: rateName(rate),
     appliedRatePercentage: rate.percentage,
     calculatedAt
   };
 }
 
-export function snapshotRate(rate: JazzLoadRateConfig, appliedAt = Date.now()): JazzLoadAppliedRateSnapshot {
-  return {
-    rateId: rate.id,
-    rateName: rate.name,
-    rateType: rate.type,
-    percentage: rate.percentage,
-    appliedAt
-  };
+export function snapshotRate(rate: JazzLoadCalculationRate, appliedAt = Date.now()): JazzLoadAppliedRateSnapshot {
+  const snapshot = normalizeRateSnapshot(rate, "custom", appliedAt);
+  if (!snapshot) {
+    return {
+      rateId: rateId(rate),
+      rateName: rateName(rate),
+      rateType: rateType(rate, "custom"),
+      percentage: 0,
+      appliedAt
+    };
+  }
+  return snapshot;
 }
 
 export function calculateCommission(
@@ -69,7 +241,7 @@ export function calculateCommission(
 
 export function calculateDoRow(
   input: JazzLoadDoEntryDraft,
-  activeRates: ActiveJazzLoadRates,
+  activeRates: JazzLoadCalculationRates,
   metadata: { createdBy: string; previous?: JazzLoadDoEntry; timestamp?: number }
 ): JazzLoadDoEntry {
   if (!activeRates.mlRate) {
@@ -91,6 +263,12 @@ export function calculateDoRow(
     doLineSortOrder: input.doLineSortOrder,
     doName: input.doName.trim(),
     doLine: input.doLine?.trim() || undefined,
+    bindingEffectiveFromMonthId: input.bindingEffectiveFromMonthId,
+    bindingEffectiveFromDay: input.bindingEffectiveFromDay,
+    bindingUpdatedAt: input.bindingUpdatedAt,
+    bindingUpdatedBy: input.bindingUpdatedBy,
+    bindingBackfillId: input.bindingBackfillId,
+    bindingBackfillMode: input.bindingBackfillMode,
     openingBalance: calculateAmountWithRate(openingBase, activeRates.mlRate, timestamp),
     todayMlIssuance: calculateAmountWithRate(issuanceBase, activeRates.mlRate, timestamp),
     dayTotal: calculateAmountWithRate(dayTotalBase, activeRates.mlRate, timestamp),
@@ -123,7 +301,7 @@ export function calculateDailyLifting(
 export function calculateDailyCommissionSummary(
   paymentBaseTotal: number,
   paymentMlTotal: number,
-  activeRates: Pick<ActiveJazzLoadRates, "commission1Rate" | "commission2Rate">,
+  activeRates: Pick<JazzLoadCalculationRates, "commission1Rate" | "commission2Rate">,
   appliedAt = Date.now()
 ) {
   const paymentBase = roundMoney(paymentBaseTotal);
@@ -154,7 +332,7 @@ export function calculateDailyCommissionSummary(
 
 export function calculateDailySummary(
   day: Pick<JazzLoadDay, "doEntries">,
-  activeRates?: Pick<ActiveJazzLoadRates, "commission1Rate" | "commission2Rate">,
+  activeRates?: Pick<JazzLoadCalculationRates, "commission1Rate" | "commission2Rate">,
   appliedAt = Date.now()
 ): JazzLoadDailySummary {
   const entries = day.doEntries;
@@ -182,6 +360,33 @@ export function calculateDailySummary(
     closingMl: sum(entries.map((entry) => entry.closingBalance.calculatedAmount)),
     ...commissionSummary,
     outstandingDoCount: entries.filter((entry) => entry.closingBalance.baseAmount > 0).length
+  };
+}
+
+type DailySummaryClosingSeed = Pick<JazzLoadDailySummary, "closingBase" | "closingMl">;
+
+export function calculateChainedDailySummary(
+  day: Pick<JazzLoadDay, "doEntries">,
+  activeRates: Pick<JazzLoadCalculationRates, "commission1Rate" | "commission2Rate"> | undefined,
+  appliedAt: number,
+  previousClosing?: DailySummaryClosingSeed
+): JazzLoadDailySummary {
+  const summary = calculateDailySummary(day, activeRates, appliedAt);
+  if (!previousClosing) return summary;
+
+  const openingBase = roundMoney(previousClosing.closingBase);
+  const openingMl = roundMoney(previousClosing.closingMl);
+  const dayTotalBase = roundMoney(openingBase + summary.issuanceBase);
+  const dayTotalMl = roundMoney(openingMl + summary.issuanceMl);
+
+  return {
+    ...summary,
+    openingBase,
+    openingMl,
+    dayTotalBase,
+    dayTotalMl,
+    closingBase: roundMoney(dayTotalBase - summary.paymentBase),
+    closingMl: roundMoney(dayTotalMl - summary.paymentMl)
   };
 }
 
@@ -322,12 +527,12 @@ export function previousEntryForDraft(
 
 export function validateJazzLoadDrafts(
   drafts: JazzLoadDoEntryDraft[],
-  activeRates: ActiveJazzLoadRates
+  activeRates: JazzLoadCalculationRates
 ): ValidationResult {
   const errors: string[] = [];
-  if (!activeRates.mlRate?.active) errors.push("No active Jazz Load Addition Rate configured.");
-  if (!activeRates.commission1Rate?.active) errors.push("No active Commission 1 Adjustment Rate configured.");
-  if (!activeRates.commission2Rate?.active) errors.push("No active Commission 2 Payment Rate configured.");
+  if (!hasUsableJazzLoadRate(activeRates.mlRate)) errors.push("No active Jazz Load Addition Rate configured.");
+  if (!hasUsableJazzLoadRate(activeRates.commission1Rate)) errors.push("No active Commission 1 Adjustment Rate configured.");
+  if (!hasUsableJazzLoadRate(activeRates.commission2Rate)) errors.push("No active Commission 2 Payment Rate configured.");
   const seen = new Set<string>();
   const seenNames = new Set<string>();
   for (const draft of drafts) {

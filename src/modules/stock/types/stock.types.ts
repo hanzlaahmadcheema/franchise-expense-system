@@ -1,7 +1,7 @@
-import type { UserRole } from "../../../types/ledger";
+import type { CalendarDayStatus, UserRole } from "../../../types/ledger";
 
 export type StockMonthStatus = "open" | "closed";
-export type StockDayStatus = "open" | "closed";
+export type StockDayStatus = CalendarDayStatus;
 export type StockAccountType = "DO" | "CCR" | "DSO" | "STOCK" | "OTHER";
 
 export type StockProduct = {
@@ -10,6 +10,7 @@ export type StockProduct = {
   rate: number;
   active: boolean;
   displayOrder: number;
+  sortOrder?: number;
   paymentTrackingEnabled: boolean;
   category?: string;
   notes?: string;
@@ -25,12 +26,19 @@ export type StockAccountProfile = {
   type: StockAccountType;
   active: boolean;
   displayOrder: number;
+  sortOrder?: number;
   openingBalance?: number;
   notes?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt: number;
   updatedAt: number;
+};
+
+export type StockSettingsConfig = {
+  allowManualCarryForwardInput: boolean;
+  updatedBy?: string;
+  updatedAt?: number;
 };
 
 export type StockProductSnapshot = {
@@ -110,6 +118,7 @@ export type StockDayRecord = {
   entryMonth?: number;
   entryDay?: number;
   status: StockDayStatus;
+  manualOverride?: boolean;
   entries: StockDailyAccountEntry[];
   stockOut?: StockDailyAccountEntry[];
   stockIn?: StockInRecord[];

@@ -1,5 +1,5 @@
 import type { UserRole } from "../../../types/ledger";
-import type { ActiveJazzLoadRates } from "../types/jazzLoad.types";
+import type { JazzLoadCalculationRates } from "../types/jazzLoad.types";
 
 export type JazzLoadSaveBlockReason =
   | "Day closed"
@@ -24,7 +24,7 @@ export type JazzLoadSaveStateInput = {
   monthClosed: boolean;
   dayClosed: boolean;
   hasDrafts: boolean;
-  activeRates: ActiveJazzLoadRates;
+  activeRates: JazzLoadCalculationRates;
   validation: JazzLoadValidationLike;
   saving?: boolean;
 };
@@ -35,8 +35,14 @@ export type JazzLoadSaveState = {
   detail: string;
 };
 
-function hasAllActiveRates(activeRates: ActiveJazzLoadRates) {
-  return Boolean(activeRates.mlRate?.active && activeRates.commission1Rate?.active && activeRates.commission2Rate?.active);
+function hasUsableRate(rate: JazzLoadCalculationRates[keyof JazzLoadCalculationRates]) {
+  return Boolean(rate && rate.active !== false && Number.isFinite(rate.percentage));
+}
+
+function hasAllActiveRates(activeRates: JazzLoadCalculationRates) {
+  return hasUsableRate(activeRates.mlRate) &&
+    hasUsableRate(activeRates.commission1Rate) &&
+    hasUsableRate(activeRates.commission2Rate);
 }
 
 export function classifyJazzLoadValidationError(errors: string[]): Pick<JazzLoadSaveState, "reason" | "detail"> {

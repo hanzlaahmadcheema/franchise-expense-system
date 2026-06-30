@@ -14,6 +14,8 @@ export type ExpenseCreditRaw = {
   receive: number;
   manualAdjustment: number;
   notes?: string;
+  loanDescription?: string;
+  receiveDescription?: string;
   source: LedgerEntrySource;
   inferredFromLegacy?: boolean;
   legacyOpeningSeed?: number;
@@ -238,6 +240,24 @@ function rowManualActivity(row: LegacyCreditInput) {
   };
 }
 
+function rowDescriptions(row: LegacyCreditInput, manual: ReturnType<typeof rowManualActivity>) {
+  const hasCanonicalDescription =
+    row.loanDescription !== undefined || row.receiveDescription !== undefined;
+  const legacyDescription = normalizeName(row.description ?? row.notes);
+  if (!hasCanonicalDescription && legacyDescription) {
+    if (manual.loan !== 0 && manual.receive === 0) {
+      return { loanDescription: legacyDescription, receiveDescription: undefined };
+    }
+    if (manual.receive !== 0 && manual.loan === 0) {
+      return { loanDescription: undefined, receiveDescription: legacyDescription };
+    }
+  }
+  return {
+    loanDescription: normalizeName(row.loanDescription) || undefined,
+    receiveDescription: normalizeName(row.receiveDescription) || undefined
+  };
+}
+
 function sourceScore(row: LegacyCreditInput) {
   const manual = rowManualActivity(row);
   const opening = parseLedgerAmountStrict(row.opening);
@@ -285,6 +305,7 @@ function rowToRawEntry(input: {
   const inferredFromLegacy = !hasManualActivity && closing !== null && closing !== opening;
   const manualAdjustment = inferredFromLegacy ? closing - opening : manual.manualAdjustment;
   const rowId = normalizeName(input.row.id) || `${input.dayNo}-credit-${partyId}`;
+  const descriptions = rowDescriptions(input.row, manual);
 
   return {
     id: rowId,
@@ -296,7 +317,9 @@ function rowToRawEntry(input: {
       loan: manual.loan,
       receive: manual.receive,
       manualAdjustment,
-      notes: normalizeName(input.row.notes) || undefined,
+      notes: normalizeName(input.row.description) || normalizeName(input.row.notes) || undefined,
+      loanDescription: descriptions.loanDescription,
+      receiveDescription: descriptions.receiveDescription,
       source: input.source,
       inferredFromLegacy,
       legacyOpeningSeed: opening,
@@ -505,16 +528,26 @@ export function projectExpenseCreditMonth({
 }
 
 export function projectionToLegacyCreditRows(day: ExpenseCreditProjectedDay): CreditRow[] {
-  return day.projections.map((row) => ({
-    id: row.rawEntryId ?? `${day.dayNo}-credit-carry-${row.partyId}`,
-    partyId: row.partyId,
-    partyName: row.partyName,
-    opening: row.calculated.opening,
-    loan: row.calculated.loan,
-    today: row.calculated.loan,
-    receive: row.calculated.receive,
-    balance: row.calculated.closing
-  }));
+  const rawById = new Map(day.rawEntries.map((entry) => [entry.id, entry]));
+  const rawByParty = new Map(day.rawEntries.map((entry) => [creditPartyKey(entry.raw), entry]));
+
+  return day.projections.map((row) => {
+    const rawEntry = (row.rawEntryId ? rawById.get(row.rawEntryId) : undefined) ??
+      rawByParty.get(creditPartyKey(row));
+    return {
+      id: row.rawEntryId ?? `${day.dayNo}-credit-carry-${row.partyId}`,
+      partyId: row.partyId,
+      partyName: row.partyName,
+      ...(rawEntry?.raw.notes !== undefined ? { description: rawEntry.raw.notes } : {}),
+      ...(rawEntry?.raw.loanDescription !== undefined ? { loanDescription: rawEntry.raw.loanDescription } : {}),
+      ...(rawEntry?.raw.receiveDescription !== undefined ? { receiveDescription: rawEntry.raw.receiveDescription } : {}),
+      opening: row.calculated.opening,
+      loan: row.calculated.loan,
+      today: row.calculated.loan,
+      receive: row.calculated.receive,
+      balance: row.calculated.closing
+    };
+  });
 }
 
 export function checkExpenseCreditInvariants(input: {

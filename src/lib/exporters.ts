@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import type { DailyLedgerComputed, DailyLedgerInput, MonthComputed } from "../types/ledger";
+import { resolveCreditDescriptions } from "./creditDescriptions";
 
 type SheetSpec = {
   name: string;
@@ -261,7 +262,7 @@ export function buildDailyReportSheets(month: MonthComputed, dayNo: number, inpu
     },
     {
       name: "Credit Parties",
-      widths: [28, 16, 16, 16, 16],
+      widths: [28, 16, 16, 32, 16, 32, 32, 16],
       rows: [
         [BRAND_NAME],
         [`Credit Parties - ${title}`],
@@ -269,14 +270,20 @@ export function buildDailyReportSheets(month: MonthComputed, dayNo: number, inpu
         [],
         ...sectionRows(
           "Credit Parties",
-          ["Party", "Opening", "Loan", "Receive", "Balance"],
-          day.creditRows.map((row) => [
-            row.partyName,
-            money(row.opening),
-            money(row.loan ?? row.today ?? 0),
-            money(row.receive),
-            money(row.balance ?? 0)
-          ])
+          ["Party", "Opening", "Loan Description", "Loan", "Receive Description", "Receive", "Legacy Description", "Balance"],
+          day.creditRows.map((row) => {
+            const descriptions = resolveCreditDescriptions(row);
+            return [
+              row.partyName,
+              money(row.opening),
+              safeText(descriptions.loanDescription),
+              money(row.loan ?? row.today ?? 0),
+              safeText(descriptions.receiveDescription),
+              money(row.receive),
+              safeText(descriptions.legacyDescription),
+              money(row.balance ?? 0)
+            ];
+          })
         )
       ]
     },
@@ -511,8 +518,20 @@ export function exportDailyPdf(month: MonthComputed, dayNo: number, input?: Dail
     ),
     tableHtml(
       "Credit Parties",
-      ["Party", "Opening", "Loan", "Receive", "Balance"],
-      day.creditRows.map((row) => [row.partyName, money(row.opening), money(row.loan ?? row.today ?? 0), money(row.receive), money(row.balance ?? 0)])
+      ["Party", "Opening", "Loan Description", "Loan", "Receive Description", "Receive", "Legacy Description", "Balance"],
+      day.creditRows.map((row) => {
+        const descriptions = resolveCreditDescriptions(row);
+        return [
+          row.partyName,
+          money(row.opening),
+          safeText(descriptions.loanDescription),
+          money(row.loan ?? row.today ?? 0),
+          safeText(descriptions.receiveDescription),
+          money(row.receive),
+          safeText(descriptions.legacyDescription),
+          money(row.balance ?? 0)
+        ];
+      })
     ),
     tableHtml(
       "Franchise Owner",

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { User } from "firebase/auth";
-import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box } from "lucide-react";
+import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box } from "lucide-react";
 import type { UserRole, SystemAuditLog } from "../../../types/ledger";
 import { subscribeAuditLogs } from "../../../lib/auditLogService";
 import type { SyncState } from "../../../lib/syncStatus";
+import { MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
 import {
   accountsSorted,
   buildStockDayRecord,
@@ -24,7 +25,7 @@ import {
   ensureStockOpeningSeed,
   listStockBackup,
   roleCanStock,
-  recalculateStockMonth,
+  recalculateStockLedgerLocal,
   saveStockDay,
   updateStockDaysStatusBatch,
   subscribeStockAccounts,
@@ -36,14 +37,17 @@ import {
   deleteStockProduct,
   upsertStockAccount,
   upsertStockProduct,
+  updateStockAccountSortOrder,
+  updateStockProductSortOrder,
   subscribeStockOpeningBalances,
+  subscribeStockSettingsConfig,
+  saveStockSettingsConfig,
   type FirestoreSnapshotMeta
 } from "../services/stockFirestore";
 import { exportStockDayXlsx, exportStockMonthlyXlsx, exportStockPrintable } from "../services/stockReports";
 import type {
   StockAccountProfile,
   StockAccountType,
-  StockDailyAccountEntry,
   StockDailyAccountDraft,
   StockDayRecord,
   StockMonth,
@@ -51,7 +55,8 @@ import type {
   StockProduct,
   StockProductLine,
   StockInRecord,
-  StockOpeningBalances
+  StockOpeningBalances,
+  StockSettingsConfig
 } from "../types/stock.types";
 import {
   compareMonthIds,
@@ -69,11 +74,15 @@ import { UniversalCalendar } from "../../../shared/calendar/UniversalCalendar";
 import { UniversalDayControlBar } from "../../../shared/dayControls/UniversalDayControlBar";
 import { useSidebarDayControls } from "../../../shared/context/SidebarDayControlsContext";
 import { useSelectedDate } from "../../../shared/context/SelectedDateContext";
-import { canEditOperationalDailyEntry, isActiveReopenWindow } from "../../../shared/services/dayEditPermissions";
+import { CashCreditStockInTable, hasAnyNonZeroSummaryValue, ProductStockFlowTable, StockIssuanceSummaryTable, StockLiftingSummaryTable } from "./StockDashboardTables";
+import { canEditOperationalDailyEntry, canReopenDay, isActiveReopenWindow } from "../../../shared/services/dayEditPermissions";
 import { resolveUniversalDayStatus } from "../../../shared/services/dayStatusService";
 import { useAutoSaveEntry } from "../../../shared/hooks/useAutoSaveEntry";
 import { runMasterRecalculation } from "../../../shared/services/masterRecalculationService";
+import { resolveLedgerUiReadDecision } from "../../../shared/ledger/ledgerReadMode";
+import type { LedgerReadModeConfig } from "../../../shared/ledger/ledgerTypes";
 import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
+import { applySortOrder, reorderItems } from "../../../shared/services/orderUtils";
 import { createStockRecalculationAdapter } from "../adapters/stockRecalculationAdapter";
 import { SaveProgressDialog, type SaveProgressState } from "../../../shared/components/SaveProgressDialog";
 
@@ -91,6 +100,7 @@ type Props = {
   onQueueWrite: (promise: Promise<unknown>, failureMessage: string) => void;
   onStatus: (message: string) => void;
   onTriggerMasterRefresh?: (adapter: MasterRecalculationAdapter, title: string) => Promise<void>;
+  ledgerReadModeConfig: LedgerReadModeConfig;
   loading?: boolean;
 };
 
@@ -122,23 +132,20 @@ function getStockDayStatus(
   monthStatus: StockMonth["status"] | undefined,
   now = new Date()
 ) {
-  const available = new Set(availableDays(monthId, now));
-  if (!available.has(dayNo)) return "Future";
-  if (!day) return "Missing";
+  void monthId;
+  void dayNo;
+  if (!day) return "Open";
   if (monthStatus === "closed") return "Closed";
-  if (day && isReopenActive(day, now)) return "Re-Open";
+  if (day.status === "reopen" || isReopenActive(day, now)) return "Reopen";
   if (day?.status === "closed" || day?.lockedAt != null || day?.closedAt != null) return "Closed";
-  if (isLiveDay(monthId, dayNo, now)) return "Open";
-  if (day?.status === "open") return "Open";
-  return "Closed";
+  return "Open";
 }
 
 function getDayStatusChipClass(status: string) {
   if (status === "Open") return "bg-emerald-400/15 text-emerald-200";
-  if (status === "Re-Open") return "bg-blue-400/15 text-blue-200";
-  if (status === "Missing") return "bg-orange-400/15 text-orange-200";
+  if (status === "Reopen") return "bg-blue-400/15 text-blue-200";
   if (status === "Closed") return "bg-red-400/15 text-red-200";
-  return "bg-slate-800 text-slate-500";
+  return "bg-emerald-400/15 text-emerald-200";
 }
 
 function canEditStockDay(role: UserRole | null, month: StockMonth | undefined, monthId: string, day: StockDayRecord | undefined, dayNo: number, now = new Date()) {
@@ -224,6 +231,73 @@ function MetricCard({ label, value, helper }: { label: string; value: string; he
   );
 }
 
+function StockProductEntryTable({
+  products,
+  quantities,
+  quantityLabel,
+  totalQty,
+  totalAmount,
+  disabled,
+  onQuantityChange,
+  onQuantityFocus,
+  onQuantityBlur,
+  footerRows
+}: {
+  products: StockProduct[];
+  quantities: Record<string, number>;
+  quantityLabel: string;
+  totalQty: number;
+  totalAmount: number;
+  disabled: boolean;
+  onQuantityChange: (productId: string, value: number) => void;
+  onQuantityFocus?: (productId: string) => void;
+  onQuantityBlur?: (productId: string) => void;
+  footerRows?: ReactNode;
+}) {
+  return (
+    <div className="table-wrap mt-3">
+      <table className="stock-entry-table">
+        <thead>
+          <tr>
+            <th>Product Name</th>
+            <th>{quantityLabel}</th>
+            <th>Rate</th>
+            <th>Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {products.map((product) => {
+            const quantity = quantities[product.id] ?? 0;
+            return (
+              <tr key={product.id}>
+                <td className="font-semibold text-slate-200">{product.name}</td>
+                <td className="w-36">
+                  <NumberInput
+                    value={quantity}
+                    disabled={disabled}
+                    onFocus={() => onQuantityFocus?.(product.id)}
+                    onBlur={() => onQuantityBlur?.(product.id)}
+                    onChange={(value) => onQuantityChange(product.id, value)}
+                  />
+                </td>
+                <td className="whitespace-nowrap font-mono">{formatMoney(product.rate)}</td>
+                <td className="whitespace-nowrap font-mono">{formatMoney(roundMoney(quantity * product.rate))}</td>
+              </tr>
+            );
+          })}
+          <tr className="bg-slate-950/40 font-semibold">
+            <td>Total</td>
+            <td>{formatMoney(totalQty)}</td>
+            <td className="text-slate-500">—</td>
+            <td className="font-mono">{formatMoney(totalAmount)}</td>
+          </tr>
+          {footerRows}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function stockCarryForwardWarnings(
   days: StockDayRecord[],
   summary: StockMonthlySummary | null,
@@ -255,22 +329,14 @@ function stockCarryForwardWarnings(
   return warnings;
 }
 
-function stockCarryForwardSourceLabel(input: {
-  previousEntry?: StockDailyAccountEntry;
-  previousMonthDueBalance?: number;
-}) {
-  if (input.previousEntry) return "Locked from previous saved Stock day closing.";
-  if (input.previousMonthDueBalance !== undefined) return "Locked from previous month final closing.";
-  return "Locked from account opening balance.";
-}
-
 function SettingsTable({
   title,
   kind,
   canEdit,
   rows,
   onSave,
-  onDelete
+  onDelete,
+  onReorder
 }: {
   title: string;
   kind: "product" | "account";
@@ -278,6 +344,7 @@ function SettingsTable({
   rows: Array<StockProduct | StockAccountProfile>;
   onSave: (row: any) => void;
   onDelete: (id: string) => void;
+  onReorder: (before: Array<StockProduct | StockAccountProfile>, after: Array<StockProduct | StockAccountProfile>) => void;
 }) {
   const [draft, setDraft] = useState({
     name: "",
@@ -287,6 +354,8 @@ function SettingsTable({
     paymentTracking: true
   });
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [displayRows, setDisplayRows] = useState(rows);
+  const draggedIdRef = useRef<string | null>(null);
   const [editDraft, setEditDraft] = useState<{
     name: string;
     rate: number;
@@ -294,6 +363,19 @@ function SettingsTable({
     order: number;
     paymentTracking: boolean;
   } | null>(null);
+  useEffect(() => setDisplayRows(rows), [rows]);
+
+  function handleDrop(overId: string) {
+    const activeId = draggedIdRef.current;
+    draggedIdRef.current = null;
+    if (!canEdit || !activeId || activeId === overId) return;
+    const reordered = applySortOrder(reorderItems(displayRows, activeId, overId)).map((row) => ({
+      ...row,
+      displayOrder: row.sortOrder ?? row.displayOrder
+    }));
+    setDisplayRows(reordered);
+    onReorder(displayRows, reordered);
+  }
 
   return (
     <section className="panel">
@@ -328,10 +410,6 @@ function SettingsTable({
               </select>
             </label>
           )}
-          <label>
-            Display Order
-            <NumberInput value={draft.order} onChange={(order) => setDraft((current) => ({ ...current, order }))} />
-          </label>
           {kind === "product" && (
             <label className="flex items-end gap-2 pb-2">
               <input
@@ -347,11 +425,13 @@ function SettingsTable({
             disabled={!draft.name.trim()}
             onClick={() => {
               const id = slug(draft.name);
+              const nextOrder = displayRows.length + 1;
               const base = {
                 id,
                 name: draft.name.trim(),
                 active: true,
-                displayOrder: draft.order,
+                displayOrder: nextOrder,
+                sortOrder: nextOrder,
                 createdBy: "",
                 createdAt: Date.now(),
                 updatedAt: Date.now()
@@ -365,7 +445,7 @@ function SettingsTable({
               } else {
                 onSave({ ...base, type: draft.type, openingBalance: 0 } as StockAccountProfile);
               }
-              setDraft({ name: "", rate: 0, type: "CCR", order: draft.order + 1, paymentTracking: true });
+              setDraft({ name: "", rate: 0, type: "CCR", order: nextOrder + 1, paymentTracking: true });
             }}
           >
             Add
@@ -376,6 +456,7 @@ function SettingsTable({
         <table>
           <thead>
             <tr>
+              {canEdit && <th>Move</th>}
               <th>Name</th>
               {kind === "product" && <th>Rate</th>}
               {kind === "product" && <th>Payment</th>}
@@ -386,10 +467,23 @@ function SettingsTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
+            {displayRows.map((row) => {
               const isEditing = editingId === row.id;
               return (
-                <tr key={row.id}>
+                <tr
+                  key={row.id}
+                  draggable={canEdit}
+                  onDragStart={() => { draggedIdRef.current = row.id; }}
+                  onDragOver={(event: DragEvent<HTMLTableRowElement>) => event.preventDefault()}
+                  onDrop={() => handleDrop(row.id)}
+                >
+                  {canEdit && (
+                    <td>
+                      <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
+                        <GripVertical className="h-4 w-4" />
+                      </button>
+                    </td>
+                  )}
                   <td>
                     {isEditing ? (
                       <input
@@ -446,14 +540,7 @@ function SettingsTable({
                     </td>
                   )}
                   <td>
-                    {isEditing ? (
-                      <NumberInput
-                        value={editDraft?.order ?? 0}
-                        onChange={(order) => setEditDraft((curr) => curr ? { ...curr, order } : null)}
-                      />
-                    ) : (
-                      row.displayOrder
-                    )}
+                    {row.sortOrder ?? row.displayOrder}
                   </td>
                   <td>
                     <button className={row.active ? "btn-chip btn-chip-active" : "btn-chip"} disabled={!canEdit} onClick={() => onSave({ ...row, active: !row.active })}>
@@ -473,7 +560,8 @@ function SettingsTable({
                                 const updated = {
                                   ...row,
                                   name: editDraft.name.trim(),
-                                  displayOrder: editDraft.order,
+                                  displayOrder: row.displayOrder,
+                                  sortOrder: row.sortOrder,
                                   updatedAt: Date.now()
                                 };
                                 if (kind === "product") {
@@ -509,7 +597,7 @@ function SettingsTable({
                                 setEditingId(row.id);
                                 setEditDraft({
                                   name: row.name,
-                                  order: row.displayOrder,
+                                  order: row.sortOrder ?? row.displayOrder,
                                   rate: kind === "product" ? (row as StockProduct).rate : 0,
                                   type: kind === "account" ? (row as StockAccountProfile).type : "CCR",
                                   paymentTracking: kind === "product" ? (row as StockProduct).paymentTrackingEnabled !== false : false
@@ -537,9 +625,9 @@ function SettingsTable({
                 </tr>
               );
             })}
-            {rows.length === 0 && (
+            {displayRows.length === 0 && (
               <tr>
-                <td colSpan={kind === "product" ? (canEdit ? 8 : 7) : kind === "account" ? (canEdit ? 6 : 5) : canEdit ? 5 : 4}>
+                <td colSpan={kind === "product" ? (canEdit ? 7 : 5) : canEdit ? 6 : 4}>
                   No rows configured.
                 </td>
               </tr>
@@ -562,6 +650,7 @@ export function StockLedgerModule({
   onQueueWrite,
   onStatus,
   onTriggerMasterRefresh,
+  ledgerReadModeConfig,
   loading
 }: Props) {
   const { selectedDay, setSelectedDay } = useSelectedDate();
@@ -578,7 +667,8 @@ export function StockLedgerModule({
     products: false,
     accounts: false,
     months: false,
-    openingBalances: false
+    openingBalances: false,
+    config: false
   });
   const [summary, setSummary] = useState<StockMonthlySummary | null>(null);
   const [prevSummary, setPrevSummary] = useState<StockMonthlySummary | null>(null);
@@ -586,8 +676,6 @@ export function StockLedgerModule({
   const [accounts, setAccounts] = useState<StockAccountProfile[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [draft, setDraft] = useState<StockDailyAccountDraft>({ accountId: "", productQuantities: {}, paymentReceived: 0 });
-  const [selectedProductIdInput, setSelectedProductIdInput] = useState("");
-  const [selectedProductQtyInput, setSelectedProductQtyInput] = useState<number>(0);
   const [activeReportSubTab, setActiveReportSubTab] = useState<
     "masterSummary" | "stockPosition" | "overview" | "products" | "accounts" | "stockIn" | "stockOut" | "payments" | "dues" | "currentStock" | "cashCredit" | "audit"
   >("masterSummary");
@@ -607,6 +695,11 @@ export function StockLedgerModule({
   const monthBootstrapPendingRef = useRef(false);
   const openingSeedAttemptedRef = useRef(false);
   const [openingBalances, setOpeningBalances] = useState<StockOpeningBalances>({ openingStock: {}, jazzOpeningPayable: 0 });
+  const [stockSettingsConfig, setStockSettingsConfig] = useState<StockSettingsConfig>({ allowManualCarryForwardInput: false });
+  const ledgerReadDecision = useMemo(
+    () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "stock", role, monthId }),
+    [ledgerReadModeConfig, monthId, role]
+  );
   const stockDraftRef = useRef(draft);
   const stockDraftDirtyRef = useRef(false);
   const stockDraftHydrationKeyRef = useRef("");
@@ -697,7 +790,13 @@ export function StockLedgerModule({
       accountOpeningBalance: selectedAccount.openingBalance
     })
     : 0;
-  const selectedCarryForwardSource = stockCarryForwardSourceLabel({ previousEntry, previousMonthDueBalance });
+  const allowManualCarryForwardInput = stockSettingsConfig.allowManualCarryForwardInput === true;
+  function carryForwardForDraft(nextDraft: StockDailyAccountDraft) {
+    return allowManualCarryForwardInput
+      ? roundMoney(nextDraft.carryForwardBalance ?? selectedCarryForwardBalance)
+      : selectedCarryForwardBalance;
+  }
+  const effectiveCarryForwardBalance = carryForwardForDraft(draft);
 
   const allStockInRecords = useMemo(() => {
     return days.flatMap((day) => day.stockIn ?? []);
@@ -803,8 +902,11 @@ export function StockLedgerModule({
           }
         }
         return [{
+          entryId: entry.id,
           dayNo: day.dayNo,
           date: day.date,
+          createdAt: entry.createdAt,
+          updatedAt: entry.updatedAt,
           opening: entry.carryForwardBalance,
           productTotals,
           totalQty: entry.totalQty,
@@ -813,32 +915,46 @@ export function StockLedgerModule({
           currentDue: entry.dueBalance,
           closing: entry.dueBalance
         }];
-      });
+      })
+      .sort((a, b) =>
+        a.date.localeCompare(b.date) ||
+        a.createdAt - b.createdAt ||
+        a.updatedAt - b.updatedAt ||
+        a.entryId.localeCompare(b.entryId)
+      );
   }, [activeProducts, days, monthId, selectedAccount, selectedAccountId]);
+  const visibleSelectedDealerMasterDayRows = useMemo(() => {
+    return selectedDealerMasterDayRows.filter((row) => hasAnyNonZeroSummaryValue([
+      ...activeProducts.map((product) => row.productTotals[product.id]),
+      row.totalQty,
+      row.totalAmount,
+      row.totalPaymentReceived
+    ]));
+  }, [activeProducts, selectedDealerMasterDayRows]);
   const selectedDealerMasterDayTotals = useMemo(() => {
-    return selectedDealerMasterDayRows.reduce((totals, row) => {
+    const summedTotals = visibleSelectedDealerMasterDayRows.reduce((totals, row) => {
       for (const [productId, qty] of Object.entries(row.productTotals)) {
         totals.productTotals[productId] = roundMoney((totals.productTotals[productId] ?? 0) + qty);
       }
       return {
-        opening: roundMoney(totals.opening + row.opening),
         totalQty: roundMoney(totals.totalQty + row.totalQty),
         totalAmount: roundMoney(totals.totalAmount + row.totalAmount),
         totalPaymentReceived: roundMoney(totals.totalPaymentReceived + row.totalPaymentReceived),
-        currentDue: roundMoney(totals.currentDue + row.currentDue),
-        closing: roundMoney(totals.closing + row.closing),
         productTotals: totals.productTotals
       };
     }, {
-      opening: 0,
       totalQty: 0,
       totalAmount: 0,
       totalPaymentReceived: 0,
-      currentDue: 0,
-      closing: 0,
       productTotals: Object.fromEntries(activeProducts.map((product) => [product.id, 0]))
     });
-  }, [activeProducts, selectedDealerMasterDayRows]);
+    const latestRow = visibleSelectedDealerMasterDayRows.at(-1);
+
+    return {
+      ...summedTotals,
+      closing: latestRow?.closing ?? 0
+    };
+  }, [activeProducts, visibleSelectedDealerMasterDayRows]);
 
   const jazzPayableLedger = useMemo(() => {
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
@@ -849,10 +965,24 @@ export function StockLedgerModule({
   const stockDailyReady = stockSettingsReady && stockDaysInitialized && stockPreviousSummaryInitialized;
   const canEdit = stockDailyReady && canEditStockDay(role, month, monthId, selectedDayRecord, selectedDay, now);
   const canUseStockBackup = roleCanStock(role, "backup");
+  const selectedDayIsCanonicalReopen = selectedDayRecord?.status === "reopen";
+  const selectedDayIsCanonicalClosed = selectedDayRecord?.status === "closed";
+  const selectedDayIsLegacyLocked =
+    !selectedDayIsCanonicalReopen &&
+    (
+      selectedDayRecord?.closedAt != null ||
+      selectedDayRecord?.lockedAt != null ||
+      selectedDayRecord?.reopenedUntilAt != null
+    );
+  const selectedDayHasLegacyTimedReopen =
+    selectedDayIsLegacyLocked &&
+    (selectedDayRecord?.reopenedAt != null || selectedDayRecord?.reopenedUntilAt != null);
+  const shouldMirrorStockLedgerV2RawEntries = monthId === currentDateState(now).monthId && isLiveDay(monthId, selectedDay, now);
+  const shouldWriteCurrentStockDerivedBalances = monthId === currentDateState(now).monthId;
   const canReopenSelectedDay =
-    Boolean(selectedDayRecord && selectedDayRecord.status === "closed") &&
+    Boolean(selectedDayRecord && (selectedDayIsCanonicalClosed || selectedDayIsLegacyLocked)) &&
     month?.status !== "closed" &&
-    (role === "owner" || (role === "admin" && isLiveDay(monthId, selectedDay, now)));
+    canReopenDay(role);
   const carryForwardWarnings = useMemo(
     () => stockCarryForwardWarnings(days, summary, prevSummary),
     [days, prevSummary, summary]
@@ -861,12 +991,10 @@ export function StockLedgerModule({
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
       const day = days.find((item) => item.dayNo === dayNo);
-      const displayStatus = getStockDayStatus(monthId, dayNo, day, month?.status, now);
-      const status = !stockDaysInitialized && displayStatus !== "Future"
-        ? "loading"
-        : month?.status === "closed" ? "closed" : resolveUniversalDayStatus({
+      const future = isFutureDay(monthId, dayNo, now);
+      const status = month?.status === "closed" ? "closed" : resolveUniversalDayStatus({
           exists: Boolean(day),
-          future: displayStatus === "Future",
+          future,
           live: isLiveDay(monthId, dayNo, now),
           day,
           nowMs: now.getTime()
@@ -875,18 +1003,17 @@ export function StockLedgerModule({
         moduleKey: "stock",
         monthId,
         dayNo,
+        future,
         saved: Boolean(day),
         dateLabel: dayDate(monthId, dayNo),
         reopenedUntilAt: day?.reopenedUntilAt,
         reopenedAt: day?.reopenedAt,
-        disabledReason: displayStatus === "Future" ? "Future Stock Ledger days are disabled and cannot create records." : undefined,
+        disabledReason: future ? "Future Stock Ledger days are disabled and cannot create records." : undefined,
         status
       };
     });
   }, [days, month?.status, monthId, now, stockDaysInitialized]);
-  const selectedStockStatus = !stockDaysInitialized
-    ? "loading"
-    : stockCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "missing";
+  const selectedStockStatus = stockCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "open";
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -918,6 +1045,14 @@ export function StockLedgerModule({
       }, (err) => {
         markStockSettingInitialized("openingBalances");
         console.error("Could not subscribe to opening balances:", err);
+      }),
+      subscribeStockSettingsConfig((config, metadata) => {
+        setStockSettingsConfig(config);
+        markStockSettingInitialized("config");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (err) => {
+        markStockSettingInitialized("config");
+        console.error("Could not subscribe to stock settings config:", err);
       })
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -954,12 +1089,12 @@ export function StockLedgerModule({
         setDays(rows);
         setStockDaysInitialized(true);
         callbacksRef.current.onSnapshotMetadata(metadata);
-      }, (err) => callbacksRef.current.onFirestoreError(err.message)),
-      subscribeStockMonthlySummary(monthId, (nextSummary, metadata) => { setSummary(nextSummary); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message)),
+      }, (err) => callbacksRef.current.onFirestoreError(err.message), { readDecision: ledgerReadDecision }),
+      subscribeStockMonthlySummary(monthId, (nextSummary, metadata) => { setSummary(nextSummary); callbacksRef.current.onSnapshotMetadata(metadata); }, (err) => callbacksRef.current.onFirestoreError(err.message), { readDecision: ledgerReadDecision }),
       subscribeAuditLogs({ module: "stock", monthId }, (logs) => setAuditLogs(logs), (err) => console.error("Could not subscribe to audit logs:", err))
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [month, monthBootstrapPending, monthId, role, user]);
+  }, [ledgerReadDecision, month, monthBootstrapPending, monthId, role, user]);
 
   useEffect(() => {
     if (!user || !role) return;
@@ -1000,11 +1135,13 @@ export function StockLedgerModule({
         nextEntry?.products.find((item) => item.productId === product.id)?.quantity ?? 0
       ])),
       paymentReceived: nextEntry?.totalPaymentReceived ?? 0,
-      carryForwardBalance: selectedCarryForwardBalance,
+      carryForwardBalance: allowManualCarryForwardInput
+        ? nextEntry?.carryForwardBalance ?? selectedCarryForwardBalance
+        : selectedCarryForwardBalance,
       notes: nextEntry?.notes ?? ""
     };
     applyRemoteStockDraft(`${monthId}-${selectedDay}-${selectedAccountId}`, nextDraft);
-  }, [activeProducts, monthId, selectedAccountId, selectedCarryForwardBalance, selectedDay, selectedDayRecord, stockDailyReady]);
+  }, [activeProducts, allowManualCarryForwardInput, monthId, selectedAccountId, selectedCarryForwardBalance, selectedDay, selectedDayRecord, stockDailyReady]);
 
   const previewEntry = selectedAccount ? buildStockEntry({
     id: selectedAccount.id,
@@ -1015,7 +1152,7 @@ export function StockLedgerModule({
     draft,
     products,
     previous: selectedEntry,
-    carryForwardBalance: selectedCarryForwardBalance,
+    carryForwardBalance: effectiveCarryForwardBalance,
     createdBy: user.uid
   }) : null;
 
@@ -1045,7 +1182,7 @@ export function StockLedgerModule({
       draft: nextDraft,
       products,
       previous: selectedEntry,
-      carryForwardBalance: selectedCarryForwardBalance,
+      carryForwardBalance: carryForwardForDraft(nextDraft),
       createdBy: user.uid
     });
     if (!computedPreviewEntry) {
@@ -1083,9 +1220,11 @@ export function StockLedgerModule({
       previousSummary: prevSummary,
       products,
       skipExistingDocCleanup: true,
-      skipJazzCompanyBalanceWrite: true,
-      skipProductBalanceWrites: !productQuantitiesChanged,
-      skipRawEntryCleanup: true
+      skipJazzCompanyBalanceWrite: !shouldWriteCurrentStockDerivedBalances,
+      skipProductBalanceWrites: !shouldWriteCurrentStockDerivedBalances || !productQuantitiesChanged,
+      skipAccountBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
+      skipRawEntryCleanup: true,
+      skipLedgerV2RawEntryWrites: !shouldMirrorStockLedgerV2RawEntries
     });
     onQueueWrite(write, "Could not queue stock entry save.");
     try {
@@ -1151,9 +1290,18 @@ export function StockLedgerModule({
   };
 
   const [stockInQuantities, setStockInQuantities] = useState<Record<string, number>>({});
-  const [stockInMode, setStockInMode] = useState<"cash" | "credit">("credit");
+  const [stockInMode, setStockInMode] = useState<"cash" | "credit">("cash");
   const [stockInPaidAmount, setStockInPaidAmount] = useState<number>(0);
   const [stockInNotes, setStockInNotes] = useState<string>("");
+  const [editingStockInId, setEditingStockInId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setStockInQuantities({});
+    setStockInMode("cash");
+    setStockInPaidAmount(0);
+    setStockInNotes("");
+    setEditingStockInId(null);
+  }, [monthId, selectedDay]);
 
   const previewStockInRecord = useMemo((): StockInRecord | null => {
     const activeProducts = productsSorted(products.filter((p) => p.active));
@@ -1175,9 +1323,10 @@ export function StockLedgerModule({
     const totalAmount = roundMoney(lines.reduce((acc, curr) => acc + curr.amount, 0));
     const paidAmount = stockInMode === "cash" ? totalAmount : roundMoney(stockInPaidAmount || 0);
     const jazzPayableAmount = roundMoney(totalAmount - paidAmount);
+    const existingRecord = selectedDayRecord?.stockIn?.find((record) => record.id === editingStockInId);
 
     return {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: existingRecord?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       date: dayDate(monthId, selectedDay),
       monthId,
       sourceName: "Jazz Company" as const,
@@ -1188,11 +1337,12 @@ export function StockLedgerModule({
       paidAmount,
       jazzPayableAmount,
       notes: stockInNotes.trim() || undefined,
-      createdBy: user.uid,
-      createdAt: Date.now(),
+      createdBy: existingRecord?.createdBy ?? user.uid,
+      createdAt: existingRecord?.createdAt ?? Date.now(),
+      updatedBy: existingRecord ? user.uid : undefined,
       updatedAt: Date.now()
     };
-  }, [products, stockInQuantities, stockInMode, stockInPaidAmount, stockInNotes, selectedDay, monthId, user.uid]);
+  }, [editingStockInId, monthId, products, selectedDay, selectedDayRecord?.stockIn, stockInMode, stockInNotes, stockInPaidAmount, stockInQuantities, user.uid]);
 
   async function saveStockIn() {
     if (!canEdit) {
@@ -1213,7 +1363,7 @@ export function StockLedgerModule({
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const stockIn = [
-      ...(selectedDayRecord?.stockIn ?? []),
+      ...(selectedDayRecord?.stockIn ?? []).filter((record) => record.id !== editingStockInId),
       previewStockInRecord
     ];
     const nextDay = buildStockDayRecord({
@@ -1226,33 +1376,52 @@ export function StockLedgerModule({
       createdBy: user.uid
     });
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-    onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role), "Could not queue stock-in save.");
-    onStatus(`Saved Stock In from Jazz Company. totalAmount: ${formatMoney(previewStockInRecord.totalAmount)}, paid: ${formatMoney(previewStockInRecord.paidAmount)}`);
+    onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role, "save-day", {
+      skipLedgerV2RawEntryWrites: !shouldMirrorStockLedgerV2RawEntries,
+      skipProductBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
+      skipAccountBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
+      skipJazzCompanyBalanceWrite: !shouldWriteCurrentStockDerivedBalances
+    }), "Could not queue stock-in save.");
+    onStatus(`${editingStockInId ? "Updated" : "Saved"} Stock In from Jazz Company. totalAmount: ${formatMoney(previewStockInRecord.totalAmount)}, paid: ${formatMoney(previewStockInRecord.paidAmount)}`);
     // Clear form
     setStockInQuantities({});
+    setStockInMode("cash");
     setStockInPaidAmount(0);
     setStockInNotes("");
+    setEditingStockInId(null);
   }
 
   async function closeSelectedDay() {
-    if (!canEdit) {
-      onStatus("This Stock Ledger day cannot be closed for the current role/status.");
+    if (!roleCanStock(role, "daily") || (role !== "owner" && role !== "admin")) {
+      onStatus("Only owner/admin can close Stock Ledger days.");
       return;
     }
-    if (role === "admin" && !isLiveDay(monthId, selectedDay, now)) {
-      onStatus("Admins can only close the current Stock Ledger day.");
+    if (month?.status === "closed") {
+      onStatus("Reopen the Stock Ledger month before closing days.");
       return;
     }
-    if (!selectedDayRecord) return;
+    if (isFutureDay(monthId, selectedDay, now)) {
+      onStatus("Future Stock Ledger days are disabled.");
+      return;
+    }
     if (!window.confirm(`Close Stock Ledger day ${selectedDay}? Inputs and saves will be locked until an explicit reopen.`)) {
       return;
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
     const dayKey = `${monthId}/${selectedDay}`;
+    const baseDay = selectedDayRecord ?? buildStockDayRecord({
+      month: workingMonth,
+      dayNo: selectedDay,
+      date: dayDate(monthId, selectedDay),
+      entries: [],
+      createdBy: user.uid,
+      timestamp
+    });
     const nextDay = {
-      ...selectedDayRecord,
+      ...baseDay,
       status: "closed" as const,
+      manualOverride: true,
       closedAt: timestamp,
       closedBy: user.uid,
       lockedAt: timestamp,
@@ -1274,7 +1443,12 @@ export function StockLedgerModule({
       })
       .catch((error) => {
         closedDayKeysRef.current.delete(dayKey);
-        setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), selectedDayRecord].sort((a, b) => a.dayNo - b.dayNo));
+        setDays((current) => {
+          const withoutSelected = current.filter((day) => day.dayNo !== selectedDay);
+          return selectedDayRecord
+            ? [...withoutSelected, selectedDayRecord].sort((a, b) => a.dayNo - b.dayNo)
+            : withoutSelected;
+        });
         throw error;
       });
     onQueueWrite(closePromise, "Could not queue stock day close.");
@@ -1283,7 +1457,7 @@ export function StockLedgerModule({
 
   async function reopenSelectedDay() {
     if (!canReopenSelectedDay) {
-      onStatus("Owner can reopen any Stock Ledger day. Admin can reopen the current day only.");
+      onStatus("Only owner can reopen Stock Ledger days.");
       return;
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
@@ -1297,24 +1471,15 @@ export function StockLedgerModule({
       createdBy: user.uid,
       timestamp
     });
-    const liveReopen = isLiveDay(monthId, selectedDay, now);
-    const nextDay = liveReopen ? {
+    const nextDay = {
       ...day,
-      status: "open" as const,
+      status: "reopen" as const,
+      manualOverride: true,
       closedAt: undefined,
       closedBy: undefined,
       lockedAt: undefined,
       lockedBy: undefined,
       lockedByRole: undefined,
-      reopenedAt: timestamp,
-      reopenedBy: user.uid,
-      reopenedByRole: role ?? undefined,
-      reopenedUntilAt: undefined,
-      updatedBy: user.uid,
-      updatedAt: timestamp
-    } : {
-      ...day,
-      status: "open" as const,
       reopenedAt: timestamp,
       reopenedBy: user.uid,
       reopenedByRole: role ?? undefined,
@@ -1352,6 +1517,7 @@ export function StockLedgerModule({
       return {
         ...existing,
         status: "closed" as const,
+        manualOverride: true,
         closedAt: timestamp,
         closedBy: user.uid,
         lockedAt: timestamp,
@@ -1387,7 +1553,10 @@ export function StockLedgerModule({
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
-    const targetDayNos = availableDays(monthId, now);
+    const targetDayNos = availableDays(monthId, now).filter((dayNo) => {
+      const day = days.find((item) => item.dayNo === dayNo);
+      return day?.status !== "reopen" && (day?.status === "closed" || Boolean(day?.lockedAt || day?.closedAt || day?.reopenedUntilAt));
+    });
     const nextReopenedDays = targetDayNos.map((dayNo) => {
       const existing = days.find((day) => day.dayNo === dayNo) ?? buildStockDayRecord({
         month: workingMonth,
@@ -1399,7 +1568,13 @@ export function StockLedgerModule({
       });
       return {
         ...existing,
-        status: "open" as const,
+        status: "reopen" as const,
+        manualOverride: true,
+        closedAt: undefined,
+        closedBy: undefined,
+        lockedAt: undefined,
+        lockedBy: undefined,
+        lockedByRole: undefined,
         reopenedAt: timestamp,
         reopenedBy: user.uid,
         reopenedByRole: role ?? undefined,
@@ -1425,21 +1600,16 @@ export function StockLedgerModule({
   }
 
   async function masterRefreshStockCalculations() {
-    if (role !== "owner") {
-      onStatus("Only owner can run Stock Ledger master calculations.");
-      return;
-    }
-    if (days.length === 0) {
-      onStatus("No Stock Ledger days are available to refresh.");
+    if (!roleCanStock(role, MASTER_REFRESH_ACCESS)) {
+      onStatus("Only owner/admin can run Stock Ledger master calculations.");
       return;
     }
     const adapter = createStockRecalculationAdapter({
       monthId,
-      canRun: role === "owner" && days.length > 0 && month?.status !== "closed" && !monthBootstrapPending,
-      disabledReason: "Only owner can run Stock Ledger master refresh on an open month with saved days.",
+      canRun: roleCanStock(role, MASTER_REFRESH_ACCESS),
+      disabledReason: "Only owner/admin can run Stock Ledger master refresh.",
       run: async () => {
-        const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-        const result = await recalculateStockMonth(workingMonth, days, user, role);
+        const result = await recalculateStockLedgerLocal(monthId, user, role);
         setMonths((current) => [result.month, ...current.filter((item) => item.id !== result.month.id)].sort((a, b) => b.id.localeCompare(a.id)));
         setDays(result.days);
         setSummary(result.summary);
@@ -1515,16 +1685,21 @@ export function StockLedgerModule({
         busy={Boolean(loading) || monthBootstrapPending || !stockDailyReady}
         autoSaveStatus={section === "daily" ? (!stockDailyReady ? "readOnly" : canEdit ? stockEntryAutoSave.autoSaveStatus : selectedDayRecord?.status === "closed" ? "closed" : "readOnly") : undefined}
         permissions={{
-          canCloseSelectedDay: canEdit && (role === "owner" || isLiveDay(monthId, selectedDay, now)) && Boolean(selectedDayRecord && selectedDayRecord.status !== "closed" && !monthBootstrapPending),
+          canCloseSelectedDay: roleCanStock(role, "daily") &&
+            (role === "owner" || role === "admin") &&
+            month?.status !== "closed" &&
+            !isFutureDay(monthId, selectedDay, now) &&
+            selectedDayRecord?.status !== "closed" &&
+            !monthBootstrapPending,
           canReopenSelectedDay: canReopenSelectedDay && month?.status !== "closed" && !monthBootstrapPending,
           canReopenAllDays: role === "owner" && !monthBootstrapPending && availableDays(monthId, now).length > 0,
           canClosePreviousDaysExceptToday: role === "owner" && month?.status !== "closed" && !monthBootstrapPending,
-          canRunMasterRefresh: role === "owner" && days.length > 0 && month?.status !== "closed" && !monthBootstrapPending,
+          canRunMasterRefresh: roleCanStock(role, MASTER_REFRESH_ACCESS),
           closeDisabledReason: "This Stock Ledger day cannot be closed.",
-          reopenDisabledReason: "Owner can reopen any day. Admin can reopen current day only.",
+          reopenDisabledReason: "Only owner can reopen Stock Ledger days.",
           reopenAllDisabledReason: "Only owner can reopen all Stock Ledger days.",
           closePreviousDisabledReason: "Only owner can close previous Stock Ledger days.",
-          masterRefreshDisabledReason: "Only owner can run master refresh and the month must be open."
+          masterRefreshDisabledReason: "Only owner/admin can run master refresh."
         }}
         onCloseSelectedDay={closeSelectedDay}
         onReopenSelectedDay={reopenSelectedDay}
@@ -1541,12 +1716,18 @@ export function StockLedgerModule({
               <Save />
               Save
             </button>
-            <button
-              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
-              disabled={!canEdit || Boolean(loading) || monthBootstrapPending || verifiedSave?.status === "saving"}
-              title={!canEdit ? "Reopen the day before saving." : "Save immediately and wait for Firestore confirmation"}
-              onClick={() => void handleVerifiedSave()}
-            >
+	            <button
+	              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
+	              disabled={!canEdit || Boolean(loading) || monthBootstrapPending || verifiedSave?.status === "saving"}
+	              title={!canEdit
+                  ? selectedDayHasLegacyTimedReopen
+                    ? "This day has legacy timed reopen data. Owner must reopen it again before saving."
+                    : selectedDayIsCanonicalClosed || selectedDayIsLegacyLocked
+                      ? "Reopen the day before saving."
+                      : "You do not have permission to save this stock day."
+                  : "Save immediately and wait for Firestore confirmation"}
+	              onClick={() => void handleVerifiedSave()}
+	            >
               <Save />
               Save Now & Verify
             </button>
@@ -1668,6 +1849,16 @@ export function StockLedgerModule({
           </ul>
         </div>
       )}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">Stock Ledger</h2>
+          <p className="mt-1 text-sm text-slate-400">{monthLabel(monthId)} · {month?.status ?? "open"} · {syncLabel}</p>
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Active Month</p>
+          <p className="mt-1 text-sm font-medium text-white">{monthLabel(monthId)}</p>
+        </div>
+      </div>
       <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-3 text-slate-100 shadow-xl shadow-black/20">
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2">
@@ -1869,7 +2060,7 @@ export function StockLedgerModule({
                   </span>
                   <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.stockIn ?? []).length} shipments</span>
                 </h4>
-                <div className="table-wrap max-h-60 overflow-y-auto">
+                <div className="table-wrap">
                   <table className="!text-xs">
                     <thead>
                       <tr>
@@ -1908,7 +2099,7 @@ export function StockLedgerModule({
                   </span>
                   <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.entries ?? []).length} accounts allotted</span>
                 </h4>
-                <div className="table-wrap max-h-60 overflow-y-auto">
+                <div className="table-wrap">
                   <table className="!text-xs">
                     <thead>
                       <tr>
@@ -1945,8 +2136,8 @@ export function StockLedgerModule({
         <>
           <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950/70 border-slate-800 shadow-xl">
             <div className="panel-title border-b border-slate-800/60 pb-4">
-              <div>
-                <h2>Daily Stock Entry</h2>
+              <div className="shrink-0">
+                <h2>Stock Issuance</h2>
                 <p className="flex flex-wrap items-center gap-1.5 text-slate-400 text-sm mt-1">
                   <span>{monthLabel(monthId)}</span>
                   <span className="text-slate-700">·</span>
@@ -1957,46 +2148,59 @@ export function StockLedgerModule({
                   <span className="text-slate-700">·</span>
                   <span className="text-slate-500 uppercase text-[10px] font-semibold tracking-wider">Day:</span>
                   <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getDayStatusChipClass(selectedDayStatus)}`}>{selectedDayStatus}</span>
-                  {selectedDayRecord && isReopenActive(selectedDayRecord, now) && (
-                    <>
-                      <span className="text-slate-700">·</span>
-                      <span className="text-[10px] font-semibold uppercase text-emerald-300 animate-pulse">
-                        Reopened until manual close
-                      </span>
-                    </>
-                  )}
-                </p>
+	                  {selectedDayRecord && isReopenActive(selectedDayRecord, now) && (
+	                    <>
+	                      <span className="text-slate-700">·</span>
+	                      <span className="text-[10px] font-semibold uppercase text-emerald-300 animate-pulse">
+	                        Reopened until manual close
+	                      </span>
+	                    </>
+	                  )}
+	                  {selectedDayHasLegacyTimedReopen && (
+	                    <>
+	                      <span className="text-slate-700">·</span>
+	                      <span className="text-[10px] font-semibold uppercase text-amber-300">
+	                        Owner must reopen again before editing
+	                      </span>
+	                    </>
+	                  )}
+	                </p>
               </div>
-              <CalendarDays className="text-emerald-500 h-5 w-5" />
-            </div>
-
-            <div className="mt-5 grid grid-cols-1 md:grid-cols-12 gap-5 items-end">
-              {/* Account Dropdown Section */}
-              <div className="md:col-span-8">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
-                  Select CCR/DO Account
-                </label>
-                <select 
-                  value={selectedAccountId} 
+              <div className="flex min-w-0 flex-1 flex-wrap items-end justify-end gap-2">
+                <select
+                  aria-label="Employee / Dealer"
+                  title="Employee / Dealer"
+                  className="min-w-56 flex-1 !border-emerald-500 focus:!border-emerald-400"
+                  value={selectedAccountId}
                   disabled={!stockDailyReady || !canEdit || activeAccounts.length === 0 || monthBootstrapPending}
                   onChange={(event) => setSelectedAccountId(event.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
                 >
-                  {activeAccounts.length === 0 ? (
-                    <option value="">No active accounts available</option>
-                  ) : (
-                    activeAccounts.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.name} · {account.type}
-                      </option>
-                    ))
-                  )}
+                  {activeAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>{account.name} · {account.type}</option>
+                  ))}
                 </select>
-              </div>
-
-              {/* Action Buttons Section */}
-              <div className="md:col-span-4 flex flex-wrap gap-2.5">
-                <span className="flex flex-1 items-center rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                <div className="w-[9.6rem]">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase text-slate-500">Payment Received</span>
+                  <NumberInput
+                    value={draft.paymentReceived ?? 0}
+                    disabled={!canEdit || monthBootstrapPending}
+                    onFocus={() => focusStockDraftField("paymentReceived")}
+                    onBlur={() => blurStockDraftField("paymentReceived")}
+                    onChange={(value) => updateStockDraft((current) => ({ ...current, paymentReceived: value }))}
+                  />
+                </div>
+                <div className="w-48">
+                  <span className="mb-1 block text-[10px] font-semibold uppercase text-slate-500">Notes</span>
+                  <input
+                    value={draft.notes ?? ""}
+                    disabled={!canEdit || monthBootstrapPending}
+                    onFocus={() => focusStockDraftField("notes")}
+                    onBlur={() => blurStockDraftField("notes")}
+                    onChange={(event) => updateStockDraft((current) => ({ ...current, notes: event.target.value }))}
+                    placeholder="Optional note"
+                  />
+                </div>
+                <span className="inline-flex whitespace-nowrap rounded-md border border-slate-800 bg-slate-950/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                   {!stockDailyReady
                     ? "Loading..."
                     : !canEdit
@@ -2007,6 +2211,7 @@ export function StockLedgerModule({
                       ? "Autosave failed"
                       : "Autosave on"}
                 </span>
+                <CalendarDays className="text-emerald-500 h-5 w-5" />
               </div>
             </div>
 
@@ -2014,256 +2219,35 @@ export function StockLedgerModule({
             {!stockDailyReady && <p className="status mt-4 bg-slate-500/10 text-slate-300 border border-slate-500/20 px-3 py-2 rounded-lg text-xs">Loading Stock Ledger data...</p>}
             {stockDailyReady && !canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
             {stockDailyReady && activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
-          </section>
 
-          {selectedAccount && previewEntry && (
-            <section className="panel">
-              <div className="panel-title">
-                <div>
-                  <h2>{selectedAccount.name} Stock Table</h2>
-                  <p>Each product generates quantity, amount, payment, and due columns from Product Settings.</p>
-                </div>
-                <Save />
-              </div>
-              {/* Single Row Product Adder */}
-              <div className="mb-6 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4 items-end">
-                  <label>
-                    Select Product
-                    <select
-                      value={selectedProductIdInput || (activeProducts[0]?.id ?? "")}
-                      disabled={!canEdit || activeProducts.length === 0 || monthBootstrapPending}
-                      onChange={(e) => {
-                        const prodId = e.target.value;
-                        setSelectedProductIdInput(prodId);
-                        setSelectedProductQtyInput(draft.productQuantities[prodId] ?? 0);
-                      }}
-                      className="mt-1"
-                    >
-                      {activeProducts.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} (Rs. {p.rate})
-                        </option>
-                      ))}
-                      {activeProducts.length === 0 && <option value="">-- No Products --</option>}
-                    </select>
-                  </label>
-
-                  <label>
-                    Quantity
-                    <div className="mt-1">
-                      <NumberInput
-                        value={selectedProductQtyInput}
-                        disabled={!canEdit || activeProducts.length === 0 || monthBootstrapPending}
-                        onChange={(val) => setSelectedProductQtyInput(val)}
-                      />
-                    </div>
-                  </label>
-
-                  <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3 h-[52px] flex flex-col justify-center">
-                    <p className="text-[10px] uppercase font-semibold text-slate-500 tracking-wider">Subtotal Amount</p>
-                    <p className="mt-0.5 text-base font-bold text-slate-200">
-                      {(() => {
-                        const activeId = selectedProductIdInput || activeProducts[0]?.id || "";
-                        const prod = activeProducts.find((p) => p.id === activeId);
-                        return prod ? formatMoney(selectedProductQtyInput * prod.rate) : "Rs. 0.00";
-                      })()}
-                    </p>
-                  </div>
-
-                  <div>
-                    <button
-                      type="button"
-                      className="btn-primary w-full h-[38px] justify-center"
-                      disabled={!canEdit || activeProducts.length === 0 || monthBootstrapPending}
-                      onClick={() => {
-                        const activeId = selectedProductIdInput || activeProducts[0]?.id || "";
-                        if (!activeId) return;
-                        const prevQty = draft.productQuantities[activeId] ?? 0;
-                        const nextDraft = {
-                          ...draft,
-                          productQuantities: {
-                            ...draft.productQuantities,
-                            [activeId]: prevQty + selectedProductQtyInput
-                          }
-                        };
-                        updateStockDraft(nextDraft);
-                        setSelectedProductQtyInput(0);
-                        setSelectedProductIdInput("");
-                        void saveEntry(nextDraft);
-                      }}
-                    >
-                      <PlusCircle className="mr-1.5 h-4 w-4" />
-                      Add / Update Item
-                    </button>
-                  </div>
-                </div>
-                {activeProducts.length === 0 && (
-                  <p className="warning mt-3">No active stock products configured. Owner must configure Stock Settings first.</p>
-                )}
-              </div>
-
-              {/* Added Products Table */}
-              <div className="mb-6">
-                <h3 className="text-sm font-semibold text-slate-100 mb-2">Added Products List</h3>
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Product Name</th>
-                        <th>Rate Snapshot</th>
-                        <th>Quantity</th>
-                        <th>Calculated Amount</th>
-                        {canEdit && <th>Action</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(() => {
-                        const addedItems = Object.entries(draft.productQuantities).filter(([_, qty]) => qty > 0);
-                        const totalQty = addedItems.reduce((sum, [, qty]) => sum + qty, 0);
-                        const totalAmount = addedItems.reduce((sum, [prodId, qty]) => {
-                          const prod = products.find((p) => p.id === prodId);
-                          return sum + (qty * (prod?.rate ?? 0));
-                        }, 0);
-                        return (
-                          <>
-                            {addedItems.map(([prodId, qty]) => {
-                              const prod = products.find((p) => p.id === prodId);
-                              if (!prod) return null;
-                              const snapshot = previewEntry.products.find((item) => item.productId === prodId);
-                              return (
-                                <tr key={prodId}>
-                                  <td className="font-semibold text-slate-200">{prod.name}</td>
-                                  <td>{formatMoney(prod.rate)}</td>
-                                  <td>
-                                    {canEdit ? (
-                                      <div className="w-24">
-                                        <NumberInput
-                                          value={qty}
-                                          disabled={monthBootstrapPending}
-                                          onFocus={() => focusStockDraftField(`product:${prodId}`)}
-                                          onBlur={() => blurStockDraftField(`product:${prodId}`)}
-                                          onChange={(val) => {
-                                            updateStockDraft((curr) => ({
-                                              ...curr,
-                                              productQuantities: {
-                                                ...curr.productQuantities,
-                                                [prodId]: val
-                                              }
-                                            }));
-                                          }}
-                                        />
-                                      </div>
-                                    ) : (
-                                      qty
-                                    )}
-                                  </td>
-                                  <td className="font-mono text-slate-300">{formatMoney(snapshot?.amount ?? (qty * prod.rate))}</td>
-                                  {canEdit && (
-                                    <td>
-                                      <button
-                                        type="button"
-                                        className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
-                                        title="Remove product"
-                                        onClick={() => {
-                                          const nextQuantities = { ...draft.productQuantities };
-                                          delete nextQuantities[prodId];
-                                          const nextDraft = { ...draft, productQuantities: nextQuantities };
-                                          updateStockDraft(nextDraft);
-                                          void saveEntry(nextDraft);
-                                        }}
-                                      >
-                                        <Trash2 className="h-4 w-4" />
-                                      </button>
-                                    </td>
-                                  )}
-                                </tr>
-                              );
-                            })}
-                            {addedItems.length > 0 && (
-                              <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-                                <td className="text-slate-100">Total</td>
-                                <td className="text-slate-500">—</td>
-                                <td className="text-slate-100">{formatMoney(totalQty)}</td>
-                                <td className="font-mono text-slate-100">{formatMoney(totalAmount)}</td>
-                                {canEdit && <td className="text-slate-500">—</td>}
-                              </tr>
-                            )}
-                            {addedItems.length === 0 && (
-                              <tr>
-                                <td colSpan={5} className="text-center text-slate-500 py-4 italic">
-                                  No products added to this daily entry yet. Select a product above to begin.
-                                </td>
-                              </tr>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Single Account-Level Carry Forward & Payment Received Inputs */}
-              <div className="mt-6 border-t border-slate-800 pt-6">
-                <div className="mb-4">
-                  <h3 className="text-base font-semibold text-slate-100">Account Recovery & Due Calculations</h3>
-                  <p className="text-xs text-slate-400">Review the locked carry-forward and enter payment recovery for this daily entry.</p>
-                </div>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <label>
-                    Carry Forward / Initial Due Balance
-                    <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/40 p-3 font-semibold text-slate-300">
-                      {formatMoney(selectedCarryForwardBalance)}
-                    </div>
-                    <p className="mt-1 text-[11px] text-slate-500">{selectedCarryForwardSource}</p>
-                  </label>
-                  <label>
-                    Payment Received
-                    <div className="mt-1">
-                      <NumberInput
-                        value={draft.paymentReceived ?? 0}
-                        disabled={!canEdit || monthBootstrapPending}
-                        onFocus={() => focusStockDraftField("paymentReceived")}
-                        onBlur={() => blurStockDraftField("paymentReceived")}
-                        onChange={(value) => updateStockDraft((current) => ({ ...current, paymentReceived: value }))}
-                      />
-                    </div>
-                  </label>
-                </div>
-              </div>
-
-              <div className="mt-6 grid grid-cols-1 gap-3 md:grid-cols-5">
-                <MetricCard label="Total Qty" value={formatMoney(previewEntry.totalQty)} helper="All active products." />
-                <MetricCard label="Total Amount" value={formatMoney(previewEntry.totalAmount)} helper="Qty multiplied by rate snapshot." />
-                <MetricCard label="Carry Forward" value={formatMoney(previewEntry.carryForwardBalance)} helper="Previous outstanding due." />
-                <MetricCard label="Payment" value={formatMoney(previewEntry.totalPaymentReceived)} helper="Tracked single account payment." />
-                <MetricCard label="Due" value={formatMoney(previewEntry.dueBalance)} helper="Amount minus payment plus carry." />
-              </div>
-              <label className="mt-4">
-                Notes
-                <input
-                  value={draft.notes ?? ""}
-                  disabled={!canEdit || monthBootstrapPending}
-                  onFocus={() => focusStockDraftField("notes")}
-                  onBlur={() => blurStockDraftField("notes")}
-                  onChange={(event) => updateStockDraft((current) => ({ ...current, notes: event.target.value }))}
-                />
-              </label>
+            {selectedAccount && previewEntry && (
+              <>
+              <StockProductEntryTable
+                products={activeProducts}
+                quantities={draft.productQuantities}
+                quantityLabel="Quantity Issued"
+                totalQty={previewEntry.totalQty}
+                totalAmount={previewEntry.totalAmount}
+                disabled={!canEdit || monthBootstrapPending}
+                onQuantityFocus={(productId) => focusStockDraftField(`product:${productId}`)}
+                onQuantityBlur={(productId) => blurStockDraftField(`product:${productId}`)}
+                onQuantityChange={(productId, value) => updateStockDraft((current) => ({
+                  ...current,
+                  productQuantities: {
+                    ...current.productQuantities,
+                    [productId]: value
+                  }
+                }))}
+              />
               {!isLiveDay(monthId, selectedDay, now) && (
                 <p className="warning mt-4 flex items-start gap-1.5">
                   <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
                   <span>Warning: You are editing a past date. Saving changes here will not automatically update later days' carry-forward balances. Please verify subsequent days' balances if you change today's due balance.</span>
                 </p>
               )}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className="btn-secondary" disabled={!summary} onClick={() => summary && exportStockPrintable(summary, days)}>
-                  <Printer />
-                  Print Stock Report
-                </button>
-              </div>
-            </section>
-          )}
+              </>
+            )}
+          </section>
 
           {/* Whole Selected Month day-by-day overall summary */}
           {/* <section className="panel mt-6">
@@ -2295,8 +2279,8 @@ export function StockLedgerModule({
                 <tbody>
                   {selectedAccountDayRows.map((row) => {
                     const fullDay = days.find((d) => d.dayNo === row.dayNo);
-                    const isReopened = row.status === "closed" && fullDay && isReopenActive(fullDay, now);
-                    const statusLabel = isReopened ? "Re-Open" : row.status === "closed" ? "Closed" : "Open";
+                    const isReopened = fullDay?.status === "reopen" || Boolean(fullDay && isReopenActive(fullDay, now));
+                    const statusLabel = isReopened ? "Reopen" : row.status === "closed" ? "Closed" : "Open";
                     return (
                       <tr key={row.dayNo}>
                         <td className="font-semibold text-slate-200">
@@ -2354,63 +2338,101 @@ export function StockLedgerModule({
           <section className="panel mt-6">
             <div className="panel-title">
               <div>
-                <h2>Dealer Master Summary</h2>
-                <p>Month summary for the selected dealer only.</p>
+                <h2>{selectedAccount?.name ?? "Employee Monthly Summary"}</h2>
               </div>
               <FileSpreadsheet className="text-emerald-500" />
             </div>
             {selectedDealerMasterDayRows.length === 0 ? (
               <p className="warning mt-4">Select a CCR/DO/DSO account to view the dealer master summary.</p>
+            ) : visibleSelectedDealerMasterDayRows.length === 0 ? (
+              <p className="status mt-4">No employee stock issuance activity found for this month.</p>
             ) : (
-              <div className="table-wrap">
-                <table className="!text-xs">
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Opening Balance</th>
-                      {activeProducts.map((p) => (
-                        <th key={p.id} className="text-center font-mono">{p.name}</th>
-                      ))}
-                      <th>Total Allotted Qty</th>
-                      <th>Total Stock Amount</th>
-                      <th>Payment Received</th>
-                      <th>Current Due</th>
-                      <th>Closing Balance</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selectedDealerMasterDayRows.map((row) => (
-                      <tr key={row.dayNo}>
-                        <td className="font-semibold text-slate-200">{new Date(`${monthId}-${String(row.dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
-                        <td className="font-mono text-slate-100">{formatMoney(row.opening)}</td>
+              <>
+                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+                  {[
+                    ["Opening Balance", selectedDealerMasterSummary?.opening ?? 0],
+                    ["Total Quantity", selectedDealerMasterDayTotals.totalQty],
+                    ["Total Amount", selectedDealerMasterDayTotals.totalAmount],
+                    ["Payment", selectedDealerMasterDayTotals.totalPaymentReceived],
+                    ["Closing Balance", selectedDealerMasterDayTotals.closing]
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-md border border-slate-800 bg-slate-950/40 px-3 py-2">
+                      <p className="text-xs font-medium text-slate-400">{label}</p>
+                      <p className="mt-1 font-mono text-sm font-semibold text-slate-100">{formatMoney(Number(value))}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="table-wrap mt-3">
+                  <table className="!text-xs">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Opening Balance</th>
                         {activeProducts.map((p) => (
-                          <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
-                            {formatMoney(row.productTotals[p.id] ?? 0)}
-                          </td>
+                          <th key={p.id} className="text-center font-mono">{p.name}</th>
                         ))}
-                        <td className="font-semibold text-slate-300">{formatMoney(row.totalQty)}</td>
-                        <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
-                        <td className="text-emerald-400 font-semibold font-mono">{formatMoney(row.totalPaymentReceived)}</td>
-                        <td className="text-slate-300 font-semibold font-mono">{formatMoney(row.currentDue)}</td>
-                        <td className="text-rose-400 font-bold font-mono">{formatMoney(row.closing)}</td>
+                        <th>Total Allotted Qty</th>
+                        <th>Total Stock Amount</th>
+                        <th>Payment Received</th>
+                        <th>Closing Balance</th>
                       </tr>
-                    ))}
-                    <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-                      <td className="text-slate-100">Total</td>
-                      <td className="text-slate-500">—</td>
-                      {activeProducts.map((p) => (
-                        <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.productTotals[p.id] ?? 0)}</td>
+                    </thead>
+                    <tbody>
+                      {visibleSelectedDealerMasterDayRows.map((row) => (
+                        <tr key={row.dayNo}>
+                          <td className="font-semibold text-slate-200">{new Date(`${monthId}-${String(row.dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
+                          <td className="font-mono text-slate-100">{formatMoney(row.opening)}</td>
+                          {activeProducts.map((p) => (
+                            <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
+                              {formatMoney(row.productTotals[p.id] ?? 0)}
+                            </td>
+                          ))}
+                          <td className="font-semibold text-slate-300">{formatMoney(row.totalQty)}</td>
+                          <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
+                          <td className="text-emerald-400 font-semibold font-mono">{formatMoney(row.totalPaymentReceived)}</td>
+                          <td className="text-rose-400 font-bold font-mono">{formatMoney(row.closing)}</td>
+                        </tr>
                       ))}
-                      <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalQty)}</td>
-                      <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalAmount)}</td>
-                      <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterDayTotals.totalPaymentReceived)}</td>
-                      <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.currentDue)}</td>
-                      <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterDayTotals.closing)}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+                      <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
+                        <td className="text-slate-100">Total</td>
+                        <td className="text-slate-500">—</td>
+                        {activeProducts.map((p) => (
+                          <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.productTotals[p.id] ?? 0)}</td>
+                        ))}
+                        <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalQty)}</td>
+                        <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalAmount)}</td>
+                        <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterDayTotals.totalPaymentReceived)}</td>
+                        <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterDayTotals.closing)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
+          </section>
+
+          <section className="panel mt-6">
+            <div className="panel-title">
+              <div>
+                <h2>Stock Issuance Summary</h2>
+                {/* <p>Reusable full-month issuance summary for all dealers and active products.</p> */}
+              </div>
+              <FileSpreadsheet className="text-emerald-500" />
+            </div>
+            <StockIssuanceSummaryTable
+              products={products}
+              accounts={accounts}
+              days={days}
+              prevSummary={prevSummary}
+              filterStartDate={1}
+              filterEndDate={daysInMonth(monthId)}
+              filterProductId=""
+              filterAccountType=""
+              filterAccountId=""
+              filterDueStatus=""
+              filterDayStatus=""
+              filterActiveStatus="all"
+            />
           </section>
         </>
       )}
@@ -2806,7 +2828,6 @@ export function StockLedgerModule({
                       <th>Total Stock Amount</th>
                       <th>Payment Received</th>
                       <th>Adjustment / Return</th>
-                      <th>Current Due</th>
                       <th>Closing Balance</th>
                     </tr>
                   </thead>
@@ -2873,7 +2894,6 @@ export function StockLedgerModule({
                             <td className="font-mono text-slate-300">{formatMoney(totalAmount)}</td>
                             <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totalPayments)}</td>
                             <td className="text-slate-500 font-mono">—</td>
-                            <td className="text-slate-300 font-semibold font-mono">{formatMoney(currentDue)}</td>
                             <td className="text-rose-400 font-bold font-mono">{formatMoney(closing)}</td>
                           </tr>
                         );
@@ -2893,7 +2913,6 @@ export function StockLedgerModule({
                             <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
                             <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totals.totalPayments)}</td>
                             <td className="text-slate-500 font-mono">—</td>
-                            <td className="text-slate-100">{formatMoney(totals.currentDue)}</td>
                             <td className="text-rose-400 font-bold font-mono">{formatMoney(totals.closing)}</td>
                           </tr>
                         </>
@@ -2909,7 +2928,7 @@ export function StockLedgerModule({
 
       {activeSectionVisible && section === "stockIn" && (
         <>
-          <section className="panel">
+          {/* <section className="panel">
             <div className="panel-title">
               <div>
                 <h2>Stock In from Jazz Company</h2>
@@ -2917,13 +2936,13 @@ export function StockLedgerModule({
               </div>
               <CalendarDays />
             </div>
-          </section>
+          </section> */}
 
           <section className="panel">
             <div className="panel-title">
               <div>
-                <h2>Enter Stock Received from Jazz Company</h2>
-                <p>Enter quantities received. Product rates are snapshots of current active prices.</p>
+                <h2>Stock Received from Jazz Company</h2>
+                {/* <p>Enter quantities received. Product rates are snapshots of current active prices.</p> */}
               </div>
               <PlusCircle className="text-emerald-500" />
             </div>
@@ -2931,125 +2950,88 @@ export function StockLedgerModule({
             {activeProducts.length === 0 ? (
               <p className="warning">No active stock products configured. Owner must configure Stock Settings first.</p>
             ) : (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <label>
-                    Stock In Mode
-                    <select
-                      value={stockInMode}
-                      disabled={!canEdit || monthBootstrapPending}
-                      onChange={(e) => {
-                        const m = e.target.value as "cash" | "credit";
-                        setStockInMode(m);
-                        if (m === "cash") {
-                          setStockInPaidAmount(0);
-                        }
-                      }}
-                    >
-                      <option value="credit">Credit (Paid Later / Partial)</option>
-                      <option value="cash">Cash (Paid Fully)</option>
-                    </select>
-                  </label>
-
-                  <label>
-                    Paid Amount (Rs.)
-                    <input
-                      type="number"
-                      value={stockInMode === "cash" ? (previewStockInRecord?.totalAmount ?? 0) : stockInPaidAmount}
-                      disabled={!canEdit || stockInMode === "cash" || monthBootstrapPending}
-                      onChange={(e) => setStockInPaidAmount(Math.max(0, Number(e.target.value) || 0))}
-                    />
-                  </label>
-                </div>
-
-                <div className="table-wrap">
-                  <table>
-                    <thead>
+              <div>
+                <StockProductEntryTable
+                  products={activeProducts}
+                  quantities={stockInQuantities}
+                  quantityLabel="Quantity Received"
+                  totalQty={previewStockInRecord?.totalQty ?? 0}
+                  totalAmount={previewStockInRecord?.totalAmount ?? 0}
+                  disabled={!canEdit || monthBootstrapPending}
+                  onQuantityChange={(productId, value) => setStockInQuantities((current) => ({
+                    ...current,
+                    [productId]: value
+                  }))}
+                  footerRows={(
+                    <>
                       <tr>
-                        <th>Product</th>
-                        <th>Current Rate (Rs.)</th>
-                        <th>Quantity Received</th>
-                        <th>Subtotal (Rs.)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {activeProducts.map((p) => {
-                        const qty = stockInQuantities[p.id] ?? 0;
-                        const subtotal = roundMoney(qty * p.rate);
-                        return (
-                          <tr key={p.id}>
-                            <td className="font-semibold text-slate-200">{p.name}</td>
-                            <td>{formatMoney(p.rate)}</td>
-                            <td>
-                              <input
-                                type="number"
-                                className="w-24 text-center"
-                                value={qty || ""}
-                                placeholder="0"
-                                disabled={!canEdit || monthBootstrapPending}
-                                onChange={(e) => {
-                                  const val = Math.max(0, Number(e.target.value) || 0);
-                                  setStockInQuantities((prev) => ({ ...prev, [p.id]: val }));
-                                }}
+                        <td>
+                          <select
+                            className="!h-8 !min-h-8"
+                            value={stockInMode}
+                            disabled={!canEdit || monthBootstrapPending}
+                            onChange={(event) => {
+                              const mode = event.target.value === "credit" ? "credit" : "cash";
+                              setStockInMode(mode);
+                              if (mode === "cash") setStockInPaidAmount(0);
+                            }}
+                          >
+                            <option value="cash">Cash (Paid Fully)</option>
+                            <option value="credit">Credit Party (Partial / Later)</option>
+                          </select>
+                        </td>
+                        <td className="min-w-56">
+                          <div className="flex h-8 items-center gap-2">
+                            <span className="shrink-0 font-sans font-semibold text-slate-400">Paid Amount</span>
+                            <div className="min-w-36 flex-1">
+                              <NumberInput
+                                value={stockInMode === "cash" ? (previewStockInRecord?.totalAmount ?? 0) : stockInPaidAmount}
+                                disabled={!canEdit || stockInMode === "cash" || monthBootstrapPending}
+                                onChange={(value) => setStockInPaidAmount(Math.max(0, value))}
                               />
-                            </td>
-                            <td className="text-slate-300 font-mono">{formatMoney(subtotal)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                {previewStockInRecord && (
-                  <div className="p-4 rounded-lg bg-slate-900/60 border border-slate-800 grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div>
-                      <span className="text-slate-400 text-xs uppercase font-semibold">Total Qty</span>
-                      <p className="text-lg font-bold text-slate-100">{formatMoney(previewStockInRecord.totalQty)}</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 text-xs uppercase font-semibold">Total Amount</span>
-                      <p className="text-lg font-bold text-emerald-400">{formatMoney(previewStockInRecord.totalAmount)}</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 text-xs uppercase font-semibold">Paid Amount</span>
-                      <p className="text-lg font-bold text-blue-400">{formatMoney(previewStockInRecord.paidAmount)}</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 text-xs uppercase font-semibold">Remaining Payable</span>
-                      <p className="text-lg font-bold text-rose-400">{formatMoney(previewStockInRecord.jazzPayableAmount)}</p>
-                    </div>
-                  </div>
-                )}
-
-                <label>
-                  Notes / Reference No.
-                  <input
-                    type="text"
-                    value={stockInNotes}
-                    disabled={!canEdit || monthBootstrapPending}
-                    onChange={(e) => setStockInNotes(e.target.value)}
-                    placeholder="e.g. Shipment receipt #4823"
-                  />
-                </label>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="min-w-48 whitespace-nowrap font-mono text-rose-300">
+                          <div className="flex h-8 items-center gap-2">
+                            <span className="font-sans font-semibold text-slate-400">Payable</span>
+                            <span>{formatMoney(previewStockInRecord?.jazzPayableAmount ?? 0)}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="flex h-8 items-center gap-2">
+                          <input
+                            type="text"
+                            className="!h-8 !min-h-8"
+                            value={stockInNotes}
+                            disabled={!canEdit || monthBootstrapPending}
+                            onChange={(event) => setStockInNotes(event.target.value)}
+                            placeholder="Receipt or invoice reference"
+                          />
+                          <button
+                            type="button"
+                            className="btn-primary stock-entry-action !h-8 !min-h-8 shrink-0 !px-3"
+                            title={editingStockInId ? "Update stock lifting row" : "Save stock lifting row"}
+                            aria-label={editingStockInId ? "Update stock lifting row" : "Save stock lifting row"}
+                            disabled={!canEdit || !previewStockInRecord || monthBootstrapPending}
+                            onClick={() => void saveStockIn()}
+                          >
+                            <Save className="h-4 w-4" />
+                            <span>{editingStockInId ? "Update Stock" : "Add Stock"}</span>
+                          </button>
+                          </div>
+                        </td>
+                      </tr>
+                    </>
+                  )}
+                />
 
                 {stockInMode === "cash" && previewStockInRecord && (
-                  <p className="warning text-xs flex items-center gap-1.5">
+                  <p className="warning mt-3 text-xs flex items-center gap-1.5">
                     <Info className="h-3.5 w-3.5 text-blue-400 shrink-0" />
                     <span>In Cash mode, the paid amount is automatically set to the full total amount.</span>
                   </p>
                 )}
-
-                <div className="flex gap-2 mt-4">
-                  <button
-                    className="btn-primary"
-                    disabled={!canEdit || !previewStockInRecord || monthBootstrapPending}
-                    onClick={() => void saveStockIn()}
-                  >
-                    <Save />
-                    Save Jazz Stock In
-                  </button>
-                </div>
               </div>
             )}
           </section>
@@ -3058,7 +3040,7 @@ export function StockLedgerModule({
             <div className="panel-title">
               <div>
                 <h2>Today's Stock Received Records</h2>
-                <p>Saved shipments from Jazz Company for this date.</p>
+                {/* <p>Saved shipments from Jazz Company for this date.</p> */}
               </div>
             </div>
             <div className="table-wrap">
@@ -3099,31 +3081,61 @@ export function StockLedgerModule({
                         <td className="text-rose-400 font-semibold">{formatMoney(record.jazzPayableAmount)}</td>
                         <td className="text-slate-400 italic text-xs">{record.notes ?? "—"}</td>
                         <td>
-                          <button
-                            className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
-                            title="Delete record"
-                            disabled={!canEdit || monthBootstrapPending}
-                            onClick={async () => {
-                              if (window.confirm("Are you sure you want to delete this Jazz stock-in record? This will reduce the product stock balance and update the payable ledger.")) {
-                                const nextStockIn = selectedDayRecord.stockIn?.filter((r) => r.id !== record.id) ?? [];
-                                const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
-                                const nextDay = buildStockDayRecord({
-                                  month: workingMonth,
-                                  dayNo: selectedDay,
-                                  date: dayDate(monthId, selectedDay),
-                                  entries: selectedDayRecord.entries ?? [],
-                                  stockIn: nextStockIn,
-                                  previous: selectedDayRecord,
-                                  createdBy: user.uid
-                                });
-                                setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
-                                onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role), "Could not queue delete stock-in.");
-                                onStatus("Deleted Jazz stock-in record successfully.");
-                              }
-                            }}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              className="btn-secondary !h-8 !w-8 !px-0"
+                              title="Edit record"
+                              aria-label="Edit stock lifting record"
+                              disabled={!canEdit || monthBootstrapPending}
+                              onClick={() => {
+                                setStockInQuantities(Object.fromEntries(record.products.map((product) => [product.productId, product.quantity])));
+                                setStockInMode(record.stockInMode === "credit" ? "credit" : "cash");
+                                setStockInPaidAmount(record.stockInMode === "credit" ? record.paidAmount : 0);
+                                setStockInNotes(record.notes ?? "");
+                                setEditingStockInId(record.id);
+                                window.scrollTo({ top: 0, behavior: "smooth" });
+                              }}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </button>
+                            <button
+                              className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
+                              title="Delete record"
+                              disabled={!canEdit || monthBootstrapPending}
+                              onClick={async () => {
+                                if (window.confirm("Are you sure you want to delete this Jazz stock-in record? This will reduce the product stock balance and update the payable ledger.")) {
+                                  const nextStockIn = selectedDayRecord.stockIn?.filter((r) => r.id !== record.id) ?? [];
+                                  const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
+                                  const nextDay = buildStockDayRecord({
+                                    month: workingMonth,
+                                    dayNo: selectedDay,
+                                    date: dayDate(monthId, selectedDay),
+                                    entries: selectedDayRecord.entries ?? [],
+                                    stockIn: nextStockIn,
+                                    previous: selectedDayRecord,
+                                    createdBy: user.uid
+                                  });
+                                  setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+                                  onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role, "save-day", {
+                                    skipLedgerV2RawEntryWrites: !shouldMirrorStockLedgerV2RawEntries,
+                                    skipProductBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
+                                    skipAccountBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
+                                    skipJazzCompanyBalanceWrite: !shouldWriteCurrentStockDerivedBalances
+                                  }), "Could not queue delete stock-in.");
+                                  if (editingStockInId === record.id) {
+                                    setStockInQuantities({});
+                                    setStockInMode("cash");
+                                    setStockInPaidAmount(0);
+                                    setStockInNotes("");
+                                    setEditingStockInId(null);
+                                  }
+                                  onStatus("Deleted Jazz stock-in record successfully.");
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -3135,6 +3147,26 @@ export function StockLedgerModule({
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-title">
+              <div>
+                <h2>Stock Lifting Summary</h2>
+                {/* <p>Reusable full-month stock lifting, in-hand, and valuation summary.</p> */}
+              </div>
+              <FileSpreadsheet className="text-emerald-500" />
+            </div>
+            <StockLiftingSummaryTable
+              products={products}
+              days={days}
+              monthId={monthId}
+              filterStartDate={1}
+              filterEndDate={daysInMonth(monthId)}
+              monthOpeningStock={monthOpeningStock}
+              currentStockBalances={currentStockBalances}
+              productRateById={productRateById}
+            />
           </section>
         </>
       )}
@@ -3285,8 +3317,8 @@ export function StockLedgerModule({
           {/* REPORTS SUB-TABS GRID */}
           <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
             {[
-              { id: "masterSummary", label: "Master Stock Summary" },
-              { id: "stockPosition", label: "Monthly Stock Position" },
+              { id: "masterSummary", label: "Stock Issuance Summary" },
+              { id: "stockPosition", label: "Stock Lifting Summary" },
               // { id: "overview", label: "Monthly Overview" },
               { id: "products", label: "Product stock flow" },
               // { id: "accounts", label: "Account summaries" },
@@ -3333,320 +3365,35 @@ export function StockLedgerModule({
             </div>
 
             <div id="printable-report-area">
-              {/* 0.1 Monthly Stock Position & Value Report */}
-              {activeReportSubTab === "stockPosition" && (() => {
-                const activeProducts = products.filter((p) => p.active);
-                
-                // Days to display based on filters (default 1 to 31)
-                const daysRange: number[] = [];
-                for (let i = filterStartDate; i <= filterEndDate; i++) {
-                  daysRange.push(i);
-                }
+              {activeReportSubTab === "stockPosition" && (
+                <StockLiftingSummaryTable
+                  products={products}
+                  days={days}
+                  monthId={monthId}
+                  filterStartDate={filterStartDate}
+                  filterEndDate={filterEndDate}
+                  monthOpeningStock={monthOpeningStock}
+                  currentStockBalances={currentStockBalances}
+                  productRateById={productRateById}
+                />
+              )}
 
-                // Compute product-wise sums
-                const productOpening: Record<string, number> = {};
-                const productReceived: Record<string, number> = {};
-                const productIssued: Record<string, number> = {};
-                const productInHand: Record<string, number> = {};
-                const productValuation: Record<string, number> = {};
-
-                activeProducts.forEach((p) => {
-                  const balanceRow = currentStockBalances.find(b => b.productId === p.id);
-                  const rate = productRateById[p.id] ?? 0;
-                  
-                  productOpening[p.id] = monthOpeningStock[p.id] ?? 0;
-                  productReceived[p.id] = (monthOpeningStock[p.id] ?? 0) + (balanceRow?.totalStockIn ?? 0);
-                  productIssued[p.id] = balanceRow?.totalStockOut ?? 0;
-                  productInHand[p.id] = balanceRow?.currentStock ?? 0;
-                  productValuation[p.id] = (balanceRow?.currentStock ?? 0) * rate;
-                });
-
-                // Grand totals
-                const grandOpening = activeProducts.reduce((sum, p) => sum + productOpening[p.id], 0);
-                const grandReceived = activeProducts.reduce((sum, p) => sum + productReceived[p.id], 0);
-                const grandIssued = activeProducts.reduce((sum, p) => sum + productIssued[p.id], 0);
-                const grandInHand = activeProducts.reduce((sum, p) => sum + productInHand[p.id], 0);
-                const grandValuation = activeProducts.reduce((sum, p) => sum + productValuation[p.id], 0);
-
-                return (
-                  <div className="space-y-4">
-                    <div className="table-wrap">
-                      <table className="!text-xs w-full">
-                        <thead>
-                          <tr className="border-b border-slate-800 text-slate-100 font-semibold text-center uppercase tracking-wider">
-                            <th className="py-2.5 px-3 text-left">Date</th>
-                            <th colSpan={activeProducts.length} className="py-2.5 px-3 text-slate-100">
-                              Monthly Stock Position & Value
-                            </th>
-                            <th className="py-2.5 px-3 text-slate-100">Total</th>
-                          </tr>
-
-                          <tr className="border-b border-slate-800 text-slate-200 font-mono text-center">
-                            <th className="py-2 px-3 text-left font-sans text-[10px] uppercase font-bold text-slate-400">
-                              Unit Rate (Rs.)
-                            </th>
-                            {activeProducts.map((p) => (
-                              <th key={p.id} className="py-2 px-3 font-bold text-emerald-400">
-                                {productRateById[p.id] ?? 0}
-                              </th>
-                            ))}
-                            <th className="py-2 px-3 font-bold text-slate-100">RATE</th>
-                          </tr>
-
-                          <tr className="border-b border-slate-800 text-slate-100 font-extrabold text-center">
-                            <th className="py-2 px-3 text-left text-[10px] uppercase tracking-wider text-slate-400">
-                              Product Name
-                            </th>
-                            {activeProducts.map((p) => (
-                              <th key={p.id} className="py-2 px-3 font-bold uppercase text-slate-100">
-                                {p.name}
-                              </th>
-                            ))}
-                            <th className="py-2 px-3 font-bold uppercase text-slate-100">TOTAL QTY</th>
-                          </tr>
-                        </thead>
-
-                        <tbody>
-                          <tr className="border-b border-slate-800 font-bold">
-                            <td className="py-2.5 px-3 text-left font-black tracking-wide text-amber-400">
-                              OPENING
-                            </td>
-                            {activeProducts.map((p) => {
-                              const val = productOpening[p.id];
-                              return (
-                                <td key={p.id} className="py-2.5 px-3 text-center font-mono text-slate-100">
-                                  {val > 0 ? formatMoney(val) : "—"}
-                                </td>
-                              );
-                            })}
-                            <td className="py-2.5 px-3 text-center font-mono font-black text-slate-100">
-                              {grandOpening > 0 ? formatMoney(grandOpening) : "—"}
-                            </td>
-                          </tr>
-
-                          {/* DAILY RECORD ROWS - DETAILED BY PRODUCT AND DATE */}
-                          {daysRange.map((dayNo) => {
-                            const dayRecord = days.find((d) => d.dayNo === dayNo);
-                            const shipments = dayRecord?.stockIn ?? [];
-
-                            // Find total received qty for this day across all products
-                            const dayTotalQty = shipments.reduce((sum, s) => sum + s.totalQty, 0);
-
-                            return (
-                              <tr key={dayNo} className="border-b border-slate-800 transition-colors hover:bg-slate-900/40">
-                                <td className="py-2 px-3 text-left font-bold text-slate-400 w-24">
-                                  {new Date(`${monthId}-${String(dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
-                                </td>
-                                {activeProducts.map((p) => {
-                                  const dayProductQty = shipments.reduce((sum, s) => {
-                                    const match = s.products.find((sp) => sp.productId === p.id);
-                                    return sum + (match?.quantity ?? 0);
-                                  }, 0);
-
-                                  return (
-                                    <td key={p.id} className={`py-2 px-3 text-center font-mono font-semibold ${dayProductQty > 0 ? "text-indigo-400 font-bold" : "text-slate-600"}`}>
-                                      {dayProductQty > 0 ? formatMoney(dayProductQty) : "—"}
-                                    </td>
-                                  );
-                                })}
-                                <td className={`py-2 px-3 text-center font-mono font-bold ${dayTotalQty > 0 ? "text-slate-100" : "text-slate-600"}`}>
-                                  {dayTotalQty > 0 ? formatMoney(dayTotalQty) : "—"}
-                                </td>
-                              </tr>
-                            );
-                          })}
-
-                          <tr className="border-t border-slate-800 font-bold">
-                            <td className="py-2.5 px-3 text-left uppercase text-indigo-400 tracking-wider">
-                              TOTAL STOCK RECEIVED
-                            </td>
-                            {activeProducts.map((p) => {
-                              const val = productReceived[p.id];
-                              return (
-                                <td key={p.id} className="py-2.5 px-3 text-center font-mono font-black text-indigo-400">
-                                  {val > 0 ? formatMoney(val) : "—"}
-                                </td>
-                              );
-                            })}
-                            <td className="py-2.5 px-3 text-center font-mono font-black text-indigo-400">
-                              {grandReceived > 0 ? formatMoney(grandReceived) : "—"}
-                            </td>
-                          </tr>
-
-                          <tr className="border-b border-slate-800 font-bold">
-                            <td className="py-2.5 px-3 text-left uppercase text-rose-400 tracking-wider">
-                              TOTAL STOCK ISSUANCE
-                            </td>
-                            {activeProducts.map((p) => {
-                              const val = productIssued[p.id];
-                              return (
-                                <td key={p.id} className="py-2.5 px-3 text-center font-mono font-black text-rose-400">
-                                  {val > 0 ? formatMoney(val) : "—"}
-                                </td>
-                              );
-                            })}
-                            <td className="py-2.5 px-3 text-center font-mono font-black text-rose-400">
-                              {grandIssued > 0 ? formatMoney(grandIssued) : "—"}
-                            </td>
-                          </tr>
-
-                          <tr className="border-b border-slate-800 font-extrabold">
-                            <td className="py-3 px-3 text-left uppercase tracking-wider text-amber-400">
-                              STOCK IN HAND
-                            </td>
-                            {activeProducts.map((p) => {
-                              const val = productInHand[p.id];
-                              return (
-                                <td key={p.id} className="py-3 px-3 text-center font-mono font-black text-[13px] text-amber-400">
-                                  {val > 0 ? formatMoney(val) : "—"}
-                                </td>
-                              );
-                            })}
-                            <td className="py-3 px-3 text-center font-mono font-black text-[13px] text-amber-400">
-                              {grandInHand > 0 ? formatMoney(grandInHand) : "—"}
-                            </td>
-                          </tr>
-
-                          <tr className="border-b border-slate-800 font-extrabold">
-                            <td className="py-3 px-3 text-left uppercase tracking-wider text-emerald-400">
-                              STOCK VALUE
-                            </td>
-                            {activeProducts.map((p) => {
-                              const val = productValuation[p.id];
-                              return (
-                                <td key={p.id} className="py-3 px-3 text-center font-mono font-black text-[13px] text-emerald-400">
-                                  {val > 0 ? formatMoney(val) : "—"}
-                                </td>
-                              );
-                            })}
-                            <td className="py-3 px-3 text-center font-mono font-black text-[13px] text-emerald-400">
-                              {grandValuation > 0 ? formatMoney(grandValuation) : "—"}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {/* 0. Master Stock Summary Report */}
-              {activeReportSubTab === "masterSummary" && (() => {
-                const activeProducts = products.filter((p) => p.active);
-
-                // Let's filter the accounts list
-                const filteredAccounts = accounts.filter((a) => {
-                  // Specific Account filter
-                  if (filterAccountId && a.id !== filterAccountId) return false;
-                  // Account Type filter
-                  if (filterAccountType && a.type !== filterAccountType) return false;
-                  // Active/Inactive filter
-                  if (filterActiveStatus === "active" && !a.active) return false;
-                  if (filterActiveStatus === "inactive" && a.active) return false;
-                  return true;
-                });
-
-                return (
-                  <div className="space-y-4">
-                    <div className="table-wrap">
-                      <table className="!text-xs">
-                        <thead>
-                          <tr>
-                            <th>Dealer / Account Name</th>
-                            <th>Account Type</th>
-                            <th>Opening Balance</th>
-                            {activeProducts.map((p) => (
-                              <th key={p.id} className="text-center font-mono">
-                                {p.name}
-                              </th>
-                            ))}
-                            <th>Total Allotted Qty</th>
-                            <th>Total Stock Amount</th>
-                            <th>Payment Received</th>
-                            <th>Adjustment / Return</th>
-                            <th>Current Due</th>
-                            <th>Closing Balance</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredAccounts.map((a) => {
-                            const entriesPeriod = days
-                              .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate && (filterDayStatus === "" || d.status === filterDayStatus))
-                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
-
-                            // Product-wise Allotment calculation
-                            const productQuantities: Record<string, number> = {};
-                            activeProducts.forEach((p) => {
-                              productQuantities[p.id] = 0;
-                            });
-
-                            entriesPeriod.forEach((e) => {
-                              e.products.forEach((snap) => {
-                                if (productQuantities[snap.productId] !== undefined) {
-                                  productQuantities[snap.productId] += snap.quantity;
-                                }
-                              });
-                            });
-
-                            // Filter by dynamic product allotment if product filter is active
-                            if (filterProductId) {
-                              const qtyForSelectedProduct = productQuantities[filterProductId] ?? 0;
-                              if (qtyForSelectedProduct === 0) return null;
-                            }
-
-                            const sortedDaysWithEntries = [...days]
-                              .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate && (filterDayStatus === "" || d.status === filterDayStatus))
-                              .sort((x, y) => x.dayNo - y.dayNo);
-
-                            const firstEntry = sortedDaysWithEntries
-                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id))
-                              .at(0);
-
-                            const latestEntry = sortedDaysWithEntries
-                              .flatMap((d) => d.entries.filter((e) => e.accountId === a.id))
-                              .at(-1);
-
-                            const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(a, prevSummary);
-                            const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
-                            const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
-                            const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
-                            const adjustments = 0; // standard default
-                            
-                            const currentDue = roundMoney(opening + totalAmount - totalPayments);
-                            const closing = roundMoney(opening + totalAmount - totalPayments + adjustments);
-
-                            // Due Status filters
-                            if (filterDueStatus === "due" && closing === 0) return null;
-                            if (filterDueStatus === "nodue" && closing !== 0) return null;
-
-                            return (
-                              <tr key={a.id}>
-                                <td className="font-semibold text-slate-200">{a.name}</td>
-                                <td className="uppercase font-bold text-[10px] text-slate-400">{a.type}</td>
-                                <td className="font-mono">{formatMoney(opening)}</td>
-                                {activeProducts.map((p) => {
-                                  const qty = productQuantities[p.id] ?? 0;
-                                  return (
-                                    <td key={p.id} className={`text-center font-mono font-semibold ${qty > 0 ? "text-indigo-400" : "text-slate-500"}`}>
-                                      {qty > 0 ? qty : "—"}
-                                    </td>
-                                  );
-                                })}
-                                <td className="font-semibold text-slate-300">{formatMoney(totalQty)}</td>
-                                <td className="font-mono text-slate-300">{formatMoney(totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totalPayments)}</td>
-                                <td className="text-slate-500 font-mono">—</td>
-                                <td className="text-slate-300 font-semibold font-mono">{formatMoney(currentDue)}</td>
-                                <td className="text-rose-400 font-bold font-mono">{formatMoney(closing)}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                );
-              })()}
+              {activeReportSubTab === "masterSummary" && (
+                <StockIssuanceSummaryTable
+                  products={products}
+                  accounts={accounts}
+                  days={days}
+                  prevSummary={prevSummary}
+                  filterStartDate={filterStartDate}
+                  filterEndDate={filterEndDate}
+                  filterProductId={filterProductId}
+                  filterAccountType={filterAccountType as "" | StockAccountType}
+                  filterAccountId={filterAccountId}
+                  filterDueStatus={filterDueStatus as "" | "due" | "nodue"}
+                  filterDayStatus={filterDayStatus as "" | "open" | "closed" | "reopen"}
+                  filterActiveStatus={filterActiveStatus as "all" | "active" | "inactive"}
+                />
+              )}
 
               {/* 1. Monthly Overview Report */}
               {activeReportSubTab === "overview" && (() => {
@@ -3703,91 +3450,17 @@ export function StockLedgerModule({
 
               {/* 2. Product-wise Stock Flow Report */}
               {activeReportSubTab === "products" && (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Product</th>
-                        <th>Opening Stock</th>
-                        <th>Stock Received</th>
-                        <th>Stock Allotted</th>
-                        <th>Closing Stock</th>
-                        <th>Rate Snapshot</th>
-                        <th>Inventory Value</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {products
-                        .filter((p) => !filterProductId || p.id === filterProductId)
-                        .map((p) => {
-                          const todayOpening = (() => {
-                            const openingVal = monthOpeningStock[p.id] ?? 0;
-                            let cumulativeStockIn = 0;
-                            let cumulativeStockOut = 0;
-
-                            for (const day of days) {
-                              if (day.dayNo < filterStartDate) {
-                                const stockInRecs = day.stockIn ?? [];
-                                for (const record of stockInRecs) {
-                                  const prodLine = record.products.find((line) => line.productId === p.id);
-                                  if (prodLine) cumulativeStockIn += prodLine.quantity;
-                                }
-                                for (const entry of day.entries) {
-                                  const prodLine = entry.products.find((line) => line.productId === p.id);
-                                  if (prodLine) cumulativeStockOut += prodLine.quantity;
-                                }
-                              }
-                            }
-                            return roundMoney(openingVal + cumulativeStockIn - cumulativeStockOut);
-                          })();
-
-                          const stockInPeriod = days
-                            .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                            .reduce((sum, d) => {
-                              const stockInRecs = (d.stockIn ?? []).filter(r => !filterStockInMode || r.stockInMode === filterStockInMode);
-                              return sum + stockInRecs.reduce((s, r) => s + (r.products.find((l) => l.productId === p.id)?.quantity ?? 0), 0);
-                            }, 0);
-
-                          const stockOutPeriod = days
-                            .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                            .reduce((sum, d) => {
-                              const entriesRecs = d.entries.filter(e => (!filterAccountId || e.accountId === filterAccountId) && (!filterAccountType || e.accountType === filterAccountType));
-                              return sum + entriesRecs.reduce((s, e) => s + (e.products.find((l) => l.productId === p.id)?.quantity ?? 0), 0);
-                            }, 0);
-
-                          const closingPeriod = roundMoney(todayOpening + stockInPeriod - stockOutPeriod);
-                          const value = roundMoney(closingPeriod * p.rate);
-                          const isLow = closingPeriod < 20;
-
-                          return (
-                            <tr key={p.id}>
-                              <td className="font-semibold text-slate-200">{p.name}</td>
-                              <td>{formatMoney(todayOpening)}</td>
-                              <td className="text-indigo-400">+{formatMoney(stockInPeriod)}</td>
-                              <td className="text-rose-400">-{formatMoney(stockOutPeriod)}</td>
-                              <td className="font-bold text-slate-100">{formatMoney(closingPeriod)}</td>
-                              <td>{formatMoney(p.rate)}</td>
-                              <td className="font-mono text-emerald-400">{formatMoney(value)}</td>
-                              <td>
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${isLow ? "bg-amber-500/10 text-amber-400 border border-amber-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"}`}>
-                                  {isLow && <AlertTriangle className="h-3 w-3" />}
-                                  <span>{isLow ? "Low Stock" : "Healthy"}</span>
-                                </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {selectedAccountDayRows.length === 0 && (
-                    <tr>
-                      <td className="py-6 text-center text-slate-500" colSpan={8}>
-                        No day-by-day stock out entries found for the selected person.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                <ProductStockFlowTable
+                  products={products}
+                  days={days}
+                  filterStartDate={filterStartDate}
+                  filterEndDate={filterEndDate}
+                  filterProductId={filterProductId}
+                  filterStockInMode={filterStockInMode as "" | "cash" | "credit"}
+                  filterAccountType={filterAccountType as "" | StockAccountType}
+                  filterAccountId={filterAccountId}
+                  monthOpeningStock={monthOpeningStock}
+                />
               )}
 
               {/* 3. Account/Person-wise Report */}
@@ -3801,7 +3474,7 @@ export function StockLedgerModule({
                         <th>Total Qty Issued</th>
                         <th>Allotment Amount</th>
                         <th>Payment Recovered</th>
-                        <th>Carry Forward</th>
+                        <th>Opening Balance</th>
                         <th>Remaining Outstanding</th>
                         <th>Last Action</th>
                       </tr>
@@ -4236,59 +3909,13 @@ export function StockLedgerModule({
               )}
 
               {/* 9. Cash/Credit Stock In Report */}
-              {activeReportSubTab === "cashCredit" && (() => {
-                const stockInRecords = days
-                  .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
-                  .flatMap((d) => d.stockIn ?? []);
-
-                const cashRecords = stockInRecords.filter((r) => r.stockInMode === "cash");
-                const creditRecords = stockInRecords.filter((r) => r.stockInMode === "credit");
-
-                const cashTotalAmount = cashRecords.reduce((sum, r) => sum + r.totalAmount, 0);
-                const creditTotalAmount = creditRecords.reduce((sum, r) => sum + r.totalAmount, 0);
-
-                const creditPaidAmount = creditRecords.reduce((sum, r) => sum + r.paidAmount, 0);
-                const creditPayable = creditRecords.reduce((sum, r) => sum + r.jazzPayableAmount, 0);
-
-                return (
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Payment Mode</th>
-                          <th>Shipment Count</th>
-                          <th>Total Value received (Rs.)</th>
-                          <th>Paid Amount (Rs.)</th>
-                          <th>outstanding payable (Rs.)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td className="font-bold text-emerald-400">Cash Mode</td>
-                          <td>{cashRecords.length}</td>
-                          <td>{formatMoney(cashTotalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold">{formatMoney(cashTotalAmount)}</td>
-                          <td>Rs. 0.00</td>
-                        </tr>
-                        <tr>
-                          <td className="font-bold text-indigo-400">Credit Mode</td>
-                          <td>{creditRecords.length}</td>
-                          <td>{formatMoney(creditTotalAmount)}</td>
-                          <td className="text-blue-400 font-semibold">{formatMoney(creditPaidAmount)}</td>
-                          <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
-                        </tr>
-                        <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-                          <td className="text-slate-100">Total</td>
-                          <td>{cashRecords.length + creditRecords.length}</td>
-                          <td>{formatMoney(cashTotalAmount + creditTotalAmount)}</td>
-                          <td className="text-blue-400 font-semibold">{formatMoney(cashTotalAmount + creditPaidAmount)}</td>
-                          <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                );
-              })()}
+              {activeReportSubTab === "cashCredit" && (
+                <CashCreditStockInTable
+                  days={days}
+                  filterStartDate={filterStartDate}
+                  filterEndDate={filterEndDate}
+                />
+              )}
 
               {/* 10. Audit/Correction Report */}
               {activeReportSubTab === "audit" && (
@@ -4343,6 +3970,39 @@ export function StockLedgerModule({
       {activeSectionVisible && section === "settings" && (
         canManageSettings ? (
           <>
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h2>Stock Settings</h2>
+                  <p>Owner-controlled behavior for Stock Ledger entry screens.</p>
+                </div>
+                <Settings />
+              </div>
+              <label className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={allowManualCarryForwardInput}
+                  onChange={(event) => {
+                    const nextAllowManualCarryForwardInput = event.target.checked;
+                    setStockSettingsConfig((current) => ({
+                      ...current,
+                      allowManualCarryForwardInput: nextAllowManualCarryForwardInput
+                    }));
+                    onQueueWrite(
+                      saveStockSettingsConfig({ ...stockSettingsConfig, allowManualCarryForwardInput: nextAllowManualCarryForwardInput }, user, role),
+                      "Could not update Stock Settings."
+                    );
+                  }}
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-slate-100">Enable Carry Forward Input</span>
+                  <span className="mt-1 block text-xs text-slate-400">
+                    When enabled, the Stock Ledger daily entry form allows manual carry-forward input. When disabled, carry-forward stays calculated/read-only.
+                  </span>
+                </span>
+              </label>
+            </section>
             <SettingsTable
               title="Products"
               kind="product"
@@ -4353,6 +4013,7 @@ export function StockLedgerModule({
                 paymentTrackingEnabled: (row as StockProduct).paymentTrackingEnabled !== false
               }, user, role), "Could not save stock product.")}
               onDelete={(id) => onQueueWrite(deleteStockProduct(id, user, role), "Could not delete stock product.")}
+              onReorder={(before, after) => onQueueWrite(updateStockProductSortOrder(before as StockProduct[], after as StockProduct[]), "Could not reorder stock products.")}
             />
             <SettingsTable
               title="CCR/DO Accounts"
@@ -4361,6 +4022,7 @@ export function StockLedgerModule({
               rows={sortedAccounts}
               onSave={(row) => onQueueWrite(upsertStockAccount(row as StockAccountProfile, user, role), "Could not save stock account.")}
               onDelete={(id) => onQueueWrite(deleteStockAccount(id, user, role), "Could not delete stock account.")}
+              onReorder={(before, after) => onQueueWrite(updateStockAccountSortOrder(before as StockAccountProfile[], after as StockAccountProfile[]), "Could not reorder stock accounts.")}
             />
           </>
         ) : (

@@ -16,15 +16,24 @@ import {
   updateDoc,
   writeBatch
 } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
-import { auth, db, functions } from "./firebase";
+import { auth, db } from "./firebase";
 import { buildAuditLogDocument, writeAuditLog } from "./auditLogService";
 import { buildExpenseCarryForwardSeed, computeMonth } from "./formulaEngine";
+import { ChunkedFirestoreBatch, type FirestoreBatchWriter } from "../shared/services/chunkedFirestoreBatch";
+import { assertMasterRefreshAccess, canRunMasterRefresh, MASTER_REFRESH_ACCESS } from "../shared/services/masterRefreshPermissions";
+import { canReopenDay, isActiveReopenWindow } from "../shared/services/dayEditPermissions";
+import { changedSortOrderPatches, orderedBySortOrder } from "../shared/services/orderUtils";
 import {
   defaultLedgerReadModeConfig,
   LEDGER_CALC_VERSION,
   type LedgerReadModeConfig
 } from "../shared/ledger/ledgerTypes";
+import { assertLedgerV2UiReadAllowed, type LedgerUiReadDecision } from "../shared/ledger/ledgerReadMode";
+import {
+  projectionToLegacyCreditRows,
+  type ExpenseCreditProjection,
+  type ExpenseCreditRawEntry
+} from "../shared/ledger/expenseCreditLedger";
 import type {
   AuditEvent,
   AuthorizedEmail,
@@ -59,14 +68,13 @@ export type LedgerMismatchReportSummary = {
 
 export type { LedgerReadModeConfig };
 
+type LedgerUiReadOptions = {
+  readDecision?: LedgerUiReadDecision;
+};
+
 function requireDb() {
   if (!db) throw new Error("Firebase is not configured.");
   return db;
-}
-
-function requireFunctions() {
-  if (!functions) throw new Error("Firebase is not configured.");
-  return functions;
 }
 
 function cleanForFirestore<T>(value: T): T {
@@ -128,6 +136,7 @@ type PermissionDebugContext = {
 type SaveMonthRecordOptions = {
   suppressPerDayAudit?: boolean;
   onlyWriteEditableDays?: boolean;
+  skipPostCommitUpsert?: boolean;
   carryForwardSeed?: ExpenseCarryForwardSeed | null;
   recalculationWrite?: boolean;
   debugSource?: string;
@@ -184,7 +193,7 @@ async function writeExpenseAuditLog(
   auditId: string,
   createdAt: number,
   event: Omit<AuditEvent, "id" | "createdAt">,
-  options?: { actorRole?: UserRole; batch?: ReturnType<typeof writeBatch>; dayNo?: number }
+  options?: { actorRole?: UserRole; batch?: FirestoreBatchWriter; dayNo?: number }
 ) {
   const actorRole = resolveActorRole(options?.actorRole);
   const actorFields = actor();
@@ -528,7 +537,7 @@ export const defaultCommissionCatalog: CatalogItem[] = [
   id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
   name,
   active: true,
-  sortOrder: index
+  sortOrder: index + 1
 }));
 
 function catalogCollection(name: "expenseCategories" | "creditParties" | "commissionCategories") {
@@ -538,8 +547,8 @@ function catalogCollection(name: "expenseCategories" | "creditParties" | "commis
 export async function listCatalogItems(
   name: "expenseCategories" | "creditParties" | "commissionCategories"
 ): Promise<CatalogItem[]> {
-  const snap = await getDocs(query(catalogCollection(name), orderBy("sortOrder", "asc")));
-  return snap.docs.map((itemDoc) => itemDoc.data() as CatalogItem);
+  const snap = await getDocs(catalogCollection(name));
+  return orderedBySortOrder(snap.docs.map((itemDoc) => itemDoc.data() as CatalogItem));
 }
 
 export function subscribeCatalogItems(
@@ -548,11 +557,30 @@ export function subscribeCatalogItems(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(catalogCollection(name), orderBy("sortOrder", "asc")),
+    catalogCollection(name),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((itemDoc) => itemDoc.data() as CatalogItem), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((itemDoc) => itemDoc.data() as CatalogItem)), snap.metadata),
     snapshotError(onError)
   );
+}
+
+export async function updateCatalogSortOrder(
+  name: "expenseCategories" | "creditParties" | "commissionCategories",
+  before: CatalogItem[],
+  after: CatalogItem[]
+) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(
+      doc(requireDb(), "settings", name, "items", item.id),
+      cleanForFirestore({ sortOrder: item.sortOrder, updatedAt: timestamp }),
+      { merge: true }
+    );
+  });
+  await batch.commit();
 }
 
 export async function upsertCatalogItem(
@@ -596,7 +624,7 @@ export async function ensureDefaultCatalogs() {
           id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
           name,
           active: true,
-          sortOrder: index
+          sortOrder: index + 1
         })
       )
     );
@@ -608,13 +636,14 @@ export async function ensureDefaultCatalogs() {
 
 export function roleCan(
   role: UserRole | null,
-  permission: "daily" | "catalogs" | "users" | "ownerControls" | "importBackup" | "masterRefresh" | "read"
+  permission: "daily" | "catalogs" | "users" | "ownerControls" | "importBackup" | typeof MASTER_REFRESH_ACCESS | "read"
 ) {
   if (!role) return false;
   if (permission === "read") return true;
+  if (permission === MASTER_REFRESH_ACCESS) return canRunMasterRefresh(role);
   if (role === "owner") return true;
   if (role === "admin") {
-    return permission === "daily" || permission === "masterRefresh";
+    return permission === "daily";
   }
   return false;
 }
@@ -711,7 +740,7 @@ async function syncDaySubcollection<T extends { id: string }>(
 }
 
 async function syncCreditSubcollectionInBatch(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   dayRef: ReturnType<typeof doc>,
   credits: DailyLedgerInput["credits"],
   merge = true,
@@ -734,6 +763,114 @@ async function syncCreditSubcollectionInBatch(
 
 function ledgerV2ExpenseRawEntriesPath(monthId: string, dayNo: number) {
   return collection(requireDb(), "ledgerV2", "expense", "months", monthId, "days", String(dayNo), "rawEntries");
+}
+
+function ledgerV2ExpenseDayPath(monthId: string, dayNo: number) {
+  return doc(requireDb(), "ledgerV2", "expense", "months", monthId, "days", String(dayNo));
+}
+
+function expenseRawNumber(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function hydrateExpenseV2Day(monthId: string, dayNo: number): Promise<DailyLedgerInput> {
+  const [legacyDaySnap, rawSnap, projectionSnap] = await Promise.all([
+    getDoc(doc(requireDb(), "months", monthId, "days", String(dayNo))),
+    getDocs(ledgerV2ExpenseRawEntriesPath(monthId, dayNo)),
+    getDocs(collection(ledgerV2ExpenseDayPath(monthId, dayNo), "projections"))
+  ]);
+  const legacyDay = legacyDaySnap.exists() ? mapDayDoc(legacyDaySnap as QueryDocumentSnapshot<DocumentData>) : null;
+  const expenses: DailyLedgerInput["expenses"] = [];
+  const commissions: DailyLedgerInput["commissions"] = [];
+  const ownerBalances: DailyLedgerInput["ownerBalances"] = [];
+  const creditRawEntries: ExpenseCreditRawEntry[] = [];
+
+  rawSnap.docs.forEach((entryDoc) => {
+    const entry = entryDoc.data() as { id?: string; type?: string; raw?: Record<string, unknown> };
+    const raw = entry.raw ?? {};
+    const rawId = String(entry.id ?? entryDoc.id).replace(/^(expense|commission|credit|owner)-/, "");
+    if (entry.type === "expense") {
+      expenses.push({
+        id: rawId,
+        name: String(raw.name ?? ""),
+        description: String(raw.description ?? ""),
+        amount: expenseRawNumber(raw.amount),
+        categoryId: typeof raw.categoryId === "string" ? raw.categoryId : undefined,
+        category: typeof raw.category === "string" ? raw.category : undefined
+      });
+    } else if (entry.type === "commission") {
+      commissions.push({
+        id: rawId,
+        categoryId: typeof raw.categoryId === "string" ? raw.categoryId : undefined,
+        category: String(raw.category ?? ""),
+        amount: expenseRawNumber(raw.amount)
+      });
+    } else if (entry.type === "ownerBalance") {
+      ownerBalances.push({
+        id: rawId,
+        description: String(raw.description ?? ""),
+        label: typeof raw.label === "string" ? raw.label : undefined,
+        amount: expenseRawNumber(raw.amount),
+        expense: expenseRawNumber(raw.expense),
+        received: expenseRawNumber(raw.received)
+      });
+    } else if (entry.type === "credit") {
+      creditRawEntries.push({
+        ...(entryDoc.data() as ExpenseCreditRawEntry),
+        id: String(entry.id ?? entryDoc.id),
+        monthId,
+        dayNo,
+        raw: raw as ExpenseCreditRawEntry["raw"]
+      });
+    }
+  });
+
+  const projections = projectionSnap.docs
+    .map((projectionDoc) => ({ id: projectionDoc.id, ...projectionDoc.data() }) as ExpenseCreditProjection)
+    .filter((projection) => projection.calculated && projection.partyId);
+  const credits = projectionToLegacyCreditRows({ dayNo, rawEntries: creditRawEntries, projections, summary: {
+    opening: 0,
+    loan: 0,
+    receive: 0,
+    manualAdjustment: 0,
+    delta: 0,
+    closing: 0
+  } });
+
+  return {
+    dayNo,
+    date: legacyDay?.date,
+    label: legacyDay?.label ?? `Day ${dayNo}`,
+    notes: legacyDay?.notes,
+    importType: legacyDay?.importType,
+    entryYear: legacyDay?.entryYear,
+    entryMonth: legacyDay?.entryMonth,
+    entryDay: legacyDay?.entryDay,
+    status: legacyDay?.status ?? "open",
+    manualOverride: legacyDay?.manualOverride ?? false,
+    lockedAt: legacyDay?.lockedAt,
+    lockedBy: legacyDay?.lockedBy,
+    lockedByRole: legacyDay?.lockedByRole,
+    reopenedUntilAt: legacyDay?.reopenedUntilAt,
+    reopenedAt: legacyDay?.reopenedAt,
+    reopenedBy: legacyDay?.reopenedBy,
+    reopenedByRole: legacyDay?.reopenedByRole,
+    updatedAt: legacyDay?.updatedAt,
+    expenses,
+    commissions,
+    credits,
+    ownerBalances
+  };
+}
+
+async function fetchExpenseV2MonthDays(monthId: string): Promise<DailyLedgerInput[]> {
+  const daysSnap = await getDocs(query(collection(requireDb(), "ledgerV2", "expense", "months", monthId, "days"), orderBy("dayNo")));
+  if (daysSnap.empty) {
+    throw new Error(`ledgerV2 Expense projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`);
+  }
+  const days = await Promise.all(daysSnap.docs.map((dayDoc) => hydrateExpenseV2Day(monthId, Number(dayDoc.data().dayNo ?? dayDoc.id))));
+  return days.sort((a, b) => a.dayNo - b.dayNo);
 }
 
 function expenseRawEntryPayload(input: {
@@ -762,7 +899,7 @@ function expenseRawEntryPayload(input: {
 }
 
 async function syncExpenseLedgerV2RawEntriesInBatch(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   monthId: string,
   day: DailyLedgerInput,
   timestamp: number,
@@ -796,6 +933,8 @@ async function syncExpenseLedgerV2RawEntriesInBatch(
         partyId: credit.partyId,
         partyNameSnapshot: credit.partyName,
         notes: credit.description,
+        loanDescription: credit.loanDescription,
+        receiveDescription: credit.receiveDescription,
         loan: credit.loan ?? credit.today ?? 0,
         receive: credit.receive,
         manualAdjustment: 0,
@@ -886,7 +1025,12 @@ export async function upsertDay(
   }
 }
 
-export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[]> {
+export async function fetchMonthDays(monthId: string, options: LedgerUiReadOptions = {}): Promise<DailyLedgerInput[]> {
+  if (options.readDecision?.mode === "v2") {
+    assertLedgerV2UiReadAllowed(options.readDecision);
+    return fetchExpenseV2MonthDays(monthId);
+  }
+
   const firestore = requireDb();
   const daysSnap = await getDocs(query(collection(firestore, "months", monthId, "days"), orderBy("dayNo")));
   const days: DailyLedgerInput[] = [];
@@ -909,6 +1053,8 @@ export async function fetchMonthDays(monthId: string): Promise<DailyLedgerInput[
       entryYear: base.entryYear,
       entryMonth: base.entryMonth,
       entryDay: base.entryDay,
+      status: base.status ?? "open",
+      manualOverride: base.manualOverride ?? false,
       lockedAt: base.lockedAt,
       lockedBy: base.lockedBy,
       lockedByRole: base.lockedByRole,
@@ -951,6 +1097,8 @@ function mapDayDoc(dayDoc: QueryDocumentSnapshot<DocumentData>): DailyLedgerInpu
     entryYear: base.entryYear,
     entryMonth: base.entryMonth,
     entryDay: base.entryDay,
+    status: base.status ?? "open",
+    manualOverride: base.manualOverride ?? false,
     lockedAt: base.lockedAt,
     lockedBy: base.lockedBy,
     lockedByRole: base.lockedByRole,
@@ -999,8 +1147,32 @@ async function hydrateDayDoc(dayDoc: QueryDocumentSnapshot<DocumentData>): Promi
 export function subscribeMonthDays(
   monthId: string,
   onNext: (days: DailyLedgerInput[], metadata: FirestoreSnapshotMeta) => void,
-  onError?: (error: FirestoreError) => void
+  onError?: (error: FirestoreError | Error) => void,
+  options: LedgerUiReadOptions = {}
 ) {
+  if (options.readDecision?.mode === "v2") {
+    try {
+      assertLedgerV2UiReadAllowed(options.readDecision);
+    } catch (error) {
+      window.setTimeout(() => onError?.(error as Error), 0);
+      return () => {};
+    }
+    return onSnapshot(
+      query(collection(requireDb(), "ledgerV2", "expense", "months", monthId, "days"), orderBy("dayNo")),
+      { includeMetadataChanges: true },
+      (snap) => {
+        if (snap.empty) {
+          onError?.(new Error(`ledgerV2 Expense projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`));
+          return;
+        }
+        void Promise.all(snap.docs.map((dayDoc) => hydrateExpenseV2Day(monthId, Number(dayDoc.data().dayNo ?? dayDoc.id))))
+          .then((days) => onNext(days.sort((a, b) => a.dayNo - b.dayNo), snap.metadata))
+          .catch((error: Error) => onError?.(error));
+      },
+      snapshotError(onError as (error: FirestoreError) => void)
+    );
+  }
+
   return onSnapshot(
     query(collection(requireDb(), "months", monthId, "days"), orderBy("dayNo")),
     { includeMetadataChanges: true },
@@ -1051,25 +1223,93 @@ export function subscribeLedgerMismatchReports(
   );
 }
 
-export async function recalculateMonth(monthId: string): Promise<void> {
-  const fn = httpsCallable(requireFunctions(), "recalculateMonth");
-  debugPermissionWrite(
-    { module: "expense", source: "master-refresh-callable", pathMode: "callable" },
-    `functions/recalculateMonth(${monthId})`,
-    "callable"
+export async function recalculateMonth(monthId: string): Promise<{ ok: boolean; dayCount: number; computed: MonthComputed }> {
+  assertMasterRefreshAccess(auditActorRole, "Expense master refresh");
+  const firestore = requireDb();
+  const monthSnap = await getDoc(doc(firestore, "months", monthId));
+  const storedMonth = monthSnap.exists() ? (monthSnap.data() as MonthRecord) : null;
+  const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
+  const effectiveOpeningBalance = carryForwardSeed?.openingBalance ?? storedMonth?.openingBalance ?? 0;
+  const effectiveOwnerOpeningBalance = carryForwardSeed?.ownerOpeningBalance ??
+    storedMonth?.ownerOpeningBalance ??
+    defaultOwnerOpeningBalance;
+  const sourceDays = await fetchMonthDays(monthId);
+  const computed = computeMonth(
+    sourceDays,
+    effectiveOpeningBalance,
+    monthId,
+    effectiveOwnerOpeningBalance,
+    carryForwardSeed ?? undefined
   );
-  await fn({ monthId });
+  const inputByDay = new Map(sourceDays.map((day) => [day.dayNo, day]));
+  const rebuiltDays: DailyLedgerInput[] = computed.days.map((computedDay) => {
+    const sourceDay = inputByDay.get(computedDay.dayNo);
+    return {
+      ...(sourceDay ?? {
+        dayNo: computedDay.dayNo,
+        expenses: [],
+        commissions: [],
+        credits: [],
+        ownerBalances: []
+      }),
+      dayNo: computedDay.dayNo,
+      date: sourceDay?.date ?? computedDay.date,
+      label: sourceDay?.label ?? computedDay.label,
+      notes: sourceDay?.notes ?? computedDay.notes,
+      expenses: sourceDay?.expenses ?? [],
+      commissions: sourceDay?.commissions ?? [],
+      credits: computedDay.creditRows,
+      ownerBalances: computedDay.ownerBalances
+    };
+  });
+  const month: MonthRecord = {
+    ...(storedMonth ?? {
+      id: monthId,
+      label: monthId,
+      status: "open" as const,
+      createdAt: now()
+    }),
+    id: monthId,
+    label: storedMonth?.label ?? monthId,
+    openingBalance: effectiveOpeningBalance,
+    ownerOpeningBalance: effectiveOwnerOpeningBalance
+  };
+  debugPermissionWrite(
+    { module: "expense", source: "master-refresh-local", pathMode: "client-save" },
+    `months/${monthId}`,
+    "set"
+  );
+  const savedComputed = await saveMonthRecord(month, rebuiltDays, {
+    suppressPerDayAudit: true,
+    skipPostCommitUpsert: true,
+    carryForwardSeed,
+    recalculationWrite: true,
+    debugSource: "master-refresh-local",
+    debugPathMode: "client-save"
+  });
+  return { ok: true, dayCount: rebuiltDays.length, computed: savedComputed };
 }
 
 export async function sendManualActivityEmail(monthId: string, dayNo?: number): Promise<void> {
-  const fn = httpsCallable(requireFunctions(), "sendManualActivityEmail");
-  await fn({ monthId, dayNo });
+  void monthId;
+  void dayNo;
+  throw new Error("Manual email reports require an email backend and are disabled in local-only mode.");
 }
 
 export async function getMonthDashboard(monthId: string): Promise<MonthComputed | null> {
-  const fn = httpsCallable(requireFunctions(), "getMonthDashboard");
-  const result = await fn({ monthId });
-  return (result.data ?? null) as MonthComputed | null;
+  const firestore = requireDb();
+  const monthSnap = await getDoc(doc(firestore, "months", monthId));
+  const month = monthSnap.exists() ? (monthSnap.data() as MonthRecord) : null;
+  const days = await fetchMonthDays(monthId);
+  if (!month && days.length === 0) return null;
+  const carryForwardSeed = await resolveExpenseCarryForwardSeed(monthId);
+  return computeMonth(
+    days,
+    carryForwardSeed?.openingBalance ?? month?.openingBalance ?? 0,
+    monthId,
+    carryForwardSeed?.ownerOpeningBalance ?? month?.ownerOpeningBalance ?? defaultOwnerOpeningBalance,
+    carryForwardSeed ?? undefined
+  );
 }
 
 export async function ensureMonth(monthId: string, openingBalance: number): Promise<void> {
@@ -1151,6 +1391,8 @@ export async function queueDayAndSummaryWrite(
     batch.set(
       dayRef,
       {
+        status: "closed",
+        manualOverride: true,
         lockedAt: day.lockedAt ?? timestamp,
         lockedBy: day.lockedBy ?? auth?.currentUser?.uid,
         lockedByRole: day.lockedByRole,
@@ -1311,10 +1553,16 @@ export async function reopenPreviousDayUntilClose(
   dayNo: number,
   role: UserRole | null
 ) {
+  if (!canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const reopenAt = now();
   await setDoc(
     doc(requireDb(), "months", monthId, "days", String(dayNo)),
     {
+      status: "reopen",
+      manualOverride: true,
+      lockedAt: deleteField(),
+      lockedBy: deleteField(),
+      lockedByRole: deleteField(),
       reopenedUntilAt: deleteField(),
       reopenedAt: reopenAt,
       reopenedBy: auth?.currentUser?.uid,
@@ -1336,6 +1584,7 @@ export function reopenMonthDaysUntilClose(
   days: DailyLedgerInput[],
   role: UserRole | null
 ) {
+  if (!canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const firestore = requireDb();
   const reopenAt = now();
   const batch = writeBatch(firestore);
@@ -1345,6 +1594,11 @@ export function reopenMonthDaysUntilClose(
   days.forEach((day) => {
     const payload = cleanForFirestore({
       ...day,
+      status: "reopen" as const,
+      manualOverride: true,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
       reopenedUntilAt: undefined,
       reopenedAt: reopenAt,
       reopenedBy: actorFields.actorUid,
@@ -1355,6 +1609,9 @@ export function reopenMonthDaysUntilClose(
       doc(monthRef, "days", String(day.dayNo)),
       {
         ...payload,
+        lockedAt: deleteField(),
+        lockedBy: deleteField(),
+        lockedByRole: deleteField(),
         reopenedUntilAt: deleteField(),
         ...(role ? {} : { reopenedByRole: deleteField() })
       },
@@ -1406,6 +1663,8 @@ export function closeMonthDaysExceptToday(
     const dayRef = doc(monthRef, "days", String(day.dayNo));
     const payload = cleanForFirestore({
       ...day,
+      status: "closed" as const,
+      manualOverride: true,
       lockedAt: day.lockedAt ?? timestamp,
       lockedBy: day.lockedBy ?? actorFields.actorUid,
       lockedByRole: day.lockedByRole ?? role ?? undefined,
@@ -1454,17 +1713,21 @@ export async function reopenCurrentDayUntilClose(
   dayNo: number,
   role: UserRole | null
 ) {
+  if (!canReopenDay(role)) throw new Error("Only owner can reopen days.");
+  const timestamp = now();
   await setDoc(
     doc(requireDb(), "months", monthId, "days", String(dayNo)),
     {
+      status: "reopen",
+      manualOverride: true,
       lockedAt: deleteField(),
       lockedBy: deleteField(),
       lockedByRole: deleteField(),
       reopenedUntilAt: deleteField(),
-      reopenedAt: now(),
+      reopenedAt: timestamp,
       reopenedBy: auth?.currentUser?.uid,
       ...(role ? { reopenedByRole: role } : { reopenedByRole: deleteField() }),
-      updatedAt: now()
+      updatedAt: timestamp
     },
     { merge: true }
   );
@@ -1564,7 +1827,7 @@ export async function saveMonthRecord(
 ): Promise<MonthComputed> {
   const firestore = requireDb();
   const computed = computeMonth(days, month.openingBalance, month.id, month.ownerOpeningBalance ?? 0, options?.carryForwardSeed ?? undefined);
-  const batch = writeBatch(firestore);
+  const batch = new ChunkedFirestoreBatch(firestore, `expense:${month.id}:saveMonthRecord`);
   const monthRef = doc(firestore, "months", month.id);
   const timestamp = now();
   const debugContext = {
@@ -1598,7 +1861,7 @@ export async function saveMonthRecord(
 
   const isEditable = (day: DailyLedgerInput) => {
     const isLive = month.id === liveMonthId && day.dayNo === liveDayNo;
-    const isReopened = Boolean(day.reopenedAt || (day.reopenedUntilAt && day.reopenedUntilAt > now()));
+    const isReopened = isActiveReopenWindow(day);
     return (isLive && !day.lockedAt) || isReopened;
   };
 
@@ -1631,6 +1894,7 @@ export async function saveMonthRecord(
   batch.set(summaryRef, cleanForFirestore(computed.homeSummary), { merge: true });
   debugPermissionWrite(debugContext, "batch:saveMonthRecord", "commit");
   await batch.commit();
+  if (options?.skipPostCommitUpsert) return computed;
 
   const daysToUpsert = options?.onlyWriteEditableDays ? days.filter(isEditable) : days;
   await Promise.all(daysToUpsert.map((day) => upsertDay(month.id, day, {

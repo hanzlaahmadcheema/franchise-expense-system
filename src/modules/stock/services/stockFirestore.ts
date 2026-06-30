@@ -16,6 +16,11 @@ import type { User } from "firebase/auth";
 import { auth, db } from "../../../lib/firebase";
 import { buildAuditLogDocument, writeAuditLog } from "../../../lib/auditLogService";
 import { LEDGER_CALC_VERSION } from "../../../shared/ledger/ledgerTypes";
+import { assertLedgerV2UiReadAllowed, type LedgerUiReadDecision } from "../../../shared/ledger/ledgerReadMode";
+import { ChunkedFirestoreBatch, type FirestoreBatchWriter } from "../../../shared/services/chunkedFirestoreBatch";
+import { assertMasterRefreshAccess, canRunMasterRefresh, MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
+import { canReopenDay } from "../../../shared/services/dayEditPermissions";
+import { changedSortOrderPatches, orderedBySortOrder } from "../../../shared/services/orderUtils";
 import type { UserRole } from "../../../types/ledger";
 import {
   calculateCurrentStock,
@@ -26,18 +31,27 @@ import {
 import { normalizeKey, previousMonthId } from "../utils/stockFormatters";
 import type {
   StockAccountProfile,
+  StockDailyAccountEntry,
   StockAuditEvent,
+  StockAccountType,
   StockDayRecord,
+  StockDailySummary,
   StockJazzCompanyBalance,
   StockMonth,
   StockMonthlySummary,
   StockProduct,
   StockProductBalance,
   StockOpeningBalances,
-  StockInRecord
+  StockSettingsConfig,
+  StockInRecord,
+  StockProductLine
 } from "../types/stock.types";
 
 export type FirestoreSnapshotMeta = Pick<SnapshotMetadata, "fromCache" | "hasPendingWrites">;
+
+type LedgerUiReadOptions = {
+  readDecision?: LedgerUiReadDecision;
+};
 
 type SaveStockDayOptions = {
   openingBalances?: StockOpeningBalances;
@@ -45,7 +59,9 @@ type SaveStockDayOptions = {
   products?: StockProduct[];
   skipExistingDocCleanup?: boolean;
   skipRawEntryCleanup?: boolean;
+  skipLedgerV2RawEntryWrites?: boolean;
   skipProductBalanceWrites?: boolean;
+  skipAccountBalanceWrites?: boolean;
   skipJazzCompanyBalanceWrite?: boolean;
 };
 
@@ -122,8 +138,148 @@ function ledgerV2StockRawEntries(monthId: string, dayNo: number) {
   return collection(requireDb(), "ledgerV2", "stock", "months", monthId, "days", String(dayNo), "rawEntries");
 }
 
+function ledgerV2StockDay(monthId: string, dayNo: number) {
+  return doc(requireDb(), "ledgerV2", "stock", "months", monthId, "days", String(dayNo));
+}
+
+function numberValue(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function stockProductLineFromRaw(product: Record<string, unknown>): StockProductLine {
+  const quantity = numberValue(product.quantity);
+  const rate = numberValue(product.rate);
+  return {
+    productId: String(product.productId ?? normalizeKey(String(product.productName ?? ""))),
+    productName: String(product.productName ?? product.productId ?? ""),
+    rate,
+    quantity,
+    amount: numberValue(product.amount ?? quantity * rate)
+  };
+}
+
+async function hydrateStockV2Day(monthId: string, dayNo: number): Promise<StockDayRecord> {
+  const [legacySnap, rawSnap, projectionSnap, dayV2Snap] = await Promise.all([
+    getDoc(dayRef(monthId, dayNo)),
+    getDocs(ledgerV2StockRawEntries(monthId, dayNo)),
+    getDocs(collection(ledgerV2StockDay(monthId, dayNo), "projections")),
+    getDoc(ledgerV2StockDay(monthId, dayNo))
+  ]);
+  const legacyDay = legacySnap.exists() ? mapDayData(legacySnap.data() as Partial<StockDayRecord>, legacySnap.id) : null;
+  const accountProjectionByRawId = new Map<string, Record<string, unknown>>();
+  projectionSnap.docs.forEach((projectionDoc) => {
+    const projection = projectionDoc.data() as Record<string, unknown>;
+    if (projection.type !== "accountDueBalance") return;
+    const rawEntryId = typeof projection.rawEntryId === "string" ? projection.rawEntryId : null;
+    if (rawEntryId) accountProjectionByRawId.set(rawEntryId, projection);
+  });
+
+  const entries: StockDailyAccountEntry[] = [];
+  const stockIn: StockInRecord[] = [];
+
+  rawSnap.docs.forEach((entryDoc) => {
+    const entry = entryDoc.data() as { id?: string; type?: string; raw?: Record<string, unknown> };
+    const raw = entry.raw ?? {};
+    const id = String(entry.id ?? entryDoc.id).replace(/^(stock-out|stock-in)-/, "");
+    const date = legacyDay?.date ?? "";
+    const products = Array.isArray(raw.products)
+      ? raw.products.map((product) => stockProductLineFromRaw(product as Record<string, unknown>))
+      : [];
+    if (entry.type === "stockOut") {
+      const projection = accountProjectionByRawId.get(entry.id ?? entryDoc.id);
+      const calculated = projection?.calculated && typeof projection.calculated === "object"
+        ? projection.calculated as Record<string, unknown>
+        : {};
+      const totalQty = products.reduce((sum, product) => sum + product.quantity, 0);
+      const totalAmount = numberValue(calculated.stockOutAmount ?? products.reduce((sum, product) => sum + product.amount, 0));
+      const totalPaymentReceived = numberValue(calculated.payment ?? raw.totalPaymentReceived);
+      const dueBalance = numberValue(calculated.closing);
+      entries.push({
+        id,
+        date,
+        monthId,
+        dayNo,
+        accountId: String(raw.accountId ?? projection?.accountId ?? id),
+        accountName: String(raw.accountName ?? projection?.accountName ?? ""),
+        accountType: (typeof raw.accountType === "string" ? raw.accountType : "OTHER") as StockAccountType,
+        products: products.map((product, index) => ({
+          ...product,
+          paymentTrackingEnabled: true,
+          paymentReceived: index === 0 ? totalPaymentReceived : 0,
+          dueBalance: index === 0 ? dueBalance : 0,
+          displayOrder: index
+        })),
+        payments: [],
+        totalQty,
+        totalAmount,
+        totalPaymentReceived,
+        carryForwardBalance: numberValue(calculated.opening),
+        dueBalance,
+        status: legacyDay?.status ?? "open",
+        notes: typeof raw.notes === "string" ? raw.notes : undefined,
+        createdBy: legacyDay?.createdBy ?? "",
+        createdAt: legacyDay?.createdAt ?? 0,
+        updatedBy: legacyDay?.updatedBy,
+        updatedAt: legacyDay?.updatedAt ?? 0
+      });
+    } else if (entry.type === "stockIn") {
+      const totalQty = products.reduce((sum, product) => sum + product.quantity, 0);
+      const totalAmount = products.reduce((sum, product) => sum + product.amount, 0);
+      const paidAmount = numberValue(raw.paidAmount);
+      stockIn.push({
+        id,
+        date,
+        monthId,
+        sourceName: "Jazz Company",
+        stockInMode: raw.stockInMode === "credit" ? "credit" : "cash",
+        products,
+        totalQty,
+        totalAmount,
+        paidAmount,
+        jazzPayableAmount: Math.max(totalAmount - paidAmount, 0),
+        notes: typeof raw.notes === "string" ? raw.notes : undefined,
+        createdBy: legacyDay?.createdBy ?? "",
+        createdAt: legacyDay?.createdAt ?? 0,
+        updatedBy: legacyDay?.updatedBy,
+        updatedAt: legacyDay?.updatedAt ?? 0
+      });
+    }
+  });
+
+  const fallbackSummary: StockDailySummary = {
+    accountCount: entries.length,
+    totalQty: entries.reduce((sum, entry) => sum + entry.totalQty, 0),
+    totalAmount: entries.reduce((sum, entry) => sum + entry.totalAmount, 0),
+    totalPaymentReceived: entries.reduce((sum, entry) => sum + entry.totalPaymentReceived, 0),
+    totalDueBalance: entries.reduce((sum, entry) => sum + entry.dueBalance, 0)
+  };
+  const dayV2 = dayV2Snap.exists() ? dayV2Snap.data() as Partial<StockDayRecord> : {};
+
+  return {
+    ...(legacyDay ?? mapDayData({}, String(dayNo))),
+    ...stockDayDateFields(monthId, dayNo),
+    id: String(dayNo),
+    monthId,
+    dayNo,
+    entries,
+    stockOut: entries,
+    stockIn,
+    summary: { ...fallbackSummary, ...(dayV2.summary ?? {}) }
+  };
+}
+
+async function loadStockV2Days(monthId: string): Promise<StockDayRecord[]> {
+  const snap = await getDocs(query(collection(requireDb(), "ledgerV2", "stock", "months", monthId, "days"), orderBy("dayNo", "asc")));
+  if (snap.empty) {
+    throw new Error(`ledgerV2 Stock projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`);
+  }
+  const days = await Promise.all(snap.docs.map((item) => hydrateStockV2Day(monthId, Number(item.data().dayNo ?? item.id))));
+  return days.sort((a, b) => a.dayNo - b.dayNo);
+}
+
 async function syncStockLedgerV2RawEntriesInBatch(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   day: StockDayRecord,
   actorUid: string,
   timestamp: number,
@@ -207,6 +363,10 @@ function openingRef() {
   return doc(requireDb(), "stockSettings", "opening", "items", "main");
 }
 
+function configRef() {
+  return doc(requireDb(), "stockSettings", "config", "items", "main");
+}
+
 function productBalanceRef(productId: string) {
   return doc(requireDb(), "stockBalances", "products", "items", productId);
 }
@@ -238,8 +398,8 @@ async function getStockPreviousSummary(monthId: string) {
 }
 
 async function getStockProductsForCalculations() {
-  const productsSnap = await getDocs(query(productCollection(), orderBy("displayOrder", "asc")));
-  return productsSnap.docs.map((item) => item.data() as StockProduct);
+  const productsSnap = await getDocs(productCollection());
+  return orderedBySortOrder(productsSnap.docs.map((item) => item.data() as StockProduct));
 }
 
 function auditRef(monthId: string, id = `${now()}-${Math.random().toString(36).slice(2, 8)}`) {
@@ -251,7 +411,7 @@ function unifiedAuditRef(id: string) {
 }
 
 function stageUnifiedAudit(
-  batch: ReturnType<typeof writeBatch>,
+  batch: FirestoreBatchWriter,
   input: Parameters<typeof buildAuditLogDocument>[0],
   actorRole: UserRole
 ) {
@@ -274,9 +434,15 @@ function mapDayData(data: Partial<StockDayRecord>, id: string): StockDayRecord {
     entryMonth: data.entryMonth,
     entryDay: data.entryDay,
     status: data.status ?? "open",
+    manualOverride: data.manualOverride ?? false,
     entries,
     stockOut: entries,
-    stockIn: Array.isArray(data.stockIn) ? data.stockIn : [],
+    stockIn: Array.isArray(data.stockIn)
+      ? data.stockIn.map((record) => ({
+          ...record,
+          stockInMode: record.stockInMode === "credit" ? "credit" as const : "cash" as const
+        }))
+      : [],
     summary: data.summary ?? {
       accountCount: entries.length,
       totalQty: entries.reduce((total, entry) => total + (entry.totalQty ?? 0), 0),
@@ -303,13 +469,30 @@ function mapDayData(data: Partial<StockDayRecord>, id: string): StockDayRecord {
 
 export function roleCanStock(
   role: UserRole | null,
-  permission: "read" | "daily" | "settings" | "backup" | "monthControls"
+  permission: "read" | "daily" | "settings" | "backup" | "monthControls" | typeof MASTER_REFRESH_ACCESS
 ) {
   if (!role) return false;
   if (permission === "read") return true;
+  if (permission === MASTER_REFRESH_ACCESS) return canRunMasterRefresh(role);
   if (role === "owner") return true;
   if (role === "admin") return permission === "daily";
   return false;
+}
+
+async function loadStockMonthForRefresh(monthId: string, user: User | null, role: UserRole | null) {
+  const monthSnap = await getDoc(monthRef(monthId));
+  if (monthSnap.exists()) return monthSnap.data() as StockMonth;
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  return {
+    id: monthId,
+    label: monthId,
+    status: "open" as const,
+    createdBy: currentActor.userId,
+    updatedBy: currentActor.userId,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  } satisfies StockMonth;
 }
 
 export async function ensureStockOpeningSeed(
@@ -359,9 +542,9 @@ export function subscribeStockProducts(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(productCollection(), orderBy("displayOrder", "asc")),
+    productCollection(),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((item) => item.data() as StockProduct), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((item) => item.data() as StockProduct)), snap.metadata),
     onError
   );
 }
@@ -371,9 +554,9 @@ export function subscribeStockAccounts(
   onError?: (error: FirestoreError) => void
 ) {
   return onSnapshot(
-    query(accountCollection(), orderBy("displayOrder", "asc")),
+    accountCollection(),
     { includeMetadataChanges: true },
-    (snap) => onNext(snap.docs.map((item) => item.data() as StockAccountProfile), snap.metadata),
+    (snap) => onNext(orderedBySortOrder(snap.docs.map((item) => item.data() as StockAccountProfile)), snap.metadata),
     onError
   );
 }
@@ -389,6 +572,42 @@ export function subscribeStockOpeningBalances(
     (snap) => onNext(snap.exists() ? (snap.data() as StockOpeningBalances) : null, snap.metadata),
     onError
   );
+}
+
+export function subscribeStockSettingsConfig(
+  onNext: (config: StockSettingsConfig, metadata: FirestoreSnapshotMeta) => void,
+  onError?: (error: FirestoreError) => void
+) {
+  return onSnapshot(
+    configRef(),
+    { includeMetadataChanges: true },
+    (snap) => {
+      const data = snap.exists() ? snap.data() as Partial<StockSettingsConfig> : {};
+      onNext({
+        ...data,
+        allowManualCarryForwardInput: Boolean(data.allowManualCarryForwardInput)
+      } as StockSettingsConfig, snap.metadata);
+    },
+    onError
+  );
+}
+
+export async function saveStockSettingsConfig(
+  config: StockSettingsConfig,
+  user: User | null,
+  role: UserRole | null
+) {
+  const currentActor = actor(user, role);
+  const timestamp = now();
+  const nextConfig: StockSettingsConfig = {
+    allowManualCarryForwardInput: Boolean(config.allowManualCarryForwardInput),
+    updatedBy: currentActor.userId,
+    updatedAt: timestamp
+  };
+  const batch = writeBatch(requireDb());
+  batch.set(configRef(), cleanForFirestore(nextConfig), { merge: true });
+  await writeSettingsAudit(batch, currentActor, role, "update-config", "config", "main", nextConfig);
+  await batch.commit();
 }
 
 export async function saveStockOpeningBalances(
@@ -418,8 +637,31 @@ export function subscribeStockMonths(
 export function subscribeStockDays(
   monthId: string,
   onNext: (days: StockDayRecord[], metadata: FirestoreSnapshotMeta) => void,
-  onError?: (error: FirestoreError) => void
+  onError?: (error: FirestoreError | Error) => void,
+  options: LedgerUiReadOptions = {}
 ) {
+  if (options.readDecision?.mode === "v2") {
+    try {
+      assertLedgerV2UiReadAllowed(options.readDecision);
+    } catch (error) {
+      setTimeout(() => onError?.(error as Error), 0);
+      return () => {};
+    }
+    return onSnapshot(
+      query(collection(requireDb(), "ledgerV2", "stock", "months", monthId, "days"), orderBy("dayNo", "asc")),
+      { includeMetadataChanges: true },
+      (snap) => {
+        if (snap.empty) {
+          onError?.(new Error(`ledgerV2 Stock projections are missing for ${monthId}. Run and review master refresh before enabling v2 UI reads.`));
+          return;
+        }
+        void Promise.all(snap.docs.map((item) => hydrateStockV2Day(monthId, Number(item.data().dayNo ?? item.id))))
+          .then((days) => onNext(days.sort((a, b) => a.dayNo - b.dayNo), snap.metadata))
+          .catch((error: Error) => onError?.(error));
+      },
+      onError as (error: FirestoreError) => void
+    );
+  }
   return onSnapshot(
     query(collection(monthRef(monthId), "days"), orderBy("dayNo", "asc")),
     { includeMetadataChanges: true },
@@ -431,8 +673,23 @@ export function subscribeStockDays(
 export function subscribeStockMonthlySummary(
   monthId: string,
   onNext: (summary: StockMonthlySummary | null, metadata: FirestoreSnapshotMeta) => void,
-  onError?: (error: FirestoreError) => void
+  onError?: (error: FirestoreError | Error) => void,
+  options: LedgerUiReadOptions = {}
 ) {
+  if (options.readDecision?.mode === "v2") {
+    try {
+      assertLedgerV2UiReadAllowed(options.readDecision);
+    } catch (error) {
+      setTimeout(() => onError?.(error as Error), 0);
+      return () => {};
+    }
+    return onSnapshot(
+      doc(requireDb(), "ledgerV2", "stock", "months", monthId, "summary", "home"),
+      { includeMetadataChanges: true },
+      (snap) => onNext(snap.exists() ? (snap.data() as StockMonthlySummary) : null, snap.metadata),
+      onError as (error: FirestoreError) => void
+    );
+  }
   return onSnapshot(
     doc(monthRef(monthId), "summary", "monthly"),
     { includeMetadataChanges: true },
@@ -441,7 +698,11 @@ export function subscribeStockMonthlySummary(
   );
 }
 
-export async function loadStockDays(monthId: string) {
+export async function loadStockDays(monthId: string, options: LedgerUiReadOptions = {}) {
+  if (options.readDecision?.mode === "v2") {
+    assertLedgerV2UiReadAllowed(options.readDecision);
+    return loadStockV2Days(monthId);
+  }
   const snap = await getDocs(query(collection(monthRef(monthId), "days"), orderBy("dayNo", "asc")));
   return snap.docs.map((item) => mapDayData(item.data() as Partial<StockDayRecord>, item.id));
 }
@@ -494,7 +755,8 @@ export async function upsertStockProduct(
   const product: StockProduct = {
     ...input,
     rate: Number(input.rate) || 0,
-    displayOrder: Number(input.displayOrder) || 0,
+    sortOrder: Number(input.sortOrder ?? input.displayOrder) || 1,
+    displayOrder: Number(input.displayOrder ?? input.sortOrder) || 1,
     paymentTrackingEnabled: input.paymentTrackingEnabled !== false,
     createdBy: input.createdBy ?? currentActor.userId,
     createdAt: input.createdAt ?? timestamp,
@@ -516,7 +778,8 @@ export async function upsertStockAccount(
   const timestamp = now();
   const account: StockAccountProfile = {
     ...input,
-    displayOrder: Number(input.displayOrder) || 0,
+    sortOrder: Number(input.sortOrder ?? input.displayOrder) || 1,
+    displayOrder: Number(input.displayOrder ?? input.sortOrder) || 1,
     openingBalance: Number(input.openingBalance ?? 0) || 0,
     createdBy: input.createdBy ?? currentActor.userId,
     createdAt: input.createdAt ?? timestamp,
@@ -526,6 +789,28 @@ export async function upsertStockAccount(
   const batch = writeBatch(requireDb());
   batch.set(doc(accountCollection(), account.id), cleanForFirestore(account), { merge: true });
   await writeSettingsAudit(batch, currentActor, role, "upsert-account", "account", account.id, account);
+  await batch.commit();
+}
+
+export async function updateStockProductSortOrder(before: StockProduct[], after: StockProduct[]) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(doc(productCollection(), item.id), cleanForFirestore({ sortOrder: item.sortOrder, displayOrder: item.sortOrder, updatedAt: timestamp }), { merge: true });
+  });
+  await batch.commit();
+}
+
+export async function updateStockAccountSortOrder(before: StockAccountProfile[], after: StockAccountProfile[]) {
+  const updates = changedSortOrderPatches(before, after);
+  if (updates.length === 0) return;
+  const batch = writeBatch(requireDb());
+  const timestamp = now();
+  updates.forEach((item) => {
+    batch.set(doc(accountCollection(), item.id), cleanForFirestore({ sortOrder: item.sortOrder, displayOrder: item.sortOrder, updatedAt: timestamp }), { merge: true });
+  });
   await batch.commit();
 }
 
@@ -570,6 +855,7 @@ export async function saveStockDay(
   action: "save-day" | "close-day" | "reopen-day" = "save-day",
   options: SaveStockDayOptions = {}
 ) {
+  if (action === "reopen-day" && !canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const currentActor = actor(user, role);
   const timestamp = now();
   const nextDays = [...allDays.filter((item) => item.dayNo !== day.dayNo), day].sort((a, b) => a.dayNo - b.dayNo);
@@ -667,21 +953,25 @@ export async function saveStockDay(
       batch.set(doc(dayDocumentRef, "stockIn", record.id), cleanForFirestore(record), { merge: true });
     }
   }
-  await syncStockLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp, {
-    skipExistingCleanup: options.skipRawEntryCleanup
-  });
+  if (!options.skipLedgerV2RawEntryWrites) {
+    await syncStockLedgerV2RawEntriesInBatch(batch, nextDay, currentActor.userId, timestamp, {
+      skipExistingCleanup: options.skipRawEntryCleanup
+    });
+  }
   if (!options.skipProductBalanceWrites) {
     productBalances.forEach((balance) => {
       batch.set(productBalanceRef(balance.productId), cleanForFirestore(balance satisfies StockProductBalance), { merge: true });
     });
   }
-  summary.accountTotals.forEach((account) => {
-    batch.set(
-      accountBalanceRef(account.accountId),
-      cleanForFirestore({ ...account, updatedAt: timestamp }),
-      { merge: true }
-    );
-  });
+  if (!options.skipAccountBalanceWrites) {
+    summary.accountTotals.forEach((account) => {
+      batch.set(
+        accountBalanceRef(account.accountId),
+        cleanForFirestore({ ...account, updatedAt: timestamp }),
+        { merge: true }
+      );
+    });
+  }
   if (!options.skipJazzCompanyBalanceWrite) {
     batch.set(
       jazzCompanyBalanceRef(),
@@ -735,11 +1025,11 @@ export async function recalculateStockMonth(
   const monthOpeningStock = previousSummary?.closingStock ?? openingBalances.openingStock;
   const monthOpeningJazzPayable = previousSummary?.closingJazzPayable ?? openingBalances.jazzOpeningPayable;
   const [productsSnap, accountsSnap] = await Promise.all([
-    getDocs(query(productCollection(), orderBy("displayOrder", "asc"))),
-    getDocs(query(accountCollection(), orderBy("displayOrder", "asc")))
+    getDocs(productCollection()),
+    getDocs(accountCollection())
   ]);
-  const products = productsSnap.docs.map((item) => item.data() as StockProduct);
-  const accounts = accountsSnap.docs.map((item) => item.data() as StockAccountProfile);
+  const products = orderedBySortOrder(productsSnap.docs.map((item) => item.data() as StockProduct));
+  const accounts = orderedBySortOrder(accountsSnap.docs.map((item) => item.data() as StockAccountProfile));
   const recalculatedDays = recalculateStockMonthEntries(days, accounts, previousSummary);
   const baseSummary = calculateMonthlySummary(month.id, recalculatedDays);
   const allStockInRecords = recalculatedDays.flatMap((item) => item.stockIn ?? []);
@@ -762,19 +1052,19 @@ export async function recalculateStockMonth(
     updatedBy: currentActor.userId,
     updatedAt: timestamp
   };
-  const batch = writeBatch(requireDb());
+  const batch = new ChunkedFirestoreBatch(requireDb(), `stock:${month.id}:recalculateMonth`);
   const auditId = `${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
   batch.set(monthRef(month.id), cleanForFirestore(nextMonth), { merge: true });
   recalculatedDays.forEach((day) => {
-  batch.set(dayRef(month.id, day.dayNo), {
-    ...cleanForFirestore({
-      ...day,
-      ...stockDayDateFields(month.id, day.dayNo),
-      stockOut: day.entries,
-      recalculatedAt: timestamp,
-      updatedBy: currentActor.userId,
-      updatedAt: timestamp
-    }),
+    batch.set(dayRef(month.id, day.dayNo), {
+      ...cleanForFirestore({
+        ...day,
+        ...stockDayDateFields(month.id, day.dayNo),
+        stockOut: day.entries,
+        recalculatedAt: timestamp,
+        updatedBy: currentActor.userId,
+        updatedAt: timestamp
+      }),
       closedAt: day.closedAt ?? deleteField(),
       closedBy: day.closedBy ?? deleteField(),
       lockedAt: day.lockedAt ?? deleteField(),
@@ -830,6 +1120,26 @@ export async function recalculateStockMonth(
   return { month: nextMonth, days: recalculatedDays, summary };
 }
 
+export async function recalculateStockLedgerLocal(
+  monthId: string,
+  user: User | null,
+  role: UserRole | null
+) {
+  assertMasterRefreshAccess(role, "Stock Ledger master refresh");
+  const [month, days] = await Promise.all([
+    loadStockMonthForRefresh(monthId, user, role),
+    loadStockDays(monthId)
+  ]);
+  const result = await recalculateStockMonth(month, days, user, role);
+  return {
+    ok: true,
+    calcRunId: undefined,
+    invariantIssueCount: 0,
+    dayCount: result.days.length,
+    ...result
+  };
+}
+
 export function reopenStockDayFor15Minutes(
   month: StockMonth,
   day: StockDayRecord,
@@ -839,11 +1149,18 @@ export function reopenStockDayFor15Minutes(
   reopenUntilAt?: number
 ) {
   const timestamp = now();
+  if (!canReopenDay(role)) throw new Error("Only owner can reopen days.");
   return saveStockDay(
     month,
     {
       ...day,
-      status: "open",
+      status: "reopen",
+      manualOverride: true,
+      closedAt: undefined,
+      closedBy: undefined,
+      lockedAt: undefined,
+      lockedBy: undefined,
+      lockedByRole: undefined,
       reopenedAt: timestamp,
       reopenedBy: user?.uid,
       reopenedByRole: role ?? undefined,
@@ -865,6 +1182,7 @@ export async function updateStockDaysStatusBatch(
   action: "close-days" | "reopen-days",
   reopenUntilAt?: number
 ) {
+  if (action === "reopen-days" && !canReopenDay(role)) throw new Error("Only owner can reopen days.");
   const currentActor = actor(user, role);
   const timestamp = now();
   const mergedDays = nextDays.reduce(
@@ -955,6 +1273,7 @@ export function closeStockDay(
     {
       ...day,
       status: "closed",
+      manualOverride: true,
       closedAt: timestamp,
       closedBy: user?.uid,
       lockedAt: timestamp,
@@ -1029,8 +1348,8 @@ export async function listStockBackup() {
   const openingBalances = openingDoc.exists() ? openingDoc.data() as StockOpeningBalances : null;
 
   const [productsSnap, accountsSnap, monthsSnap, productBalancesSnap, accountBalancesSnap, jazzCompanySnap] = await Promise.all([
-    getDocs(query(productCollection(), orderBy("displayOrder", "asc"))),
-    getDocs(query(accountCollection(), orderBy("displayOrder", "asc"))),
+    getDocs(productCollection()),
+    getDocs(accountCollection()),
     getDocs(query(collection(requireDb(), "stockMonths"), orderBy("id", "asc"))),
     getDocs(collection(requireDb(), "stockBalances", "products", "items")),
     getDocs(collection(requireDb(), "stockBalances", "accounts", "items")),
@@ -1044,8 +1363,8 @@ export async function listStockBackup() {
   );
   return {
     settings: {
-      products: productsSnap.docs.map((item) => item.data() as StockProduct),
-      accounts: accountsSnap.docs.map((item) => item.data() as StockAccountProfile),
+      products: orderedBySortOrder(productsSnap.docs.map((item) => item.data() as StockProduct)),
+      accounts: orderedBySortOrder(accountsSnap.docs.map((item) => item.data() as StockAccountProfile)),
       openingStock: openingBalances?.openingStock ?? {},
       jazzOpeningPayable: openingBalances ? { amount: openingBalances.jazzOpeningPayable } : {}
     },

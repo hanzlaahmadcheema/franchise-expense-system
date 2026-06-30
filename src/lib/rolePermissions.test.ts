@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { roleCan } from "./firestoreService";
 import { roleCanJazzLoad } from "../modules/jazzLoad/services/jazzLoadFirestore";
 import { roleCanStock } from "../modules/stock/services/stockFirestore";
+import { MASTER_REFRESH_ACCESS } from "../shared/services/masterRefreshPermissions";
 import type { UserRole } from "../types/ledger";
 
 const roles: UserRole[] = ["owner", "admin", "viewer"];
@@ -17,7 +18,7 @@ describe("role permission helpers", () => {
           users: roleCan(role, "users"),
           ownerControls: roleCan(role, "ownerControls"),
           importBackup: roleCan(role, "importBackup"),
-          masterRefresh: roleCan(role, "masterRefresh"),
+          masterRefresh: roleCan(role, MASTER_REFRESH_ACCESS),
           read: roleCan(role, "read")
         }
       ])
@@ -66,6 +67,12 @@ describe("role permission helpers", () => {
     expect(roleCanJazzLoad("viewer", "daily")).toBe(false);
   });
 
+  it("allows Jazz Load master refresh only for owner/admin", () => {
+    expect(roleCanJazzLoad("owner", MASTER_REFRESH_ACCESS)).toBe(true);
+    expect(roleCanJazzLoad("admin", MASTER_REFRESH_ACCESS)).toBe(true);
+    expect(roleCanJazzLoad("viewer", MASTER_REFRESH_ACCESS)).toBe(false);
+  });
+
   it("keeps Stock settings, backup, and month controls owner-only", () => {
     expect(roleCanStock("owner", "settings")).toBe(true);
     expect(roleCanStock("owner", "backup")).toBe(true);
@@ -78,5 +85,11 @@ describe("role permission helpers", () => {
 
     expect(roleCanStock("viewer", "read")).toBe(true);
     expect(roleCanStock("viewer", "daily")).toBe(false);
+  });
+
+  it("allows Stock master refresh only for owner/admin", () => {
+    expect(roleCanStock("owner", MASTER_REFRESH_ACCESS)).toBe(true);
+    expect(roleCanStock("admin", MASTER_REFRESH_ACCESS)).toBe(true);
+    expect(roleCanStock("viewer", MASTER_REFRESH_ACCESS)).toBe(false);
   });
 });
