@@ -178,6 +178,7 @@ export interface PeriodFinancialSeedsTable {
   source_period_key: string | null;
   source_day_no: number | null;
   verified_by_user_id: string | null;
+  verified_at: Timestamp | null;
   is_verified: boolean;
   notes: string | null;
   created_at: Generated<Timestamp>;

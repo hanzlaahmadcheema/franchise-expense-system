@@ -8,6 +8,7 @@ import { requireRole } from "./auth/rbacMiddleware.js";
 import { catalogRouter } from "./catalogs/routes.js";
 import { transactionRouter } from "./transactions/routes.js";
 import { calculationRouter } from "./calculations/routes.js";
+import { periodRouter } from "./periods/routes.js";
 
 export const app = express();
 
@@ -112,6 +113,9 @@ app.use("/api/v1/transactions", transactionRouter);
 
 // Phase 6: Server-Authoritative Calculation & Projection Engine API
 app.use("/api/v1/calculations", calculationRouter);
+
+// Phase 7B: Period Initialization & Opening Seed Governance API
+app.use("/api/v1/periods", periodRouter);
 
 // Fallback 404 handler for undefined API routes
 app.use((_req: Request, res: Response) => {

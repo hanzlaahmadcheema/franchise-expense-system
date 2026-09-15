@@ -126,6 +126,7 @@ async function cleanupTestData() {
   `.execute(db);
 
   await sql`
+    DELETE FROM period_financial_seeds WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2'));
     DELETE FROM accounting_days WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2'));
     DELETE FROM accounting_periods WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2'));
   `.execute(db);
@@ -195,6 +196,16 @@ async function setupTestData(): Promise<SetupData> {
     RETURNING id;
   `.execute(db);
   const f2PeriodId = p2.rows[0].id;
+
+  // 3.1 Financial Seeds for Day 1 Calculation Engine
+  await sql`
+    INSERT INTO period_financial_seeds (
+      franchise_id, period_id, opening_cash, opening_owner_balance,
+      opening_jazz_lifting, opening_jazz_payable, is_verified
+    ) VALUES
+      (${f1Id}, ${f1PeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true),
+      (${f2Id}, ${f2PeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true);
+  `.execute(db);
 
   // 4. Accounting Days
   // F1 Day 1: OPEN

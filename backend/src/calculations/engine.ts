@@ -105,20 +105,18 @@ export async function calculateDayInternal(
       .where("period_id", "=", day.period_id)
       .executeTakeFirst();
 
-    if (finSeed) {
-      openingCash = Number(finSeed.opening_cash);
-      ownerOpeningBalance = Number(finSeed.opening_owner_balance);
-      openingJazzLifting = Number(finSeed.opening_jazz_lifting);
-      openingJazzPayable = Number(finSeed.opening_jazz_payable);
-    } else {
-      warnings.push({
-        invariantCode: "INV_MISSING_SEED",
-        severity: "warning",
-        message: `Missing period_financial_seeds for period ${day.period_id}. Defaulting openings to 0.`,
-        dayId: day.id,
-        periodId: day.period_id
-      });
+    if (!finSeed) {
+      throw new InvariantViolationError(
+        "INV_MISSING_FINANCIAL_SEEDS",
+        `Missing required period_financial_seeds for period ${day.period_id} on Day 1. Opening values cannot be inferred.`,
+        { dayId: day.id, periodId: day.period_id }
+      );
     }
+
+    openingCash = Number(finSeed.opening_cash);
+    ownerOpeningBalance = Number(finSeed.opening_owner_balance);
+    openingJazzLifting = Number(finSeed.opening_jazz_lifting);
+    openingJazzPayable = Number(finSeed.opening_jazz_payable);
 
     const creditSeeds = await trx
       .selectFrom("period_credit_party_seeds")
