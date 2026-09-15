@@ -1,9 +1,9 @@
 /**
- * Phase 5: Operational Transaction Validation Schemas
+ * Phase 5.1: Operational Transaction Validation Schemas
  *
  * Zod validation schemas for request bodies, params, and queries across all 10
- * operational tables. Enforces accounting domain invariants and guards against
- * client injection of derived balances.
+ * operational tables. Enforces accounting domain invariants, clientMutationId
+ * idempotency, and baseRevision optimistic concurrency control.
  */
 import { z } from "zod";
 
@@ -20,10 +20,22 @@ export const TransactionFilterQuery = z.object({
 
 export type TransactionFilter = z.infer<typeof TransactionFilterQuery>;
 
+// Base concurrency and idempotency fields
+const IdempotencyFields = {
+  client_mutation_id: z.string().min(1).max(128).optional(),
+  clientMutationId: z.string().min(1).max(128).optional()
+};
+
+const OptimisticLockFields = {
+  base_revision: z.number().int().positive().optional(),
+  baseRevision: z.number().int().positive().optional()
+};
+
 // ---------------------------------------------------------------------------
 // 1. Expense Items
 // ---------------------------------------------------------------------------
 export const ExpenseItemCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   category_id: z.string().uuid().nullable().optional(),
   category_name_snapshot: z.string().max(100).optional(),
@@ -33,6 +45,7 @@ export const ExpenseItemCreateSchema = z.object({
 });
 
 export const ExpenseItemUpdateSchema = z.object({
+  ...OptimisticLockFields,
   category_id: z.string().uuid().nullable().optional(),
   item_name: z.string().min(1).max(150).optional(),
   description: z.string().max(1000).nullable().optional(),
@@ -46,6 +59,7 @@ export type ExpenseItemUpdate = z.infer<typeof ExpenseItemUpdateSchema>;
 // 2. Commission Items
 // ---------------------------------------------------------------------------
 export const CommissionItemCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   category_id: z.string().uuid().nullable().optional(),
   category_name_snapshot: z.string().max(100).optional(),
@@ -53,6 +67,7 @@ export const CommissionItemCreateSchema = z.object({
 });
 
 export const CommissionItemUpdateSchema = z.object({
+  ...OptimisticLockFields,
   category_id: z.string().uuid().nullable().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional()
 });
@@ -64,6 +79,7 @@ export type CommissionItemUpdate = z.infer<typeof CommissionItemUpdateSchema>;
 // 3. Credit Transactions
 // ---------------------------------------------------------------------------
 export const CreditTransactionCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   party_id: z.string().uuid(),
   loan_amount: z.number().min(0).default(0),
@@ -78,6 +94,7 @@ export const CreditTransactionCreateSchema = z.object({
 );
 
 export const CreditTransactionUpdateSchema = z.object({
+  ...OptimisticLockFields,
   party_id: z.string().uuid().optional(),
   loan_amount: z.number().min(0).optional(),
   receipt_amount: z.number().min(0).optional(),
@@ -94,6 +111,7 @@ export type CreditTransactionUpdate = z.infer<typeof CreditTransactionUpdateSche
 // 4. Owner Transactions
 // ---------------------------------------------------------------------------
 export const OwnerTransactionCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   description: z.string().min(1).max(1000),
   amount: z.number().refine((val) => val !== 0, { message: "amount cannot be 0" }),
@@ -101,6 +119,7 @@ export const OwnerTransactionCreateSchema = z.object({
 });
 
 export const OwnerTransactionUpdateSchema = z.object({
+  ...OptimisticLockFields,
   description: z.string().min(1).max(1000).optional(),
   amount: z.number().refine((val) => val !== 0, { message: "amount cannot be 0" }).optional(),
   notes: z.string().max(1000).nullable().optional()
@@ -113,6 +132,7 @@ export type OwnerTransactionUpdate = z.infer<typeof OwnerTransactionUpdateSchema
 // 5. Jazz Load Lifting Records
 // ---------------------------------------------------------------------------
 export const JazzLiftingCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   ml_lifting_amount: z.number().min(0, { message: "ml_lifting_amount must be greater than or equal to 0" }),
   notes: z.string().max(1000).nullable().optional()
@@ -129,12 +149,14 @@ export type JazzLiftingUpdate = z.infer<typeof JazzLiftingUpdateSchema>;
 // ---------------------------------------------------------------------------
 // 6. Jazz Load DO Entries
 // ---------------------------------------------------------------------------
+// Note: applied_ml_rate_percentage is strictly server-derived from jazz_load_rates.
+// Clients cannot inject it on CREATE or alter it on UPDATE.
 export const JazzDoEntryCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   do_profile_id: z.string().uuid(),
   issuance_base: z.number().min(0).default(0),
   payment_base: z.number().min(0).default(0),
-  applied_ml_rate_percentage: z.number().min(0).max(99.9999).optional(),
   notes: z.string().max(1000).nullable().optional()
 }).refine(
   (data) => data.issuance_base > 0 || data.payment_base > 0,
@@ -142,10 +164,10 @@ export const JazzDoEntryCreateSchema = z.object({
 );
 
 export const JazzDoEntryUpdateSchema = z.object({
+  ...OptimisticLockFields,
   do_profile_id: z.string().uuid().optional(),
   issuance_base: z.number().min(0).optional(),
   payment_base: z.number().min(0).optional(),
-  applied_ml_rate_percentage: z.number().min(0).max(99.9999).optional(),
   notes: z.string().max(1000).nullable().optional()
 });
 
@@ -162,6 +184,7 @@ export const StockOrderLineInputSchema = z.object({
 });
 
 export const StockOrderCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   direction: z.enum(["inbound", "outbound"]),
   account_id: z.string().uuid().nullable().optional(),
@@ -172,6 +195,7 @@ export const StockOrderCreateSchema = z.object({
 });
 
 export const StockOrderUpdateSchema = z.object({
+  ...OptimisticLockFields,
   direction: z.enum(["inbound", "outbound"]).optional(),
   account_id: z.string().uuid().nullable().optional(),
   supplier_name: z.string().max(100).nullable().optional(),
@@ -188,6 +212,7 @@ export type StockOrderUpdate = z.infer<typeof StockOrderUpdateSchema>;
 // 9. Stock Account Payments
 // ---------------------------------------------------------------------------
 export const StockAccountPaymentCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   account_id: z.string().uuid(),
   amount: z.number().positive({ message: "amount must be greater than 0" }),
@@ -196,6 +221,7 @@ export const StockAccountPaymentCreateSchema = z.object({
 });
 
 export const StockAccountPaymentUpdateSchema = z.object({
+  ...OptimisticLockFields,
   account_id: z.string().uuid().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional(),
   payment_method: z.string().max(32).optional(),
@@ -209,6 +235,7 @@ export type StockAccountPaymentUpdate = z.infer<typeof StockAccountPaymentUpdate
 // 10. Jazz Company Payable Payments
 // ---------------------------------------------------------------------------
 export const JazzPayablePaymentCreateSchema = z.object({
+  ...IdempotencyFields,
   day_id: z.string().uuid(),
   amount: z.number().positive({ message: "amount must be greater than 0" }),
   payment_reference: z.string().max(128).nullable().optional(),
@@ -216,6 +243,7 @@ export const JazzPayablePaymentCreateSchema = z.object({
 });
 
 export const JazzPayablePaymentUpdateSchema = z.object({
+  ...OptimisticLockFields,
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional(),
   payment_reference: z.string().max(128).nullable().optional(),
   notes: z.string().max(1000).nullable().optional()

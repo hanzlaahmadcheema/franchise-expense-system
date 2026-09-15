@@ -28,10 +28,29 @@ export class InvalidReferenceError extends Error {
   }
 }
 
+export class RevisionConflictError extends Error {
+  constructor(public currentRevision: number, public providedRevision: number) {
+    super(`Revision conflict: Record is at revision ${currentRevision}, but baseRevision ${providedRevision} was provided. Refresh your state and retry.`);
+    this.name = "RevisionConflictError";
+  }
+}
+
+export class IdempotencyConflictError extends Error {
+  constructor(message = "Idempotency key has already been used with a different request payload.") {
+    super(message);
+    this.name = "IdempotencyConflictError";
+  }
+}
+
 interface PgError {
   code?: string;
   constraint?: string;
   message?: string;
+}
+
+export function isIdempotencyUniqueViolation(err: unknown): boolean {
+  const pgErr = err as PgError;
+  return pgErr?.code === "23505" && typeof pgErr?.constraint === "string" && pgErr.constraint.includes("mutation_idempotency");
 }
 
 export function isUniqueViolation(err: unknown): boolean {
@@ -101,6 +120,24 @@ export function sendInternalError(res: Response, context: string, err: unknown):
 export function handleTransactionError(res: Response, context: string, err: unknown): void {
   if (err instanceof ZodError) {
     return void sendValidationError(res, err);
+  }
+  if (err instanceof RevisionConflictError) {
+    return void res.status(409).json({
+      error: "REVISION_CONFLICT",
+      code: "REVISION_CONFLICT",
+      message: "The record has been modified by another operation. Refresh and retry.",
+      current_revision: err.currentRevision,
+      currentRevision: err.currentRevision,
+      provided_revision: err.providedRevision,
+      providedRevision: err.providedRevision
+    });
+  }
+  if (err instanceof IdempotencyConflictError) {
+    return void res.status(409).json({
+      error: "IDEMPOTENCY_KEY_REUSED",
+      code: "IDEMPOTENCY_KEY_REUSED",
+      message: err.message
+    });
   }
   if (err instanceof DayClosedError || isClosedDayTriggerViolation(err)) {
     return void sendDayClosedError(res, err instanceof Error ? err.message : undefined);

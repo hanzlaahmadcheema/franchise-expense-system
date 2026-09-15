@@ -1,18 +1,25 @@
 /**
- * Phase 5: Operational Ledger Transaction Services
+ * Phase 5.1: Operational Ledger Transaction Services
  *
  * Implements server-authoritative operational transaction services.
- * Every mutation executes in a PostgreSQL transaction, acquires row locks on
- * the accounting day, validates tenant boundary on all referenced foreign keys,
- * verifies OPEN/REOPEN day status, prevents client overrides of generated fields,
- * and maintains audit logging.
+ * Hardened with:
+ * - Atomic clientMutationId idempotency tracking
+ * - baseRevision optimistic concurrency control
+ * - Server-authoritative Jazz Load applied rate snapshots
+ * - Strict tenant boundary on all foreign keys and accounting day locks
+ * - Immutability trigger compliance and audit logging
  */
-import { sql } from "kysely";
+import { sql, type Transaction } from "kysely";
 import { db } from "../config/database.js";
-import type { Timestamp } from "../db/types.js";
+import type { Database, Timestamp } from "../db/types.js";
 import { assertAccountingDayActive } from "./dayLock.js";
 import { recordAuditLog } from "./audit.js";
-import { NotFoundError, InvalidReferenceError } from "./errors.js";
+import { saveIdempotencyRecord } from "./idempotency.js";
+import {
+  NotFoundError,
+  InvalidReferenceError,
+  RevisionConflictError
+} from "./errors.js";
 import type {
   TransactionFilter,
   ExpenseItemCreate,
@@ -41,6 +48,30 @@ export interface MutationContext {
   userEmail: string | null;
   ipAddress?: string | null;
   userAgent?: string | null;
+  clientMutationId?: string;
+  payloadHash?: string;
+  endpoint?: string;
+}
+
+function assertBaseRevision(itemRevision: number, data: { base_revision?: number; baseRevision?: number }) {
+  const baseRev = data.base_revision ?? data.baseRevision;
+  if (baseRev !== undefined && itemRevision !== baseRev) {
+    throw new RevisionConflictError(itemRevision, baseRev);
+  }
+}
+
+async function maybeSaveIdempotency(trx: Transaction<Database>, ctx: MutationContext, responseBody: unknown) {
+  if (ctx.clientMutationId && ctx.payloadHash && ctx.endpoint) {
+    await saveIdempotencyRecord(trx, {
+      franchiseId: ctx.franchiseId,
+      clientMutationId: ctx.clientMutationId,
+      userId: ctx.userId,
+      endpoint: ctx.endpoint,
+      payloadHash: ctx.payloadHash,
+      responseStatus: 201,
+      responseBody
+    });
+  }
 }
 
 // ===========================================================================
@@ -122,6 +153,9 @@ export async function createExpense(ctx: MutationContext, data: ExpenseItemCreat
       userAgent: ctx.userAgent
     });
 
+    // 5. Save idempotency record if clientMutationId supplied
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -140,10 +174,13 @@ export async function updateExpense(ctx: MutationContext, id: string, data: Expe
     }
     const item = existing.rows[0];
 
-    // 2. Lock & validate accounting day
+    // 2. Enforce optimistic concurrency
+    assertBaseRevision(item.revision, data);
+
+    // 3. Lock & validate accounting day
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
-    // 3. Resolve category snapshot if category_id changed
+    // 4. Resolve category snapshot if category_id changed
     let categoryNameSnapshot = item.category_name_snapshot;
     if (data.category_id !== undefined) {
       if (data.category_id === null) {
@@ -163,7 +200,7 @@ export async function updateExpense(ctx: MutationContext, id: string, data: Expe
       }
     }
 
-    // 4. Update
+    // 5. Update with server-managed revision increment
     const updated = await trx
       .updateTable("expense_items")
       .set({
@@ -179,7 +216,7 @@ export async function updateExpense(ctx: MutationContext, id: string, data: Expe
       .returningAll()
       .executeTakeFirstOrThrow();
 
-    // 5. Record audit log
+    // 6. Record audit log
     await recordAuditLog(trx, {
       franchiseId: ctx.franchiseId,
       userId: ctx.userId,
@@ -308,6 +345,8 @@ export async function createCommission(ctx: MutationContext, data: CommissionIte
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -325,6 +364,7 @@ export async function updateCommission(ctx: MutationContext, id: string, data: C
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     let categoryNameSnapshot = item.category_name_snapshot;
@@ -487,6 +527,8 @@ export async function createCredit(ctx: MutationContext, data: CreditTransaction
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -504,6 +546,7 @@ export async function updateCredit(ctx: MutationContext, id: string, data: Credi
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     let partyNameSnapshot = item.party_name_snapshot;
@@ -651,6 +694,8 @@ export async function createOwnerTransaction(ctx: MutationContext, data: OwnerTr
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -668,6 +713,7 @@ export async function updateOwnerTransaction(ctx: MutationContext, id: string, d
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     const updated = await trx
@@ -794,6 +840,8 @@ export async function createJazzLifting(ctx: MutationContext, data: JazzLiftingC
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -810,7 +858,6 @@ export async function updateJazzLifting(ctx: MutationContext, id: string, data: 
       throw new NotFoundError("Jazz Load lifting record not found.");
     }
     const item = existing.rows[0];
-
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     const updated = await trx
@@ -923,20 +970,18 @@ export async function createJazzDoEntry(ctx: MutationContext, data: JazzDoEntryC
       throw new InvalidReferenceError("Referenced Jazz Load DO profile does not exist in this franchise.");
     }
 
-    // Determine applied ML rate percentage:
-    // If client supplied valid rate use it, otherwise resolve latest active rate for franchise
-    let appliedRate = data.applied_ml_rate_percentage;
-    if (appliedRate === undefined) {
-      const activeRate = await trx
-        .selectFrom("jazz_load_rates")
-        .select(["ml_rate"])
-        .where("franchise_id", "=", ctx.franchiseId)
-        .where("is_active", "=", true)
-        .orderBy("effective_from", "desc")
-        .executeTakeFirst();
+    // SERVER-AUTHORITATIVE ML RATE SNAPSHOT:
+    // Rate is strictly derived from the configured jazz_load_rates for this franchise.
+    // Clients cannot inject an arbitrary rate.
+    const activeRate = await trx
+      .selectFrom("jazz_load_rates")
+      .select(["ml_rate"])
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("is_active", "=", true)
+      .orderBy("effective_from", "desc")
+      .executeTakeFirst();
 
-      appliedRate = activeRate ? Number(activeRate.ml_rate) : 2.6;
-    }
+    const appliedRate = activeRate ? Number(activeRate.ml_rate) : 2.6;
 
     const created = await trx
       .insertInto("jazz_load_do_entries")
@@ -967,6 +1012,8 @@ export async function createJazzDoEntry(ctx: MutationContext, data: JazzDoEntryC
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -984,6 +1031,7 @@ export async function updateJazzDoEntry(ctx: MutationContext, id: string, data: 
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     let doNameSnapshot = item.do_name_snapshot;
@@ -1004,6 +1052,8 @@ export async function updateJazzDoEntry(ctx: MutationContext, id: string, data: 
       doLineSnapshot = profile.do_line;
     }
 
+    // Notice: applied_ml_rate_percentage is strictly preserved from the original transaction fact.
+    // Clients cannot alter or rewrite historical applied rates.
     const updated = await trx
       .updateTable("jazz_load_do_entries")
       .set({
@@ -1012,7 +1062,7 @@ export async function updateJazzDoEntry(ctx: MutationContext, id: string, data: 
         do_line_snapshot: doLineSnapshot,
         issuance_base: data.issuance_base !== undefined ? data.issuance_base : item.issuance_base,
         payment_base: data.payment_base !== undefined ? data.payment_base : item.payment_base,
-        applied_ml_rate_percentage: data.applied_ml_rate_percentage !== undefined ? data.applied_ml_rate_percentage : item.applied_ml_rate_percentage,
+        applied_ml_rate_percentage: item.applied_ml_rate_percentage,
         notes: data.notes !== undefined ? data.notes : item.notes,
         revision: (item.revision || 1) + 1
       })
@@ -1234,7 +1284,6 @@ export async function createStockOrder(ctx: MutationContext, data: StockOrderCre
 
     // 5. Create Child Order Lines
     // IMPORTANT: line_amount is GENERATED ALWAYS by PostgreSQL (quantity * unit_rate STORED).
-    // It is NEVER supplied or manipulated in the application code.
     const createdLines = [];
     for (const line of resolvedLines) {
       const insertedLine = await trx
@@ -1270,6 +1319,9 @@ export async function createStockOrder(ctx: MutationContext, data: StockOrderCre
       userAgent: ctx.userAgent
     });
 
+    // 7. Save idempotency record (covers parent + all child lines atomically)
+    await maybeSaveIdempotency(trx, ctx, { data: fullOrder });
+
     return fullOrder;
   });
 }
@@ -1288,10 +1340,13 @@ export async function updateStockOrder(ctx: MutationContext, id: string, data: S
     }
     const order = existing.rows[0];
 
-    // 2. Lock accounting day
+    // 2. Enforce optimistic concurrency
+    assertBaseRevision(order.revision, data);
+
+    // 3. Lock accounting day
     await assertAccountingDayActive(trx, ctx.franchiseId, order.day_id);
 
-    // 3. Resolve account snapshot if updated
+    // 4. Resolve account snapshot if updated
     let accountNameSnapshot = order.account_name_snapshot;
     if (data.account_id !== undefined) {
       if (data.account_id === null) {
@@ -1311,7 +1366,7 @@ export async function updateStockOrder(ctx: MutationContext, id: string, data: S
       }
     }
 
-    // 4. Update parent order
+    // 5. Update parent order
     const updatedOrder = await trx
       .updateTable("stock_orders")
       .set({
@@ -1328,10 +1383,9 @@ export async function updateStockOrder(ctx: MutationContext, id: string, data: S
       .returningAll()
       .executeTakeFirstOrThrow();
 
-    // 5. Replace lines if supplied
+    // 6. Replace lines if supplied
     let currentLines;
     if (data.lines) {
-      // Validate all products
       const resolvedLines: Array<{
         product_id: string;
         product_name_snapshot: string;
@@ -1523,6 +1577,8 @@ export async function createStockAccountPayment(ctx: MutationContext, data: Stoc
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -1540,6 +1596,7 @@ export async function updateStockAccountPayment(ctx: MutationContext, id: string
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     if (data.account_id && data.account_id !== item.account_id) {
@@ -1681,6 +1738,8 @@ export async function createJazzPayablePayment(ctx: MutationContext, data: JazzP
       userAgent: ctx.userAgent
     });
 
+    await maybeSaveIdempotency(trx, ctx, { data: created });
+
     return created;
   });
 }
@@ -1698,6 +1757,7 @@ export async function updateJazzPayablePayment(ctx: MutationContext, id: string,
     }
     const item = existing.rows[0];
 
+    assertBaseRevision(item.revision, data);
     await assertAccountingDayActive(trx, ctx.franchiseId, item.day_id);
 
     const updated = await trx

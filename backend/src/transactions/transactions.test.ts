@@ -55,6 +55,12 @@ async function cleanupTestData() {
   `.execute(db);
 
   await sql`
+    DELETE FROM mutation_idempotency WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+  `.execute(db);
+
+  await sql`
     DELETE FROM audit_logs WHERE franchise_id IN (
       SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
     );
@@ -222,6 +228,11 @@ async function setupTestData(): Promise<SetupData> {
     RETURNING id;
   `.execute(db);
   const f1DoProfileId = cDo.rows[0].id;
+
+  await sql`
+    INSERT INTO jazz_load_rates (franchise_id, ml_rate, is_active, effective_from)
+    VALUES (${f1Id}, 2.6500, true, '2026-09-01T00:00:00Z');
+  `.execute(db);
 
   const cProd = await sql<{ id: string }>`
     INSERT INTO stock_products (franchise_id, slug, name, rate)
@@ -692,7 +703,295 @@ async function runTransactionTests() {
       assert(Number(logs.rows[0].count) >= 8, `Audit logs recorded for financial mutations (${logs.rows[0].count} events)`);
     }
 
-    console.log(`\n=== ALL PHASE 5 TESTS PASSED (${pass}/${pass + fail}) ===`);
+    // -------------------------------------------------------------------------
+    // 9. Phase 5.1 Issue 1: Jazz Load DO Rate Immutability & Server Authority
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 9: Jazz Load DO Applied Rate Server-Authority (Phase 5.1 Issue 1)");
+    {
+      // 1. Creation derives applied_ml_rate_percentage from franchise's jazz_load_rates (configured as 2.6500)
+      const rCreateDo = await req(base, "POST", "/api/v1/transactions/jazz-load/do", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        do_profile_id: data.f1DoProfileId,
+        issuance_base: 4000,
+        payment_base: 4000,
+        applied_ml_rate_percentage: 9.9999 // Client attempts to tamper with applied rate
+      });
+      assert(rCreateDo.status === 201, "Jazz DO created with rate lookup", rCreateDo.status);
+      const doId = rCreateDo.body?.data?.id;
+      const doRate = Number(rCreateDo.body?.data?.applied_ml_rate_percentage);
+      assert(doRate === 2.65, "Applied rate derived from server rate (2.6500), client input 9.9999 ignored", doRate);
+
+      // 2. Updating notes/bases preserves historical applied_ml_rate_percentage
+      const rUpdateDo = await req(base, "PATCH", `/api/v1/transactions/jazz-load/do/${doId}`, "tx-admin", {
+        baseRevision: 1,
+        notes: "Updated DO entry notes",
+        payment_base: 3500,
+        applied_ml_rate_percentage: 8.8888 // Client attempts to alter rate on PATCH
+      });
+      assert(rUpdateDo.status === 200, "Jazz DO updated successfully", rUpdateDo.status);
+      const updatedDoRate = Number(rUpdateDo.body?.data?.applied_ml_rate_percentage);
+      assert(updatedDoRate === 2.65, "Applied rate strictly preserved across updates (remains 2.6500)", updatedDoRate);
+      assert(rUpdateDo.body?.data?.revision === 2, "Revision incremented to 2", rUpdateDo.body?.data?.revision);
+    }
+
+    // -------------------------------------------------------------------------
+    // 10. Phase 5.1 Issue 2: POST Mutation Idempotency via clientMutationId
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 10: POST Mutation Idempotency (Phase 5.1 Issue 2)");
+    {
+      const mutationId1 = "m-test-exp-" + Date.now();
+      const expensePayload = {
+        clientMutationId: mutationId1,
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "Idempotent Coffee",
+        amount: 250
+      };
+
+      // 1. Initial POST succeeds with 201 Created
+      const countExpBefore = await sql<{ count: string }>`SELECT count(*) FROM expense_items WHERE item_name = 'Idempotent Coffee';`.execute(db);
+      const countAuditBefore = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
+
+      const rPost1 = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", expensePayload);
+      assert(rPost1.status === 201, "First POST with clientMutationId returns 201", rPost1.status);
+      const firstItemId = rPost1.body?.data?.id;
+      assert(Boolean(firstItemId), "First POST returns created ID");
+
+      const countExpAfterFirst = await sql<{ count: string }>`SELECT count(*) FROM expense_items WHERE item_name = 'Idempotent Coffee';`.execute(db);
+      assert(Number(countExpAfterFirst.rows[0].count) === Number(countExpBefore.rows[0].count) + 1, "Exactly 1 expense item inserted");
+
+      // 2. Retrying identical POST with same clientMutationId returns identical result (201/200)
+      const rPostRetry = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", expensePayload);
+      assert(rPostRetry.status === 201 || rPostRetry.status === 200, "Retried POST succeeds", rPostRetry.status);
+      assert(rPostRetry.body?.data?.id === firstItemId, "Retried POST returns identical entity ID", rPostRetry.body?.data?.id);
+
+      // 3. Verify zero duplicate rows created in database
+      const countExpAfterRetry = await sql<{ count: string }>`SELECT count(*) FROM expense_items WHERE item_name = 'Idempotent Coffee';`.execute(db);
+      assert(countExpAfterRetry.rows[0].count === countExpAfterFirst.rows[0].count, "Zero duplicate rows inserted into expense_items");
+
+      // 4. Verify zero duplicate audit logs created on retry
+      const countAuditAfterRetry = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
+      assert(Number(countAuditAfterRetry.rows[0].count) === Number(countAuditBefore.rows[0].count) + 1, "Zero duplicate audit logs created on retry");
+
+      // 5. Reusing same clientMutationId with altered payload returns 409 IDEMPOTENCY_KEY_REUSED
+      const rConflictKey = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        ...expensePayload,
+        amount: 9999 // altered amount!
+      });
+      assert(rConflictKey.status === 409, "Reused clientMutationId with different payload returns 409", rConflictKey.status);
+      assert(rConflictKey.body?.error === "IDEMPOTENCY_KEY_REUSED" || rConflictKey.body?.code === "IDEMPOTENCY_KEY_REUSED", "Error code is IDEMPOTENCY_KEY_REUSED", rConflictKey.body?.error);
+
+      // 6. Cross-tenant isolation: Same clientMutationId used in Franchise 2 succeeds independently
+      const rF2Post = await req(base, "POST", "/api/v1/transactions/expenses", "tx-f2owner", {
+        clientMutationId: mutationId1, // Same mutation ID as F1
+        day_id: data.f2OpenDayId,
+        category_id: data.f2ExpCatId,
+        item_name: "F2 Idempotent Expense",
+        amount: 500
+      });
+      assert(rF2Post.status === 201, "Cross-tenant: Same mutationId in F2 succeeds (no tenant collision)", rF2Post.status);
+      assert(rF2Post.body?.data?.franchise_id === data.f2Id, "F2 expense belongs to F2");
+
+      // 7. Atomic transaction with lines (Stock Order) idempotency retry
+      const stockMutationId = "m-test-stock-" + Date.now();
+      const stockOrderPayload = {
+        clientMutationId: stockMutationId,
+        day_id: data.f1OpenDayId,
+        direction: "inbound",
+        supplier_name: "Jazz Telecom HQ",
+        invoice_reference: "INV-IDEMP-001",
+        lines: [
+          { product_id: data.f1StockProductId, quantity: 20, unit_rate: 150.00 }
+        ]
+      };
+      const rStock1 = await req(base, "POST", "/api/v1/transactions/stock/orders", "tx-owner", stockOrderPayload);
+      assert(rStock1.status === 201, "Stock order created with clientMutationId", rStock1.status);
+      const stockId1 = rStock1.body?.data?.id;
+
+      const rStockRetry = await req(base, "POST", "/api/v1/transactions/stock/orders", "tx-owner", stockOrderPayload);
+      assert(rStockRetry.status === 201 || rStockRetry.status === 200, "Retrying stock order returns identical response", rStockRetry.status);
+      assert(rStockRetry.body?.data?.id === stockId1, "Retried stock order has same ID");
+      assert(rStockRetry.body?.data?.lines?.length === 1, "Retried stock order contains line items");
+
+      const lineCount = await sql<{ count: string }>`SELECT count(*) FROM stock_order_lines WHERE stock_order_id = ${stockId1};`.execute(db);
+      assert(Number(lineCount.rows[0].count) === 1, "Zero duplicate stock order lines created on retry");
+
+      // 8. Rollback on failure leaves zero idempotency records
+      const failMutationId = "m-test-fail-" + Date.now();
+      const rFail = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        clientMutationId: failMutationId,
+        day_id: data.f1ClosedDayId, // Closed day will trigger DAY_CLOSED 422
+        item_name: "Failed Expense",
+        amount: 100
+      });
+      assert(rFail.status === 422, "Failed request rejected with 422", rFail.status);
+      const idempRecord = await sql<{ count: string }>`
+        SELECT count(*) FROM mutation_idempotency
+        WHERE franchise_id = ${data.f1Id} AND client_mutation_id = ${failMutationId};
+      `.execute(db);
+      assert(Number(idempRecord.rows[0].count) === 0, "Rolled back transaction leaves no idempotency record");
+    }
+
+    // -------------------------------------------------------------------------
+    // 11. Phase 5.1 Issue 3: PATCH Optimistic Concurrency Control
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 11: PATCH Optimistic Concurrency Control (Phase 5.1 Issue 3)");
+    {
+      // 1. Create a fresh expense item with revision = 1
+      const rNewExp = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "Concurrency Test Expense",
+        amount: 1200
+      });
+      assert(rNewExp.status === 201, "Fresh expense created", rNewExp.status);
+      const expId = rNewExp.body?.data?.id;
+      assert(rNewExp.body?.data?.revision === 1, "Initial revision is 1", rNewExp.body?.data?.revision);
+
+      // 2. PATCH with matching baseRevision: 1 succeeds and increments revision to 2
+      const rPatch1 = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        baseRevision: 1,
+        amount: 1300,
+        item_name: "Concurrency Expense Updated"
+      });
+      assert(rPatch1.status === 200, "PATCH with baseRevision 1 succeeds", rPatch1.status);
+      assert(rPatch1.body?.data?.revision === 2, "Server increments revision to 2", rPatch1.body?.data?.revision);
+      assert(Number(rPatch1.body?.data?.amount) === 1300, "Amount updated to 1300");
+
+      // 3. Stale PATCH with baseRevision: 1 (when row is now revision 2) returns 409 REVISION_CONFLICT
+      const auditCountBeforeStale = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
+      const rStalePatch = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        baseRevision: 1, // Stale!
+        amount: 1400
+      });
+      assert(rStalePatch.status === 409, "Stale PATCH rejected with 409", rStalePatch.status);
+      assert(rStalePatch.body?.error === "REVISION_CONFLICT" || rStalePatch.body?.code === "REVISION_CONFLICT", "Error code is REVISION_CONFLICT", rStalePatch.body?.error);
+      const curRev = rStalePatch.body?.current_revision ?? rStalePatch.body?.currentRevision;
+      const provRev = rStalePatch.body?.provided_revision ?? rStalePatch.body?.providedRevision;
+      assert(curRev === 2, "Conflict reports current revision 2", curRev);
+      assert(provRev === 1, "Conflict reports provided revision 1", provRev);
+
+      // 4. Verify DB row was NOT modified by conflicting PATCH
+      const rowAfterConflict = await sql<any>`SELECT * FROM expense_items WHERE id = ${expId};`.execute(db);
+      assert(Number(rowAfterConflict.rows[0].amount) === 1300, "Expense amount was NOT modified by conflicting PATCH (remains 1300)");
+      assert(rowAfterConflict.rows[0].revision === 2, "Row revision remains 2");
+
+      // 5. Verify NO audit log was generated for the rejected revision conflict
+      const auditCountAfterStale = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
+      assert(auditCountBeforeStale.rows[0].count === auditCountAfterStale.rows[0].count, "Zero audit logs written on 409 revision conflict");
+
+      // 6. Client cannot directly set revision: 99
+      const rDirectRev = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        baseRevision: 2,
+        revision: 99,
+        amount: 1500
+      });
+      assert(rDirectRev.status === 200, "PATCH with baseRevision: 2 succeeds", rDirectRev.status);
+      assert(rDirectRev.body?.data?.revision === 3, "Server sequentially sets revision to 3 (client injected 99 ignored)", rDirectRev.body?.data?.revision);
+
+      // 7. Empty update with only baseRevision returns 400
+      const rEmpty = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        baseRevision: 3
+      });
+      assert(rEmpty.status === 400, "Empty PATCH payload with only baseRevision rejected with 400", rEmpty.status);
+
+      // 8. Test optimistic concurrency on remaining patchable entities
+      // Commission items
+      const rComm2 = await req(base, "POST", "/api/v1/transactions/commissions", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1CommCatId,
+        amount: 500
+      });
+      const commId = rComm2.body?.data?.id;
+      const rCommPatch = await req(base, "PATCH", `/api/v1/transactions/commissions/${commId}`, "tx-admin", {
+        baseRevision: 1,
+        amount: 600
+      });
+      assert(rCommPatch.status === 200 && rCommPatch.body?.data?.revision === 2, "Commission item revision increments to 2");
+
+      const rCommStale = await req(base, "PATCH", `/api/v1/transactions/commissions/${commId}`, "tx-admin", {
+        baseRevision: 1,
+        amount: 700
+      });
+      assert(rCommStale.status === 409, "Commission stale patch returns 409");
+
+      // Credit transactions
+      const rCred2 = await req(base, "POST", "/api/v1/transactions/credits", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        party_id: data.f1CreditPartyId,
+        loan_amount: 800
+      });
+      const credId = rCred2.body?.data?.id;
+      const rCredPatch = await req(base, "PATCH", `/api/v1/transactions/credits/${credId}`, "tx-admin", {
+        baseRevision: 1,
+        loan_amount: 900
+      });
+      assert(rCredPatch.status === 200 && rCredPatch.body?.data?.revision === 2, "Credit transaction revision increments to 2");
+
+      const rCredStale = await req(base, "PATCH", `/api/v1/transactions/credits/${credId}`, "tx-admin", {
+        baseRevision: 1,
+        loan_amount: 1000
+      });
+      assert(rCredStale.status === 409, "Credit transaction stale patch returns 409");
+
+      // Owner transactions
+      const rOwner2 = await req(base, "POST", "/api/v1/transactions/owner", "tx-owner", {
+        day_id: data.f1OpenDayId,
+        description: "Owner draw",
+        amount: -5000
+      });
+      const ownerId = rOwner2.body?.data?.id;
+      const rOwnerPatch = await req(base, "PATCH", `/api/v1/transactions/owner/${ownerId}`, "tx-owner", {
+        baseRevision: 1,
+        notes: "Revised note"
+      });
+      assert(rOwnerPatch.status === 200 && rOwnerPatch.body?.data?.revision === 2, "Owner transaction revision increments to 2");
+
+      const rOwnerStale = await req(base, "PATCH", `/api/v1/transactions/owner/${ownerId}`, "tx-owner", {
+        baseRevision: 1,
+        notes: "Stale note"
+      });
+      assert(rOwnerStale.status === 409, "Owner transaction stale patch returns 409");
+
+      // Stock account payments
+      const rSap2 = await req(base, "POST", "/api/v1/transactions/stock/account-payments", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        account_id: data.f1StockAccountId,
+        amount: 1500
+      });
+      const sapId = rSap2.body?.data?.id;
+      const rSapPatch = await req(base, "PATCH", `/api/v1/transactions/stock/account-payments/${sapId}`, "tx-admin", {
+        baseRevision: 1,
+        amount: 1800
+      });
+      assert(rSapPatch.status === 200 && rSapPatch.body?.data?.revision === 2, "Stock account payment revision increments to 2");
+
+      const rSapStale = await req(base, "PATCH", `/api/v1/transactions/stock/account-payments/${sapId}`, "tx-admin", {
+        baseRevision: 1,
+        amount: 2000
+      });
+      assert(rSapStale.status === 409, "Stock account payment stale patch returns 409");
+
+      // Jazz company payable payments
+      const rJcp2 = await req(base, "POST", "/api/v1/transactions/jazz-company/payments", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        amount: 8000
+      });
+      const jcpId = rJcp2.body?.data?.id;
+      const rJcpPatch = await req(base, "PATCH", `/api/v1/transactions/jazz-company/payments/${jcpId}`, "tx-admin", {
+        baseRevision: 1,
+        payment_reference: "CHK-999-REV"
+      });
+      assert(rJcpPatch.status === 200 && rJcpPatch.body?.data?.revision === 2, "Jazz company payment revision increments to 2");
+
+      const rJcpStale = await req(base, "PATCH", `/api/v1/transactions/jazz-company/payments/${jcpId}`, "tx-admin", {
+        baseRevision: 1,
+        payment_reference: "CHK-FAIL"
+      });
+      assert(rJcpStale.status === 409, "Jazz company payment stale patch returns 409");
+    }
+
+    console.log(`\n=== ALL PHASE 5 & 5.1 TESTS PASSED (${pass}/${pass + fail}) ===`);
   } finally {
     server.close();
     setTokenVerifierForTesting(null);

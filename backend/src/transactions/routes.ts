@@ -1,14 +1,17 @@
 /**
- * Phase 5: Operational Ledger Transaction Routes
+ * Phase 5.1: Operational Ledger Transaction Routes
  *
  * REST endpoints mounted at `/api/v1/transactions`.
  * All routes enforce:
  * - requireAuth & requireFranchise (Phase 3)
  * - Server-resolved tenant scoping (`req.auth.franchise.id`)
  * - Strict RBAC: Viewer for read, Admin/Owner for mutation
+ * - Client mutation idempotency tracking (clientMutationId / Idempotency-Key)
+ * - baseRevision optimistic concurrency control
  * - Robust error handling with sanitized PostgreSQL mapping
  */
 import { Router, type Request, type Response } from "express";
+import { db } from "../config/database.js";
 import { requireAuth } from "../auth/authMiddleware.js";
 import { requireFranchise } from "../auth/tenantMiddleware.js";
 import { requireRole } from "../auth/rbacMiddleware.js";
@@ -84,8 +87,13 @@ import {
 } from "./service.js";
 import {
   handleTransactionError,
-  sendNotFound
+  sendNotFound,
+  isIdempotencyUniqueViolation
 } from "./errors.js";
+import {
+  computePayloadHash,
+  checkIdempotency
+} from "./idempotency.js";
 
 export const transactionRouter = Router();
 
@@ -98,18 +106,27 @@ function getFranchiseId(req: Request): string {
   return req.auth!.franchise!.id;
 }
 
-function getMutationContext(req: Request): MutationContext {
+function getMutationContext(
+  req: Request,
+  clientMutationId?: string,
+  payloadHash?: string,
+  endpoint?: string
+): MutationContext {
   return {
     franchiseId: req.auth!.franchise!.id,
     userId: req.auth!.user.id,
     userEmail: req.auth!.user.email,
     ipAddress: req.ip ?? null,
-    userAgent: req.get("user-agent") ?? null
+    userAgent: req.get("user-agent") ?? null,
+    clientMutationId,
+    payloadHash,
+    endpoint
   };
 }
 
 function guardEmptyUpdate(res: Response, body: Record<string, unknown>): boolean {
-  if (Object.keys(body).length === 0) {
+  const updatableKeys = Object.keys(body).filter((k) => k !== "base_revision" && k !== "baseRevision");
+  if (updatableKeys.length === 0) {
     res.status(400).json({
       error: "VALIDATION_ERROR",
       message: "Request body must contain at least one updatable field."
@@ -117,6 +134,51 @@ function guardEmptyUpdate(res: Response, body: Record<string, unknown>): boolean
     return true;
   }
   return false;
+}
+
+async function handleIdempotentPost<T>(
+  req: Request,
+  res: Response,
+  endpointName: string,
+  parseAndExecute: (ctx: MutationContext) => Promise<T>
+): Promise<void> {
+  try {
+    const franchiseId = getFranchiseId(req);
+    const clientMutationId = (
+      req.body?.client_mutation_id ||
+      req.body?.clientMutationId ||
+      req.get("x-client-mutation-id") ||
+      req.get("idempotency-key")
+    ) as string | undefined;
+
+    let payloadHash: string | undefined;
+    if (clientMutationId) {
+      payloadHash = computePayloadHash(req.body);
+      const check = await checkIdempotency(db, franchiseId, clientMutationId, payloadHash);
+      if (check.isDuplicate) {
+        return void res.status(check.statusCode || 200).json(check.body);
+      }
+    }
+
+    const endpoint = req.baseUrl + req.path;
+    const ctx = getMutationContext(req, clientMutationId, payloadHash, endpoint);
+
+    try {
+      const row = await parseAndExecute(ctx);
+      res.status(201).json({ data: row });
+    } catch (err) {
+      if (isIdempotencyUniqueViolation(err) && clientMutationId && payloadHash) {
+        // Concurrent duplicate request succeeded in another thread; fetch and return its committed response
+        const check = await checkIdempotency(db, franchiseId, clientMutationId, payloadHash);
+        if (check.isDuplicate) {
+          return void res.status(check.statusCode || 200).json(check.body);
+        }
+      }
+      throw err;
+    }
+  } catch (err) {
+    handleTransactionError(res, endpointName, err);
+  }
 }
 
 // ===========================================================================
@@ -145,13 +207,10 @@ transactionRouter.get("/expenses/:id", readOnlyMin, async (req: Request, res: Re
 });
 
 transactionRouter.post("/expenses", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /expenses", async (ctx) => {
     const body = ExpenseItemCreateSchema.parse(req.body);
-    const row = await createExpense(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /expenses", err);
-  }
+    return createExpense(ctx, body);
+  });
 });
 
 transactionRouter.patch("/expenses/:id", mutateMin, async (req: Request, res: Response) => {
@@ -202,13 +261,10 @@ transactionRouter.get("/commissions/:id", readOnlyMin, async (req: Request, res:
 });
 
 transactionRouter.post("/commissions", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /commissions", async (ctx) => {
     const body = CommissionItemCreateSchema.parse(req.body);
-    const row = await createCommission(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /commissions", err);
-  }
+    return createCommission(ctx, body);
+  });
 });
 
 transactionRouter.patch("/commissions/:id", mutateMin, async (req: Request, res: Response) => {
@@ -259,13 +315,10 @@ transactionRouter.get("/credits/:id", readOnlyMin, async (req: Request, res: Res
 });
 
 transactionRouter.post("/credits", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /credits", async (ctx) => {
     const body = CreditTransactionCreateSchema.parse(req.body);
-    const row = await createCredit(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /credits", err);
-  }
+    return createCredit(ctx, body);
+  });
 });
 
 transactionRouter.patch("/credits/:id", mutateMin, async (req: Request, res: Response) => {
@@ -316,13 +369,10 @@ transactionRouter.get("/owner/:id", readOnlyMin, async (req: Request, res: Respo
 });
 
 transactionRouter.post("/owner", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /owner", async (ctx) => {
     const body = OwnerTransactionCreateSchema.parse(req.body);
-    const row = await createOwnerTransaction(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /owner", err);
-  }
+    return createOwnerTransaction(ctx, body);
+  });
 });
 
 transactionRouter.patch("/owner/:id", mutateMin, async (req: Request, res: Response) => {
@@ -373,13 +423,10 @@ transactionRouter.get("/jazz-load/lifting/:id", readOnlyMin, async (req: Request
 });
 
 transactionRouter.post("/jazz-load/lifting", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /jazz-load/lifting", async (ctx) => {
     const body = JazzLiftingCreateSchema.parse(req.body);
-    const row = await createJazzLifting(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /jazz-load/lifting", err);
-  }
+    return createJazzLifting(ctx, body);
+  });
 });
 
 transactionRouter.patch("/jazz-load/lifting/:id", mutateMin, async (req: Request, res: Response) => {
@@ -430,13 +477,10 @@ transactionRouter.get("/jazz-load/do/:id", readOnlyMin, async (req: Request, res
 });
 
 transactionRouter.post("/jazz-load/do", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /jazz-load/do", async (ctx) => {
     const body = JazzDoEntryCreateSchema.parse(req.body);
-    const row = await createJazzDoEntry(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /jazz-load/do", err);
-  }
+    return createJazzDoEntry(ctx, body);
+  });
 });
 
 transactionRouter.patch("/jazz-load/do/:id", mutateMin, async (req: Request, res: Response) => {
@@ -487,13 +531,10 @@ transactionRouter.get("/stock/orders/:id", readOnlyMin, async (req: Request, res
 });
 
 transactionRouter.post("/stock/orders", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /stock/orders", async (ctx) => {
     const body = StockOrderCreateSchema.parse(req.body);
-    const row = await createStockOrder(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /stock/orders", err);
-  }
+    return createStockOrder(ctx, body);
+  });
 });
 
 transactionRouter.patch("/stock/orders/:id", mutateMin, async (req: Request, res: Response) => {
@@ -544,13 +585,10 @@ transactionRouter.get("/stock/account-payments/:id", readOnlyMin, async (req: Re
 });
 
 transactionRouter.post("/stock/account-payments", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /stock/account-payments", async (ctx) => {
     const body = StockAccountPaymentCreateSchema.parse(req.body);
-    const row = await createStockAccountPayment(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /stock/account-payments", err);
-  }
+    return createStockAccountPayment(ctx, body);
+  });
 });
 
 transactionRouter.patch("/stock/account-payments/:id", mutateMin, async (req: Request, res: Response) => {
@@ -601,13 +639,10 @@ transactionRouter.get("/jazz-company/payments/:id", readOnlyMin, async (req: Req
 });
 
 transactionRouter.post("/jazz-company/payments", mutateMin, async (req: Request, res: Response) => {
-  try {
+  await handleIdempotentPost(req, res, "POST /jazz-company/payments", async (ctx) => {
     const body = JazzPayablePaymentCreateSchema.parse(req.body);
-    const row = await createJazzPayablePayment(getMutationContext(req), body);
-    res.status(201).json({ data: row });
-  } catch (err) {
-    handleTransactionError(res, "POST /jazz-company/payments", err);
-  }
+    return createJazzPayablePayment(ctx, body);
+  });
 });
 
 transactionRouter.patch("/jazz-company/payments/:id", mutateMin, async (req: Request, res: Response) => {

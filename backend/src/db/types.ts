@@ -491,6 +491,18 @@ export interface MigrationIdempotencyMapTable {
   migrated_by_user_id: string | null;
 }
 
+export interface MutationIdempotencyTable {
+  id: Generated<string>;
+  franchise_id: string;
+  client_mutation_id: string;
+  user_id: string | null;
+  endpoint: string;
+  request_hash: string;
+  response_status: number;
+  response_body: unknown;
+  created_at: Generated<Timestamp>;
+}
+
 /**
  * Complete Kysely Database Interface mapping all 37 tables.
  */
@@ -532,4 +544,5 @@ export interface Database {
   calculation_runs: CalculationRunsTable;
   invariant_violations: InvariantViolationsTable;
   migration_idempotency_map: MigrationIdempotencyMapTable;
+  mutation_idempotency: MutationIdempotencyTable;
 }
