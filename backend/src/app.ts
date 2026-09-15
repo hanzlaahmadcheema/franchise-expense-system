@@ -5,6 +5,7 @@ import { checkDatabaseConnection } from "./config/database.js";
 import { requireAuth } from "./auth/authMiddleware.js";
 import { requireFranchise } from "./auth/tenantMiddleware.js";
 import { requireRole } from "./auth/rbacMiddleware.js";
+import { catalogRouter } from "./catalogs/routes.js";
 
 export const app = express();
 
@@ -100,6 +101,9 @@ app.get("/auth/test-role/admin", requireAuth, requireFranchise, requireRole("adm
 app.get("/auth/test-role/viewer", requireAuth, requireFranchise, requireRole("viewer"), (_req: Request, res: Response) => {
   res.status(200).json({ allowed: true, requiredRole: "viewer" });
 });
+
+// Phase 4: Master Catalog & Rate Management API
+app.use("/api/v1/catalogs", catalogRouter);
 
 // Fallback 404 handler for undefined API routes
 app.use((_req: Request, res: Response) => {

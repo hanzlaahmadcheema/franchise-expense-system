@@ -8,7 +8,10 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "migrate:latest": "tsx src/db/migrator.ts latest",
-    "migrate:rollback": "tsx src/db/migrator.ts rollback"
+    "migrate:rollback": "tsx src/db/migrator.ts rollback",
+    "test": "tsx src/auth/auth.test.ts && tsx src/catalogs/catalogs.test.ts",
+    "test:auth": "tsx src/auth/auth.test.ts",
+    "test:catalogs": "tsx src/catalogs/catalogs.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
