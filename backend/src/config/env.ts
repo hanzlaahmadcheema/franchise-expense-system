@@ -26,7 +26,13 @@ const envSchema = z.object({
       if (val === "true" || val === "require") return true;
       if (val === "false" || val === "disable") return false;
       return undefined;
-    })
+    }),
+  // Firebase Admin SDK Configuration (Optional in local dev, required for live verification)
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+  FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
+  FIREBASE_AUTH_EMULATOR_HOST: z.string().optional()
 });
 
 export type Env = z.infer<typeof envSchema>;
