@@ -381,7 +381,11 @@ export interface DayFinancialProjectionsTable {
   total_issues: Numeric;
   total_expenses: Numeric;
   closing_cash: Numeric;
+  operating_profit: Numeric;
+  owner_opening_balance: Numeric;
   owner_closing_balance: Numeric;
+  opening_jazz_payable: Numeric;
+  closing_jazz_payable: Numeric;
   calculated_at: Generated<Timestamp>;
   calculation_version: Generated<number>;
   calc_run_id: string | null;
@@ -432,6 +436,21 @@ export interface JazzLiftingDayProjectionsTable {
   ml_lifting_purchased: Numeric;
   today_ml_issuance: Numeric;
   closing_lifting_in_hand: Numeric;
+  calculated_at: Generated<Timestamp>;
+}
+
+export interface JazzLoadDoDayProjectionsTable {
+  id: Generated<string>;
+  franchise_id: string;
+  day_id: string;
+  do_profile_id: string;
+  opening_base: Numeric;
+  issuance_base: Numeric;
+  payment_base: Numeric;
+  closing_base: Numeric;
+  opening_ml: Numeric;
+  closing_ml: Numeric;
+  applied_ml_rate_percentage: Numeric;
   calculated_at: Generated<Timestamp>;
 }
 
@@ -540,6 +559,7 @@ export interface Database {
   stock_product_day_projections: StockProductDayProjectionsTable;
   stock_account_day_projections: StockAccountDayProjectionsTable;
   jazz_lifting_day_projections: JazzLiftingDayProjectionsTable;
+  jazz_load_do_day_projections: JazzLoadDoDayProjectionsTable;
   audit_logs: AuditLogsTable;
   calculation_runs: CalculationRunsTable;
   invariant_violations: InvariantViolationsTable;

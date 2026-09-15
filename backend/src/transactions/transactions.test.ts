@@ -66,6 +66,30 @@ async function cleanupTestData() {
   `.execute(db);
 
   await sql`
+    DELETE FROM calculation_runs WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM invariant_violations WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM day_financial_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM credit_party_day_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM stock_product_day_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM stock_account_day_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM jazz_lifting_day_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
+    DELETE FROM jazz_load_do_day_projections WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
+    );
     DELETE FROM audit_logs WHERE franchise_id IN (
       SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2')
     );

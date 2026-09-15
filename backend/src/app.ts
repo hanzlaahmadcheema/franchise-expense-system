@@ -7,6 +7,7 @@ import { requireFranchise } from "./auth/tenantMiddleware.js";
 import { requireRole } from "./auth/rbacMiddleware.js";
 import { catalogRouter } from "./catalogs/routes.js";
 import { transactionRouter } from "./transactions/routes.js";
+import { calculationRouter } from "./calculations/routes.js";
 
 export const app = express();
 
@@ -108,6 +109,9 @@ app.use("/api/v1/catalogs", catalogRouter);
 
 // Phase 5: Operational Ledger Transactions API
 app.use("/api/v1/transactions", transactionRouter);
+
+// Phase 6: Server-Authoritative Calculation & Projection Engine API
+app.use("/api/v1/calculations", calculationRouter);
 
 // Fallback 404 handler for undefined API routes
 app.use((_req: Request, res: Response) => {

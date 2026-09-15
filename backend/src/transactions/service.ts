@@ -15,6 +15,7 @@ import type { Database, Timestamp } from "../db/types.js";
 import { assertAccountingDayActive } from "./dayLock.js";
 import { recordAuditLog } from "./audit.js";
 import { saveIdempotencyRecord } from "./idempotency.js";
+import { recalculateFromDayInternal } from "../calculations/engine.js";
 import {
   NotFoundError,
   InvalidReferenceError,
@@ -76,6 +77,17 @@ async function maybeSaveIdempotency(trx: Transaction<Database>, ctx: MutationCon
       responseBody
     });
   }
+}
+
+async function recalculateDayProjections(
+  trx: Transaction<Database>,
+  ctx: MutationContext,
+  dayId: string
+) {
+  await recalculateFromDayInternal(trx, ctx.franchiseId, dayId, {
+    triggerSource: "mutation",
+    userId: ctx.userId
+  });
 }
 
 // ===========================================================================
@@ -160,6 +172,9 @@ export async function createExpense(ctx: MutationContext, data: ExpenseItemCreat
     // 5. Save idempotency record if clientMutationId supplied
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // 6. Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -234,6 +249,9 @@ export async function updateExpense(ctx: MutationContext, id: string, data: Expe
       userAgent: ctx.userAgent
     });
 
+    // 7. Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -271,6 +289,9 @@ export async function deleteExpense(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -351,6 +372,9 @@ export async function createCommission(ctx: MutationContext, data: CommissionIte
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -416,6 +440,9 @@ export async function updateCommission(ctx: MutationContext, id: string, data: C
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -452,6 +479,9 @@ export async function deleteCommission(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -533,6 +563,9 @@ export async function createCredit(ctx: MutationContext, data: CreditTransaction
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -599,6 +632,9 @@ export async function updateCredit(ctx: MutationContext, id: string, data: Credi
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -635,6 +671,9 @@ export async function deleteCredit(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -700,6 +739,9 @@ export async function createOwnerTransaction(ctx: MutationContext, data: OwnerTr
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -746,6 +788,9 @@ export async function updateOwnerTransaction(ctx: MutationContext, id: string, d
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -782,6 +827,9 @@ export async function deleteOwnerTransaction(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -846,6 +894,9 @@ export async function createJazzLifting(ctx: MutationContext, data: JazzLiftingC
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -888,6 +939,9 @@ export async function updateJazzLifting(ctx: MutationContext, id: string, data: 
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -924,6 +978,9 @@ export async function deleteJazzLifting(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -1018,6 +1075,9 @@ export async function createJazzDoEntry(ctx: MutationContext, data: JazzDoEntryC
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -1088,6 +1148,9 @@ export async function updateJazzDoEntry(ctx: MutationContext, id: string, data: 
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -1124,6 +1187,9 @@ export async function deleteJazzDoEntry(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -1326,6 +1392,9 @@ export async function createStockOrder(ctx: MutationContext, data: StockOrderCre
     // 7. Save idempotency record (covers parent + all child lines atomically)
     await maybeSaveIdempotency(trx, ctx, { data: fullOrder });
 
+    // 8. Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return fullOrder;
   });
 }
@@ -1465,6 +1534,9 @@ export async function updateStockOrder(ctx: MutationContext, id: string, data: S
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, order.day_id);
+
     return fullOrder;
   });
 }
@@ -1506,6 +1578,9 @@ export async function deleteStockOrder(ctx: MutationContext, id: string) {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, order.day_id);
 
     return { success: true, id };
   });
@@ -1583,6 +1658,9 @@ export async function createStockAccountPayment(ctx: MutationContext, data: Stoc
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -1643,6 +1721,9 @@ export async function updateStockAccountPayment(ctx: MutationContext, id: string
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -1679,6 +1760,9 @@ export async function deleteStockAccountPayment(ctx: MutationContext, id: string
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
@@ -1744,6 +1828,9 @@ export async function createJazzPayablePayment(ctx: MutationContext, data: JazzP
 
     await maybeSaveIdempotency(trx, ctx, { data: created });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
     return created;
   });
 }
@@ -1790,6 +1877,9 @@ export async function updateJazzPayablePayment(ctx: MutationContext, id: string,
       userAgent: ctx.userAgent
     });
 
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
+
     return updated;
   });
 }
@@ -1826,6 +1916,9 @@ export async function deleteJazzPayablePayment(ctx: MutationContext, id: string)
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent
     });
+
+    // Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, item.day_id);
 
     return { success: true, id };
   });
