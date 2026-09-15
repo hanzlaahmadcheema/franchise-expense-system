@@ -48,6 +48,11 @@ interface SetupData {
 }
 
 async function cleanupTestData() {
+  await sql`
+    DROP TRIGGER IF EXISTS trg_test_concurrent_delay ON expense_items;
+    DROP FUNCTION IF EXISTS trg_test_delay_race();
+  `.execute(db);
+
   // Reopen any closed test days so the trigger permits cleaning up test records
   await sql`
     UPDATE accounting_days SET status = 'open'
@@ -406,7 +411,7 @@ async function runTransactionTests() {
       assert(rF2Get.status === 404, "F2 cannot read F1 expense (404)", rF2Get.status);
 
       // Tenant isolation: F2 cannot update F1 expense
-      const rF2Patch = await req(base, "PATCH", `/api/v1/transactions/expenses/${expenseId}`, "tx-f2owner", { amount: 1000 });
+      const rF2Patch = await req(base, "PATCH", `/api/v1/transactions/expenses/${expenseId}`, "tx-f2owner", { baseRevision: 1, amount: 1000 });
       assert(rF2Patch.status === 404, "F2 cannot update F1 expense (404)", rF2Patch.status);
 
       // Tenant isolation: F2 cannot delete F1 expense
@@ -481,7 +486,7 @@ async function runTransactionTests() {
       const closedExpId = closedExp.rows[0].id;
 
       // Attempt PATCH via API
-      const rClosedPatch = await req(base, "PATCH", `/api/v1/transactions/expenses/${closedExpId}`, "tx-owner", { amount: 4000 });
+      const rClosedPatch = await req(base, "PATCH", `/api/v1/transactions/expenses/${closedExpId}`, "tx-owner", { baseRevision: 1, amount: 4000 });
       assert(rClosedPatch.status === 422, "Update rejected on CLOSED day (422 DAY_CLOSED)", rClosedPatch.status);
 
       // Attempt DELETE via API
@@ -594,6 +599,7 @@ async function runTransactionTests() {
 
       // Update stock order lines
       const rUpdateOrder = await req(base, "PATCH", `/api/v1/transactions/stock/orders/${stockOrderId}`, "tx-owner", {
+        baseRevision: 1,
         notes: "Updated order notes",
         lines: [
           { product_id: data.f1StockProductId, quantity: 15, unit_rate: 200.00 }
@@ -830,6 +836,74 @@ async function runTransactionTests() {
         WHERE franchise_id = ${data.f1Id} AND client_mutation_id = ${failMutationId};
       `.execute(db);
       assert(Number(idempRecord.rows[0].count) === 0, "Rolled back transaction leaves no idempotency record");
+
+      // 9. Genuine Concurrent Idempotency Race Test (exercises 23505 race path)
+      console.log("\n   Testing Concurrent Idempotency Race (23505 overlap path)...");
+      const raceMutationId = "m-test-race-" + Date.now();
+      const racePayload = {
+        clientMutationId: raceMutationId,
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "Concurrent Race Expense",
+        amount: 350
+      };
+
+      // Install a temporary delay trigger on expense_items so both concurrent requests
+      // pass the initial checkIdempotency pre-check before one commits and wins the unique index.
+      await sql`
+        CREATE OR REPLACE FUNCTION trg_test_delay_race() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.item_name = 'Concurrent Race Expense' THEN
+            PERFORM pg_sleep(0.08);
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS trg_test_concurrent_delay ON expense_items;
+        CREATE TRIGGER trg_test_concurrent_delay
+        BEFORE INSERT ON expense_items
+        FOR EACH ROW
+        EXECUTE FUNCTION trg_test_delay_race();
+      `.execute(db);
+
+      try {
+        const [raceRes1, raceRes2] = await Promise.all([
+          req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", racePayload),
+          req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", racePayload)
+        ]);
+
+        assert(raceRes1.status === 201 || raceRes1.status === 200, "Concurrent Request 1 succeeded (201/200)", raceRes1.status);
+        assert(raceRes2.status === 201 || raceRes2.status === 200, "Concurrent Request 2 succeeded (201/200)", raceRes2.status);
+
+        const raceId1 = raceRes1.body?.data?.id;
+        const raceId2 = raceRes2.body?.data?.id;
+        assert(Boolean(raceId1) && raceId1 === raceId2, "Both concurrent requests returned identical entity ID", `${raceId1} === ${raceId2}`);
+
+        // Exactly one financial record exists
+        const raceRows = await sql<{ count: string }>`
+          SELECT count(*) FROM expense_items WHERE item_name = 'Concurrent Race Expense';
+        `.execute(db);
+        assert(Number(raceRows.rows[0].count) === 1, "Exactly one financial record exists after concurrent race");
+
+        // Exactly one audit log exists for this entity
+        const raceAudits = await sql<{ count: string }>`
+          SELECT count(*) FROM audit_logs WHERE entity_id = ${raceId1};
+        `.execute(db);
+        assert(Number(raceAudits.rows[0].count) === 1, "Exactly one audit log entry exists for concurrent mutation");
+
+        // Exactly one idempotency record exists
+        const raceIdemp = await sql<{ count: string }>`
+          SELECT count(*) FROM mutation_idempotency
+          WHERE franchise_id = ${data.f1Id} AND client_mutation_id = ${raceMutationId};
+        `.execute(db);
+        assert(Number(raceIdemp.rows[0].count) === 1, "Exactly one idempotency record exists for concurrent mutation");
+      } finally {
+        await sql`
+          DROP TRIGGER IF EXISTS trg_test_concurrent_delay ON expense_items;
+          DROP FUNCTION IF EXISTS trg_test_delay_race();
+        `.execute(db);
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -837,7 +911,7 @@ async function runTransactionTests() {
     // -------------------------------------------------------------------------
     console.log("\nGroup 11: PATCH Optimistic Concurrency Control (Phase 5.1 Issue 3)");
     {
-      // 1. Create a fresh expense item with revision = 1
+      // 1a. Create a fresh expense item with revision = 1
       const rNewExp = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
         day_id: data.f1OpenDayId,
         category_id: data.f1ExpCatId,
@@ -848,33 +922,49 @@ async function runTransactionTests() {
       const expId = rNewExp.body?.data?.id;
       assert(rNewExp.body?.data?.revision === 1, "Initial revision is 1", rNewExp.body?.data?.revision);
 
-      // 2. PATCH with matching baseRevision: 1 succeeds and increments revision to 2
+      // 1b. PATCH without baseRevision is strictly rejected (400 VALIDATION_ERROR)
+      const rOmittedRev = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        amount: 1250
+      });
+      assert(rOmittedRev.status === 400, "PATCH without baseRevision rejected with 400", rOmittedRev.status);
+      assert(rOmittedRev.body?.error === "VALIDATION_ERROR", "Error code is VALIDATION_ERROR", rOmittedRev.body?.error);
+
+      // 1c. PATCH with base_revision (snake_case) succeeds and increments revision to 2
+      const rSnakeRev = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
+        base_revision: 1,
+        amount: 1250
+      });
+      assert(rSnakeRev.status === 200, "PATCH with base_revision (snake_case) succeeds", rSnakeRev.status);
+      assert(rSnakeRev.body?.data?.revision === 2, "Server increments revision to 2 via base_revision", rSnakeRev.body?.data?.revision);
+      assert(Number(rSnakeRev.body?.data?.amount) === 1250, "Amount updated to 1250");
+
+      // 2. PATCH with matching baseRevision: 2 succeeds and increments revision to 3
       const rPatch1 = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
-        baseRevision: 1,
+        baseRevision: 2,
         amount: 1300,
         item_name: "Concurrency Expense Updated"
       });
-      assert(rPatch1.status === 200, "PATCH with baseRevision 1 succeeds", rPatch1.status);
-      assert(rPatch1.body?.data?.revision === 2, "Server increments revision to 2", rPatch1.body?.data?.revision);
+      assert(rPatch1.status === 200, "PATCH with baseRevision 2 succeeds", rPatch1.status);
+      assert(rPatch1.body?.data?.revision === 3, "Server increments revision to 3", rPatch1.body?.data?.revision);
       assert(Number(rPatch1.body?.data?.amount) === 1300, "Amount updated to 1300");
 
-      // 3. Stale PATCH with baseRevision: 1 (when row is now revision 2) returns 409 REVISION_CONFLICT
+      // 3. Stale PATCH with baseRevision: 2 (when row is now revision 3) returns 409 REVISION_CONFLICT
       const auditCountBeforeStale = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
       const rStalePatch = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
-        baseRevision: 1, // Stale!
+        baseRevision: 2, // Stale!
         amount: 1400
       });
       assert(rStalePatch.status === 409, "Stale PATCH rejected with 409", rStalePatch.status);
       assert(rStalePatch.body?.error === "REVISION_CONFLICT" || rStalePatch.body?.code === "REVISION_CONFLICT", "Error code is REVISION_CONFLICT", rStalePatch.body?.error);
       const curRev = rStalePatch.body?.current_revision ?? rStalePatch.body?.currentRevision;
       const provRev = rStalePatch.body?.provided_revision ?? rStalePatch.body?.providedRevision;
-      assert(curRev === 2, "Conflict reports current revision 2", curRev);
-      assert(provRev === 1, "Conflict reports provided revision 1", provRev);
+      assert(curRev === 3, "Conflict reports current revision 3", curRev);
+      assert(provRev === 2, "Conflict reports provided revision 2", provRev);
 
       // 4. Verify DB row was NOT modified by conflicting PATCH
       const rowAfterConflict = await sql<any>`SELECT * FROM expense_items WHERE id = ${expId};`.execute(db);
       assert(Number(rowAfterConflict.rows[0].amount) === 1300, "Expense amount was NOT modified by conflicting PATCH (remains 1300)");
-      assert(rowAfterConflict.rows[0].revision === 2, "Row revision remains 2");
+      assert(rowAfterConflict.rows[0].revision === 3, "Row revision remains 3");
 
       // 5. Verify NO audit log was generated for the rejected revision conflict
       const auditCountAfterStale = await sql<{ count: string }>`SELECT count(*) FROM audit_logs WHERE franchise_id = ${data.f1Id};`.execute(db);
@@ -882,16 +972,16 @@ async function runTransactionTests() {
 
       // 6. Client cannot directly set revision: 99
       const rDirectRev = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
-        baseRevision: 2,
+        baseRevision: 3,
         revision: 99,
         amount: 1500
       });
-      assert(rDirectRev.status === 200, "PATCH with baseRevision: 2 succeeds", rDirectRev.status);
-      assert(rDirectRev.body?.data?.revision === 3, "Server sequentially sets revision to 3 (client injected 99 ignored)", rDirectRev.body?.data?.revision);
+      assert(rDirectRev.status === 200, "PATCH with baseRevision: 3 succeeds", rDirectRev.status);
+      assert(rDirectRev.body?.data?.revision === 4, "Server sequentially sets revision to 4 (client injected 99 ignored)", rDirectRev.body?.data?.revision);
 
       // 7. Empty update with only baseRevision returns 400
       const rEmpty = await req(base, "PATCH", `/api/v1/transactions/expenses/${expId}`, "tx-admin", {
-        baseRevision: 3
+        baseRevision: 4
       });
       assert(rEmpty.status === 400, "Empty PATCH payload with only baseRevision rejected with 400", rEmpty.status);
 
@@ -903,6 +993,12 @@ async function runTransactionTests() {
         amount: 500
       });
       const commId = rComm2.body?.data?.id;
+
+      const rCommOmitted = await req(base, "PATCH", `/api/v1/transactions/commissions/${commId}`, "tx-admin", {
+        amount: 600
+      });
+      assert(rCommOmitted.status === 400, "Commission update without baseRevision rejected with 400", rCommOmitted.status);
+
       const rCommPatch = await req(base, "PATCH", `/api/v1/transactions/commissions/${commId}`, "tx-admin", {
         baseRevision: 1,
         amount: 600
@@ -922,6 +1018,12 @@ async function runTransactionTests() {
         loan_amount: 800
       });
       const credId = rCred2.body?.data?.id;
+
+      const rCredOmitted = await req(base, "PATCH", `/api/v1/transactions/credits/${credId}`, "tx-admin", {
+        loan_amount: 900
+      });
+      assert(rCredOmitted.status === 400, "Credit update without baseRevision rejected with 400", rCredOmitted.status);
+
       const rCredPatch = await req(base, "PATCH", `/api/v1/transactions/credits/${credId}`, "tx-admin", {
         baseRevision: 1,
         loan_amount: 900
@@ -941,6 +1043,12 @@ async function runTransactionTests() {
         amount: -5000
       });
       const ownerId = rOwner2.body?.data?.id;
+
+      const rOwnerOmitted = await req(base, "PATCH", `/api/v1/transactions/owner/${ownerId}`, "tx-owner", {
+        notes: "No baseRevision note"
+      });
+      assert(rOwnerOmitted.status === 400, "Owner update without baseRevision rejected with 400", rOwnerOmitted.status);
+
       const rOwnerPatch = await req(base, "PATCH", `/api/v1/transactions/owner/${ownerId}`, "tx-owner", {
         baseRevision: 1,
         notes: "Revised note"
@@ -960,6 +1068,12 @@ async function runTransactionTests() {
         amount: 1500
       });
       const sapId = rSap2.body?.data?.id;
+
+      const rSapOmitted = await req(base, "PATCH", `/api/v1/transactions/stock/account-payments/${sapId}`, "tx-admin", {
+        amount: 1800
+      });
+      assert(rSapOmitted.status === 400, "Stock payment update without baseRevision rejected with 400", rSapOmitted.status);
+
       const rSapPatch = await req(base, "PATCH", `/api/v1/transactions/stock/account-payments/${sapId}`, "tx-admin", {
         baseRevision: 1,
         amount: 1800
@@ -978,6 +1092,12 @@ async function runTransactionTests() {
         amount: 8000
       });
       const jcpId = rJcp2.body?.data?.id;
+
+      const rJcpOmitted = await req(base, "PATCH", `/api/v1/transactions/jazz-company/payments/${jcpId}`, "tx-admin", {
+        payment_reference: "CHK-999-REV"
+      });
+      assert(rJcpOmitted.status === 400, "Jazz company payment update without baseRevision rejected with 400", rJcpOmitted.status);
+
       const rJcpPatch = await req(base, "PATCH", `/api/v1/transactions/jazz-company/payments/${jcpId}`, "tx-admin", {
         baseRevision: 1,
         payment_reference: "CHK-999-REV"

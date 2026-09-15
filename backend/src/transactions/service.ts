@@ -18,7 +18,8 @@ import { saveIdempotencyRecord } from "./idempotency.js";
 import {
   NotFoundError,
   InvalidReferenceError,
-  RevisionConflictError
+  RevisionConflictError,
+  ValidationError
 } from "./errors.js";
 import type {
   TransactionFilter,
@@ -55,7 +56,10 @@ export interface MutationContext {
 
 function assertBaseRevision(itemRevision: number, data: { base_revision?: number; baseRevision?: number }) {
   const baseRev = data.base_revision ?? data.baseRevision;
-  if (baseRev !== undefined && itemRevision !== baseRev) {
+  if (baseRev === undefined) {
+    throw new ValidationError("baseRevision (or base_revision) is required for update operations.");
+  }
+  if (itemRevision !== baseRev) {
     throw new RevisionConflictError(itemRevision, baseRev);
   }
 }

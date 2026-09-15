@@ -65,7 +65,7 @@ export async function checkIdempotency(
   return {
     isDuplicate: true,
     statusCode: existing.response_status,
-    body: existing.response_body
+    body: typeof existing.response_body === "string" ? JSON.parse(existing.response_body) : existing.response_body
   };
 }
 

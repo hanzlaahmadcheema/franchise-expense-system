@@ -27,9 +27,22 @@ const IdempotencyFields = {
 };
 
 const OptimisticLockFields = {
-  base_revision: z.number().int().positive().optional(),
-  baseRevision: z.number().int().positive().optional()
+  base_revision: z.number().int().positive({ message: "base_revision must be a positive integer" }).optional(),
+  baseRevision: z.number().int().positive({ message: "baseRevision must be a positive integer" }).optional()
 };
+
+function withOptimisticLock<T extends z.ZodRawShape>(shape: T) {
+  return z.object({
+    ...OptimisticLockFields,
+    ...shape
+  }).refine(
+    (data) => data.base_revision !== undefined || data.baseRevision !== undefined,
+    {
+      message: "baseRevision (or base_revision) is required for update operations.",
+      path: ["baseRevision"]
+    }
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 1. Expense Items
@@ -44,8 +57,7 @@ export const ExpenseItemCreateSchema = z.object({
   amount: z.number().positive({ message: "amount must be greater than 0" })
 });
 
-export const ExpenseItemUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const ExpenseItemUpdateSchema = withOptimisticLock({
   category_id: z.string().uuid().nullable().optional(),
   item_name: z.string().min(1).max(150).optional(),
   description: z.string().max(1000).nullable().optional(),
@@ -66,8 +78,7 @@ export const CommissionItemCreateSchema = z.object({
   amount: z.number().positive({ message: "amount must be greater than 0" })
 });
 
-export const CommissionItemUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const CommissionItemUpdateSchema = withOptimisticLock({
   category_id: z.string().uuid().nullable().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional()
 });
@@ -93,8 +104,7 @@ export const CreditTransactionCreateSchema = z.object({
   { message: "Credit transaction must have at least one non-zero activity (loan, receipt, or adjustment)" }
 );
 
-export const CreditTransactionUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const CreditTransactionUpdateSchema = withOptimisticLock({
   party_id: z.string().uuid().optional(),
   loan_amount: z.number().min(0).optional(),
   receipt_amount: z.number().min(0).optional(),
@@ -118,8 +128,7 @@ export const OwnerTransactionCreateSchema = z.object({
   notes: z.string().max(1000).nullable().optional()
 });
 
-export const OwnerTransactionUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const OwnerTransactionUpdateSchema = withOptimisticLock({
   description: z.string().min(1).max(1000).optional(),
   amount: z.number().refine((val) => val !== 0, { message: "amount cannot be 0" }).optional(),
   notes: z.string().max(1000).nullable().optional()
@@ -163,8 +172,7 @@ export const JazzDoEntryCreateSchema = z.object({
   { message: "Jazz Load DO entry must have positive issuance_base or payment_base" }
 );
 
-export const JazzDoEntryUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const JazzDoEntryUpdateSchema = withOptimisticLock({
   do_profile_id: z.string().uuid().optional(),
   issuance_base: z.number().min(0).optional(),
   payment_base: z.number().min(0).optional(),
@@ -194,8 +202,7 @@ export const StockOrderCreateSchema = z.object({
   lines: z.array(StockOrderLineInputSchema).min(1, { message: "Stock order must have at least one line item" })
 });
 
-export const StockOrderUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const StockOrderUpdateSchema = withOptimisticLock({
   direction: z.enum(["inbound", "outbound"]).optional(),
   account_id: z.string().uuid().nullable().optional(),
   supplier_name: z.string().max(100).nullable().optional(),
@@ -220,8 +227,7 @@ export const StockAccountPaymentCreateSchema = z.object({
   notes: z.string().max(1000).nullable().optional()
 });
 
-export const StockAccountPaymentUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const StockAccountPaymentUpdateSchema = withOptimisticLock({
   account_id: z.string().uuid().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional(),
   payment_method: z.string().max(32).optional(),
@@ -242,8 +248,7 @@ export const JazzPayablePaymentCreateSchema = z.object({
   notes: z.string().max(1000).nullable().optional()
 });
 
-export const JazzPayablePaymentUpdateSchema = z.object({
-  ...OptimisticLockFields,
+export const JazzPayablePaymentUpdateSchema = withOptimisticLock({
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional(),
   payment_reference: z.string().max(128).nullable().optional(),
   notes: z.string().max(1000).nullable().optional()

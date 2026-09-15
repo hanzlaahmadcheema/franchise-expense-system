@@ -21,6 +21,13 @@ export class NotFoundError extends Error {
   }
 }
 
+export class ValidationError extends Error {
+  constructor(message = "Validation failed.") {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
 export class InvalidReferenceError extends Error {
   constructor(message = "Referenced master catalog record not found in this franchise.") {
     super(message);
@@ -120,6 +127,12 @@ export function sendInternalError(res: Response, context: string, err: unknown):
 export function handleTransactionError(res: Response, context: string, err: unknown): void {
   if (err instanceof ZodError) {
     return void sendValidationError(res, err);
+  }
+  if (err instanceof ValidationError) {
+    return void res.status(400).json({
+      error: "VALIDATION_ERROR",
+      message: err.message
+    });
   }
   if (err instanceof RevisionConflictError) {
     return void res.status(409).json({
