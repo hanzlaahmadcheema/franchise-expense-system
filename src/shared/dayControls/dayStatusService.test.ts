@@ -52,4 +52,27 @@ describe("shared day status helpers", () => {
       nowMs: closedAt + 2
     })).toBe("reopen");
   });
+
+  it("safely resolves nonexistent or uninitialized days to closed", () => {
+    expect(resolveUniversalDayStatus({
+      exists: false,
+      future: false,
+      live: false,
+      day: null
+    })).toBe("closed");
+
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: false,
+      day: null
+    })).toBe("closed");
+
+    expect(resolveUniversalDayStatus({
+      exists: false,
+      future: true,
+      live: false,
+      day: null
+    })).toBe("closed");
+  });
 });

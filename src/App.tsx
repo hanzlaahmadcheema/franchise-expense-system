@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
-import {
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  signInWithRedirect,
-  signOut,
-  type User
-} from "firebase/auth";
+import { signOut } from "firebase/auth";
+import { localAuthService, type LocalUser } from "./services/api/localAuthService";
+import type { LedgerUser } from "./types/ledger";
+
+export interface AppUser {
+  id: string;
+  uid: string;
+  username: string;
+  email?: string | null;
+  displayName?: string | null;
+  role: UserRole;
+}
 import {
   Cloud,
   FileDown,
@@ -30,7 +33,8 @@ import {
   Upload,
   Users,
   X,
-  GripVertical
+  GripVertical,
+  AlertTriangle
 } from "lucide-react";
 import { AuditLogsView } from "./components/AuditLogsView";
 import { DailyEntryForm } from "./components/DailyEntryForm";
@@ -39,6 +43,7 @@ import type {
   AuthorizedEmail,
   CatalogItem,
   DailyLedgerInput,
+  ExpenseCarryForwardCreditBalance,
   ExpenseCarryForwardSeed,
   MonthComputed,
   MonthRecord,
@@ -60,18 +65,9 @@ import {
 } from "./lib/exporters";
 import { parseWorkbookFile } from "./lib/workbookImport";
 import { auth, isFirebaseConfigured } from "./lib/firebase";
-import { applyPwaUpdate } from "./pwa";
 import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
 import { JazzLoadModule } from "./modules/jazzLoad/components/JazzLoadModule";
 import { StockLedgerModule } from "./modules/stock/components/StockLedgerModule";
-import {
-  subscribeStockAccounts,
-  subscribeStockDays,
-  subscribeStockMonthlySummary,
-  subscribeStockMonths,
-  subscribeStockOpeningBalances,
-  subscribeStockProducts
-} from "./modules/stock/services/stockFirestore";
 import { UniversalCalendar } from "./shared/calendar/UniversalCalendar";
 import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/context/SidebarDayControlsContext";
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
@@ -84,26 +80,33 @@ import { MASTER_REFRESH_ACCESS } from "./shared/services/masterRefreshPermission
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { resolveLedgerUiReadDecision } from "./shared/ledger/ledgerReadMode";
+import {
+  isPostgreSqlPeriod,
+  getAccountingPeriodWithDays,
+  resolvePeriodRouting,
+  isPeriodKnownInitialized,
+  isGenesisPeriod,
+  POSTGRESQL_GENESIS_PERIOD,
+  getNextPeriodKey,
+  clearPeriodCache,
+  registerPostgreSqlPeriod,
+  registerInitializedPeriod,
+  type PeriodRoutingStatus
+} from "./services/api/periodDayService";
+import { ledgerApiClient, setAuthTokenProvider } from "./services/api/ledgerApiClient";
+import { saveExpenseDayPostgres, loadExpenseDayPostgres } from "./services/api/expenseTransactionService";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
+import { GuidedMonthCloseModal } from "./components/GuidedMonthCloseModal";
 import {
   listJazzLoadBackup,
   restoreJazzLoadBackup,
   roleCanJazzLoad,
-  setJazzLoadMonthStatus,
-  subscribeJazzLoadDays,
-  subscribeJazzLoadDoAssignments,
-  subscribeJazzLoadDoLines,
-  subscribeJazzLoadDoNames,
-  subscribeJazzLoadDoProfiles,
-  subscribeJazzLoadMonthlySummary,
-  subscribeJazzLoadMonths,
-  subscribeJazzLoadRates
+  setJazzLoadMonthStatus
 } from "./modules/jazzLoad/services/jazzLoadFirestore";
 import {
   commitWorkbookImport,
   addRoleChangeAudit,
   closeMonthDaysExceptToday,
-  defaultOwnerOpeningBalance,
   deleteAuthorizedEmail,
   deleteCatalogItem,
   deleteUserProfile,
@@ -115,15 +118,11 @@ import {
   reopenMonthDaysUntilClose,
   reopenPreviousDayUntilClose,
   recalculateMonth,
-  resolveExpenseCarryForwardSeed,
-  resolveOpeningBalance,
-  resolveOwnerOpeningBalance,
   roleCan,
   queueDayAndSummaryWrite,
   reopenCurrentDayUntilClose,
   saveNotificationSettings,
   sendManualActivityEmail,
-  saveMonthRecord,
   setAuditActorRole,
   setMonthStatus,
   writeExpenseBackupRestoreAudit,
@@ -131,17 +130,16 @@ import {
   subscribeCatalogItems,
   subscribeLedgerMismatchReports,
   subscribeLedgerReadModeConfig,
-  subscribeMonthDays,
-  subscribeMonthRecord,
-  subscribeMonths,
   subscribeNotificationSettings,
   subscribeUsers,
   upsertAuthorizedEmail,
   updateUserProfile,
   updateCatalogSortOrder,
-  upsertCatalogItem
+  upsertCatalogItem,
+  resolveExpenseCarryForwardSeed,
+  saveMonthRecord
 } from "./lib/firestoreService";
-import { applySortOrder, reorderItems } from "./shared/services/orderUtils";
+import { applySortOrder, changedSortOrderPatches, reorderItems } from "./shared/services/orderUtils";
 
 type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
 type ExpenseSection = "daily-entry" | "previous-records" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
@@ -167,7 +165,7 @@ function emptyDay(dayNo: number): DailyLedgerInput {
   return {
     dayNo,
     label: dayNo === 32 ? "FINAL" : `Day ${dayNo}`,
-    status: "open",
+    status: dayNo === 32 ? "closed" : "open",
     manualOverride: false,
     expenses: [],
     commissions: [],
@@ -190,11 +188,13 @@ function creditSeedKey(row: { partyId?: string; partyName: string }) {
 
 function previousDayFromExpenseSeed(seed: ExpenseCarryForwardSeed | null): DailyLedgerInput | undefined {
   if (!seed || seed.creditBalances.length === 0) return undefined;
+  const sourceLabel = seed.isGenesis ? "Genesis Opening" : `${seed.sourceMonthId} final`;
+  const dayNo = seed.sourceDayNo || 1;
   return {
-    ...emptyDay(seed.sourceDayNo),
-    label: `${seed.sourceMonthId} final`,
+    ...emptyDay(dayNo),
+    label: sourceLabel,
     credits: seed.creditBalances.map((row) => ({
-      id: `${seed.sourceMonthId}-${seed.sourceDayNo}-${creditSeedKey(row).replace(/[^a-z0-9-]+/gi, "-")}`,
+      id: `${seed.sourceMonthId || "genesis"}-${dayNo}-${creditSeedKey(row).replace(/[^a-z0-9-]+/gi, "-")}`,
       partyId: row.partyId,
       partyName: row.partyName,
       opening: row.balance,
@@ -212,6 +212,9 @@ function expenseCarryForwardWarnings(
   seed: ExpenseCarryForwardSeed | null
 ) {
   if (!month || !seed) return [];
+  if (isGenesisPeriod(month.id) || seed.isGenesis || !seed.sourceMonthId || seed.sourceMonthId === "genesis") {
+    return [];
+  }
   const warnings: string[] = [];
   if (month.openingBalance !== seed.openingBalance) {
     warnings.push(`cash opening ${month.openingBalance.toLocaleString()} should equal ${seed.sourceMonthId} closing ${seed.openingBalance.toLocaleString()}`);
@@ -251,9 +254,9 @@ type SaveDayOptions = {
 
 type LoadMonthOptions = {
   skipPendingCheck?: boolean;
+  targetDay?: number;
 };
 
-type PwaNotice = "offline-ready" | "update-available" | null;
 type UiMode = "modern" | "classic";
 
 const CONNECTED_STATUS = "Connected to Firestore";
@@ -395,6 +398,22 @@ function replaceDay(days: DailyLedgerInput[], day: DailyLedgerInput) {
   return [...withoutDay, day].sort((a, b) => a.dayNo - b.dayNo);
 }
 
+export function isServerLoadedDay(day?: DailyLedgerInput | null): boolean {
+  if (!day) return false;
+  if (day.openingCash !== undefined || day.ownerOpeningBalance !== undefined) return true;
+  if (day.updatedAt !== undefined && day.updatedAt > 0) return true;
+  if (
+    (day.expenses && day.expenses.length > 0) ||
+    (day.commissions && day.commissions.length > 0) ||
+    (day.credits && day.credits.length > 0) ||
+    (day.ownerBalances && day.ownerBalances.length > 0) ||
+    Boolean(day.notes)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function availableDayNumbers(monthId: string, now: Date) {
   const liveDate = currentDateState(now);
   if (compareMonthIds(monthId, liveDate.monthId) > 0) return [];
@@ -403,6 +422,7 @@ function availableDayNumbers(monthId: string, now: Date) {
 }
 
 function canUseFinalPeriod(monthId: string, now: Date) {
+  if (isPostgreSqlPeriod(monthId)) return true;
   return compareMonthIds(monthId, currentDateState(now).monthId) < 0;
 }
 
@@ -443,20 +463,47 @@ function isValidMonthId(value: unknown): value is string {
   return Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12;
 }
 
+function purgeLegacyAccountingCaches() {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith("calendar_selection_") || key.startsWith(LAST_CALENDAR_SELECTION_KEY_PREFIX)) {
+        try {
+          const val = JSON.parse(localStorage.getItem(key) || "{}");
+          if (!val?.monthId || val.monthId < "2026-08") {
+            localStorage.removeItem(key);
+          }
+        } catch {
+          localStorage.removeItem(key);
+        }
+      }
+    }
+  } catch {
+    // Non-blocking
+  }
+}
+purgeLegacyAccountingCaches();
+
 function readStoredCalendarSelection(uid: string, now = new Date()) {
   try {
     const raw = localStorage.getItem(calendarSelectionKey(uid));
-    if (!raw) return currentDateState(now);
+    if (!raw) return { monthId: "2026-08", dayNo: 1 };
     const parsed = JSON.parse(raw) as { monthId?: unknown; day?: unknown };
-    if (!isValidMonthId(parsed.monthId)) return currentDateState(now);
-    if (compareMonthIds(parsed.monthId, currentDateState(now).monthId) > 0) return currentDateState(now);
-    const parsedDay = typeof parsed.day === "number" && Number.isFinite(parsed.day) ? Math.trunc(parsed.day) : currentDateState(now).dayNo;
+    if (!isValidMonthId(parsed.monthId) || parsed.monthId < "2026-08") {
+      localStorage.removeItem(calendarSelectionKey(uid));
+      return { monthId: "2026-08", dayNo: 1 };
+    }
+    // Default must be deterministic: 2026-08, Day 1
+    // unless the user has an explicitly stored valid initialized PostgreSQL period selection.
+    const targetMonth = isPeriodKnownInitialized(parsed.monthId) ? parsed.monthId : "2026-08";
+    const parsedDay = typeof parsed.day === "number" && Number.isFinite(parsed.day) ? Math.trunc(parsed.day) : 1;
     return {
-      monthId: parsed.monthId,
-      dayNo: clampSelectedDay(parsedDay, parsed.monthId, now)
+      monthId: targetMonth,
+      dayNo: targetMonth === "2026-08" && targetMonth !== parsed.monthId ? 1 : clampSelectedDay(parsedDay, targetMonth, now)
     };
   } catch {
-    return currentDateState(now);
+    return { monthId: "2026-08", dayNo: 1 };
   }
 }
 
@@ -485,8 +532,9 @@ function roleLabel(role: UserRole | null) {
   return "Connecting";
 }
 
-function userDisplayName(user: { uid: string; email?: string | null; displayName?: string | null } | null) {
+function userDisplayName(user: { uid: string; email?: string | null; displayName?: string | null; username?: string } | null) {
   if (!user) return "No user";
+  if (user.username) return user.username;
   if (user.displayName) return user.displayName;
   if (user.email) return user.email.split("@")[0].replace(/[._-]+/g, " ");
   return "Anonymous User";
@@ -1560,20 +1608,18 @@ function FirebaseMissing() {
 function AuthPanel({
   message,
   busy,
-  onEmailSubmit,
-  onGoogleSubmit
+  onSubmit
 }: {
   message: string;
   busy: boolean;
-  onEmailSubmit: (email: string, password: string) => Promise<void>;
-  onGoogleSubmit: () => Promise<void>;
+  onSubmit: (usernameOrEmail: string, password: string) => Promise<void>;
 }) {
-  const [email, setEmail] = useState("");
+  const [usernameOrEmail, setUsernameOrEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  function handleEmailFormSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleFormSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onEmailSubmit(email, password);
+    void onSubmit(usernameOrEmail, password);
   }
 
   return (
@@ -1582,18 +1628,19 @@ function AuthPanel({
         <p className="text-xs font-semibold uppercase text-emerald-300">Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
         <p className="mt-4 text-sm text-slate-400">
-          Sign in with an authorized account.
+          Sign in with your local account.
         </p>
-        <form className="mt-5 space-y-3" onSubmit={handleEmailFormSubmit}>
+        <form className="mt-5 space-y-3" onSubmit={handleFormSubmit}>
           <label className="block text-sm text-slate-300">
-            Email
+            Username or Email
             <input
               className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-              type="email"
-              autoComplete="email"
-              value={email}
+              type="text"
+              autoComplete="username"
+              placeholder="e.g. owner or admin"
+              value={usernameOrEmail}
               disabled={busy}
-              onChange={(event) => setEmail(event.target.value)}
+              onChange={(event) => setUsernameOrEmail(event.target.value)}
             />
           </label>
           <label className="block text-sm text-slate-300">
@@ -1607,20 +1654,11 @@ function AuthPanel({
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
-          <button className="btn-primary !w-full" disabled={busy || !email.trim() || !password} type="submit">
+          <button className="btn-primary !w-full" disabled={busy || !usernameOrEmail.trim() || !password} type="submit">
             {busy && <LoadingIcon label="Signing in" />}
             Sign in
           </button>
         </form>
-        <div className="my-5 flex items-center gap-3 text-xs uppercase text-slate-500">
-          <span className="h-px flex-1 bg-slate-800" />
-          Google
-          <span className="h-px flex-1 bg-slate-800" />
-        </div>
-        <button className="btn-primary mt-5 !w-full" disabled={busy} onClick={() => void onGoogleSubmit()}>
-          {busy && <LoadingIcon label="Signing in with Google" />}
-          Continue with Google
-        </button>
         {message && <p className="mt-4 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-slate-300">{message}</p>}
         {busy && (
           <div className="mt-5 flex items-center justify-center gap-2 text-sm text-slate-400">
@@ -1634,23 +1672,22 @@ function AuthPanel({
 }
 
 function App() {
-  const initialDate = currentDateState();
   const [view, setView] = useState<View>("dashboard");
   const [expenseSection, setExpenseSection] = useState<ExpenseSection>("daily-entry");
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
-  const [authStatus, setAuthStatus] = useState("Connecting to Firebase...");
-  const [monthId, setMonthId] = useState(initialDate.monthId);
+  const [authStatus, setAuthStatus] = useState("Initializing local auth...");
+  const [monthId, setMonthId] = useState("2026-08");
   const [openingBalance, setOpeningBalance] = useState(0);
   const [ownerOpeningBalance, setOwnerOpeningBalance] = useState(0);
-  const [selectedDay, setSelectedDay] = useState(initialDate.dayNo);
+  const [selectedDay, setSelectedDay] = useState(1);
   const [months, setMonths] = useState<MonthRecord[]>([]);
   const [jazzLoadMonths, setJazzLoadMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
   const [expenseCarryForwardSeed, setExpenseCarryForwardSeed] = useState<ExpenseCarryForwardSeed | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
-  const [importMonthId, setImportMonthId] = useState(initialDate.monthId);
+  const [importMonthId, setImportMonthId] = useState("2026-08");
   const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1661,6 +1698,17 @@ function App() {
   const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
   const [bulkClosingDays, setBulkClosingDays] = useState(false);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
+  const [periodFinalSettlementStatus, setPeriodFinalSettlementStatus] = useState<string | null>(null);
+  const [monthClosing, setMonthClosing] = useState(false);
+  const [monthCloseModal, setMonthCloseModal] = useState<{
+    isOpen: boolean;
+    step: "prompt" | "success";
+    errorMessage?: string | null;
+  }>({
+    isOpen: false,
+    step: "prompt",
+    errorMessage: null
+  });
   const [expenseCategories, setExpenseCategories] = useState<CatalogItem[]>([]);
   const [commissionCategories, setCommissionCategories] = useState<CatalogItem[]>([]);
   const [creditParties, setCreditParties] = useState<CatalogItem[]>([]);
@@ -1673,6 +1721,65 @@ function App() {
   const [uiMode, setUiMode] = useState<UiMode>(() => (localStorage.getItem("uiMode") === "classic" ? "classic" : "modern"));
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
+  const [authReady, setAuthReady] = useState(false);
+  const [calendarSelectionReady, setCalendarSelectionReady] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [masterRefreshModal, setMasterRefreshModal] = useState<MasterRefreshModalState>({
+    open: false,
+    title: "",
+    progress: []
+  });
+  const creatingMonthsRef = useRef(new Set<string>());
+  const pendingWritesRef = useRef(false);
+  const syncErrorRef = useRef(false);
+  const queuedWriteCountRef = useRef(0);
+  const closedExpenseDayKeysRef = useRef(new Set<string>());
+
+  const [pgPeriodRouting, setPgPeriodRouting] = useState<{
+    checked: boolean;
+    status: PeriodRoutingStatus;
+    period: any | null;
+  }>({ checked: false, status: "UNINITIALIZED", period: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!user || !authReady) {
+      setPgPeriodRouting({ checked: false, status: "UNINITIALIZED", period: null });
+      return;
+    }
+    setPgPeriodRouting((prev) => ({ ...prev, checked: false }));
+    if (isPostgreSqlPeriod(monthId)) {
+      void resolvePeriodRouting(monthId).then((res) => {
+        if (!cancelled) {
+          setPgPeriodRouting({ checked: true, status: res.status, period: res.period });
+          const periodObj = res.period;
+          if (periodObj) {
+            setMonths((currentMonths) => {
+              if (currentMonths.some((m) => m.id === periodObj.period_key)) return currentMonths;
+              return [
+                ...currentMonths,
+                {
+                  id: periodObj.period_key,
+                  label: periodObj.label || periodObj.period_key,
+                  status: periodObj.status,
+                  openingBalance: 0,
+                  createdAt: periodObj.created_at ? new Date(periodObj.created_at).getTime() : undefined,
+                  updatedAt: periodObj.updated_at ? new Date(periodObj.updated_at).getTime() : undefined
+                }
+              ];
+            });
+          }
+        }
+      });
+    } else {
+      setPgPeriodRouting({ checked: true, status: "INITIALIZED", period: null });
+    }
+    return () => { cancelled = true; };
+  }, [authReady, monthId, user]);
   const expenseReadDecision = useMemo(
     () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "expense", role, monthId }),
     [ledgerReadModeConfig, monthId, role]
@@ -1685,24 +1792,6 @@ function App() {
     () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "stock", role, monthId }),
     [ledgerReadModeConfig, monthId, role]
   );
-  const [authReady, setAuthReady] = useState(false);
-  const [calendarSelectionReady, setCalendarSelectionReady] = useState(false);
-  const [authMessage, setAuthMessage] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
-  const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
-  const [pwaNotice, setPwaNotice] = useState<PwaNotice>(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [masterRefreshModal, setMasterRefreshModal] = useState<MasterRefreshModalState>({
-    open: false,
-    title: "",
-    progress: []
-  });
-  const creatingMonthsRef = useRef(new Set<string>());
-  const pendingWritesRef = useRef(false);
-  const syncErrorRef = useRef(false);
-  const queuedWriteCountRef = useRef(0);
-  const closedExpenseDayKeysRef = useRef(new Set<string>());
 
   function confirmLeavePendingChanges() {
     return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
@@ -1720,6 +1809,10 @@ function App() {
   }
 
   function handleFirestoreError(message: string) {
+    if (isPostgreSqlPeriod(monthId)) {
+      console.warn("[Firestore] Background legacy listener warning:", message);
+      return;
+    }
     syncErrorRef.current = true;
     setSyncState("error");
     setAuthStatus(FIRESTORE_ERROR_STATUS);
@@ -1744,45 +1837,50 @@ function App() {
   }
 
   useEffect(() => {
-    const firebaseAuth = auth;
-    if (!firebaseAuth) return;
-    return onAuthStateChanged(firebaseAuth, async (nextUser) => {
+    let cancelled = false;
+
+    async function initAuth() {
       setCalendarSelectionReady(false);
-      if (!nextUser) {
+      try {
+        const session = await localAuthService.restoreSession();
+        if (session && !cancelled) {
+          const appUser: AppUser = {
+            id: session.user.id,
+            uid: session.user.id,
+            username: session.user.username,
+            email: session.user.email ?? `${session.user.username}@local`,
+            displayName: session.user.displayName || session.user.username,
+            role: session.user.role
+          };
+          const restoredSelection = readStoredCalendarSelection(appUser.uid);
+          setMonthId(restoredSelection.monthId);
+          setSelectedDay(restoredSelection.dayNo);
+          setView(readStoredView(appUser.uid));
+          setCalendarSelectionReady(true);
+          setUser(appUser);
+          setRole(appUser.role);
+          setAuthStatus(CONNECTED_STATUS);
+          setAuthMessage("");
+          setAuthReady(true);
+          return;
+        }
+      } catch (err) {
+        console.warn("[App] Local session restore error:", err);
+      }
+
+      if (!cancelled) {
         setUser(null);
         setRole(null);
         setAuthStatus("Sign in required.");
         setAuthReady(true);
-        return;
       }
-      if (nextUser.isAnonymous) {
-        await signOut(firebaseAuth);
-        setUser(null);
-        setRole(null);
-        setAuthStatus("Google or email sign-in required.");
-        setAuthReady(true);
-        return;
-      }
-      try {
-        const nextRole = await getUserRole(nextUser.uid, nextUser.email);
-        const restoredSelection = readStoredCalendarSelection(nextUser.uid);
-        setMonthId(restoredSelection.monthId);
-        setSelectedDay(restoredSelection.dayNo);
-        setView(readStoredView(nextUser.uid));
-        setCalendarSelectionReady(true);
-        setUser(nextUser);
-        setRole(nextRole);
-        setAuthStatus(CONNECTED_STATUS);
-        setAuthMessage("");
-      } catch (err) {
-        setUser(null);
-        setRole(null);
-        setAuthMessage(err instanceof Error ? err.message : "This email is not authorized.");
-        setAuthStatus(FIRESTORE_ERROR_STATUS);
-      } finally {
-        setAuthReady(true);
-      }
-    });
+    }
+
+    void initAuth();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1792,6 +1890,7 @@ function App() {
 
   useEffect(() => {
     if (!user || !calendarSelectionReady) return;
+    if (monthId < "2026-08") return;
     localStorage.setItem(calendarSelectionKey(user.uid), JSON.stringify({
       monthId,
       day: selectedDay,
@@ -1841,16 +1940,6 @@ function App() {
     return () => window.removeEventListener("autosave-active-count", handleAutosaveStatus);
   }, []);
 
-  useEffect(() => {
-    const handleOfflineReady = () => setPwaNotice("offline-ready");
-    const handleUpdateAvailable = () => setPwaNotice("update-available");
-    window.addEventListener("pwa-offline-ready", handleOfflineReady);
-    window.addEventListener("pwa-update-available", handleUpdateAvailable);
-    return () => {
-      window.removeEventListener("pwa-offline-ready", handleOfflineReady);
-      window.removeEventListener("pwa-update-available", handleUpdateAvailable);
-    };
-  }, []);
 
   useEffect(() => {
     if (!status) return;
@@ -1864,46 +1953,70 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [authMessage]);
 
-  async function handleGoogleAuth() {
-    const firebaseAuth = auth;
-    if (!firebaseAuth) return;
+  async function handleAuthLogin(usernameOrEmail: string, password: string) {
     setAuthBusy(true);
     setAuthMessage("");
     try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: "select_account" });
-      await signInWithPopup(firebaseAuth, provider);
+      const res = await localAuthService.login(usernameOrEmail.trim(), password);
+      const appUser: AppUser = {
+        id: res.user.id,
+        uid: res.user.id,
+        username: res.user.username,
+        email: res.user.email ?? `${res.user.username}@local`,
+        displayName: res.user.displayName || res.user.username,
+        role: res.user.role
+      };
+      const restoredSelection = readStoredCalendarSelection(appUser.uid);
+      setMonthId(restoredSelection.monthId);
+      setSelectedDay(restoredSelection.dayNo);
+      setView(readStoredView(appUser.uid));
+      setCalendarSelectionReady(true);
+      setUser(appUser);
+      setRole(appUser.role);
+      setAuthStatus(CONNECTED_STATUS);
+      setAuthMessage("");
     } catch (err) {
-      if (err instanceof Error && err.message.includes("auth/popup-blocked")) {
-        const provider = new GoogleAuthProvider();
-        provider.setCustomParameters({ prompt: "select_account" });
-        await signInWithRedirect(firebaseAuth, provider);
-        return;
-      }
-      setAuthMessage(err instanceof Error ? err.message : "Could not sign in with Google.");
+      setAuthMessage(err instanceof Error ? err.message : "Authentication failed.");
     } finally {
       setAuthBusy(false);
     }
   }
 
-  async function handleEmailAuth(email: string, password: string) {
-    const firebaseAuth = auth;
-    if (!firebaseAuth) return;
-    setAuthBusy(true);
-    setAuthMessage("");
+  async function handleSignOut() {
     try {
-      await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
-    } catch (err) {
-      setAuthMessage(err instanceof Error ? err.message : "Could not sign in with email and password.");
-    } finally {
-      setAuthBusy(false);
+      await localAuthService.logout();
+    } catch {
+      // Ignore
     }
+    if (auth) {
+      try {
+        await signOut(auth);
+      } catch {
+        // Ignore
+      }
+    }
+    setUser(null);
+    setRole(null);
+    setCalendarSelectionReady(false);
+    setAuthStatus("Sign in required.");
   }
 
   async function refreshMonthList() {
-    const records = await listMonths();
-    setMonths(records);
-    return records;
+    try {
+      const res = await ledgerApiClient.periods.list();
+      const pgMonths = (res.periods || []).map((p) => ({
+        id: p.period_key,
+        label: p.label || p.period_key,
+        status: p.status as "open" | "closed",
+        openingBalance: 0,
+        createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
+        updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
+      }));
+      setMonths(pgMonths);
+      return pgMonths as unknown as MonthRecord[];
+    } catch {
+      return [];
+    }
   }
 
   async function loadMonth(nextMonthId = monthId, options: LoadMonthOptions = {}) {
@@ -1911,75 +2024,53 @@ function App() {
       setStatus("Stayed on the current day because changes are still pending save.");
       return;
     }
+    const currentStatus = months.find((m) => m.id === monthId)?.status ?? monthStatus;
+    if (nextMonthId > monthId && currentStatus === "open") {
+      setStatus(`Cannot proceed to ${formatMonth(nextMonthId)}: Current period ${formatMonth(monthId)} is still open. Please close ${formatMonth(monthId)} first.`);
+      return;
+    }
     setStatus("");
     setLoadingMessage("Loading month data...");
     setLoading(true);
     setMonthId(nextMonthId);
-    const nextSelectedDay = clampSelectedDay(selectedDay, nextMonthId, now);
+    const nextSelectedDay = options.targetDay ?? clampSelectedDay(selectedDay, nextMonthId, now);
     if (nextSelectedDay !== selectedDay) setSelectedDay(nextSelectedDay);
   }
 
   useEffect(() => {
-    if (!user || !role) return;
-    const unsubscribe = subscribeMonths(
-      (records, metadata) => {
-        setMonths(records);
-        applySnapshotMetadata(metadata);
-      },
-      (err) => handleFirestoreError(err.message)
-    );
-    return unsubscribe;
-  }, [user, role]);
+    if (!user || !authReady) return;
+    let cancelled = false;
+    void ledgerApiClient.periods.list().then((res) => {
+      if (cancelled) return;
+      const pgMonths = (res.periods || []).map((p) => ({
+        id: p.period_key,
+        label: p.label || p.period_key,
+        status: p.status as "open" | "closed",
+        openingBalance: 0,
+        createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
+        updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
+      }));
+      setMonths(pgMonths);
+      setJazzLoadMonths(
+        (res.periods || []).map((p) => ({
+          id: p.period_key,
+          label: p.label || p.period_key,
+          status: p.status as "open" | "closed",
+          createdBy: "system",
+          createdAt: p.created_at ? new Date(p.created_at).getTime() : Date.now(),
+          updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : Date.now()
+        }))
+      );
+    }).catch((err) => {
+      console.warn("[App] Failed to load PostgreSQL accounting periods:", err);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, user]);
 
   useEffect(() => {
-    if (!user || !role) return;
-    const unsubscribe = subscribeJazzLoadMonths(
-      (records, metadata) => {
-        setJazzLoadMonths(records);
-        applySnapshotMetadata(metadata);
-      },
-      (err) => handleFirestoreError(err.message)
-    );
-    return unsubscribe;
-  }, [user, role]);
-
-  useEffect(() => {
-    if (!user || !role || !calendarSelectionReady || view === "jazz-load") return;
-    const previousId = previousMonthIdForPrefetch(monthId);
-    const unsubscribers = [
-      subscribeJazzLoadRates((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadDoProfiles((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadDoNames((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadDoLines((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeJazzLoadDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: jazzLoadReadDecision }),
-      subscribeJazzLoadMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: jazzLoadReadDecision }),
-      subscribeJazzLoadDoAssignments(monthId, selectedDay, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message))
-    ];
-    if (previousId !== monthId) {
-      unsubscribers.push(subscribeJazzLoadDays(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
-    }
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [calendarSelectionReady, jazzLoadReadDecision, monthId, role, selectedDay, user, view]);
-
-  useEffect(() => {
-    if (!user || !role || !calendarSelectionReady || view === "stock-ledger") return;
-    const previousId = previousMonthIdForPrefetch(monthId);
-    const unsubscribers = [
-      subscribeStockProducts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockAccounts((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockOpeningBalances((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockMonths((_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)),
-      subscribeStockDays(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: stockReadDecision }),
-      subscribeStockMonthlySummary(monthId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message), { readDecision: stockReadDecision })
-    ];
-    if (previousId !== monthId) {
-      unsubscribers.push(subscribeStockMonthlySummary(previousId, (_, metadata) => applySnapshotMetadata(metadata), (err) => handleFirestoreError(err.message)));
-    }
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [calendarSelectionReady, monthId, role, stockReadDecision, user, view]);
-
-  useEffect(() => {
-    if (!user || !calendarSelectionReady || (role !== "owner" && role !== "admin")) {
+    if (!user || !calendarSelectionReady || (role !== "owner" && role !== "admin") || isPostgreSqlPeriod(monthId)) {
       setExpenseMismatchCount(0);
       return;
     }
@@ -2000,6 +2091,10 @@ function App() {
       setLedgerReadModeConfig(defaultLedgerReadModeConfig);
       return;
     }
+    if (isPostgreSqlPeriod(monthId)) {
+      setLedgerReadModeConfig(defaultLedgerReadModeConfig);
+      return;
+    }
     const unsubscribe = subscribeLedgerReadModeConfig(
       (config, metadata) => {
         setLedgerReadModeConfig(config);
@@ -2008,10 +2103,48 @@ function App() {
       (err) => handleFirestoreError(err.message)
     );
     return unsubscribe;
-  }, [role, user]);
+  }, [monthId, role, user]);
 
   useEffect(() => {
     if (!user || !role || !calendarSelectionReady) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      let cancelled = false;
+      void Promise.all([
+        ledgerApiClient.catalogs.getCreditParties().catch(() => ({ data: [] })),
+        ledgerApiClient.catalogs.getExpenseCategories().catch(() => ({ data: [] })),
+        ledgerApiClient.catalogs.getCommissionCategories().catch(() => ({ data: [] }))
+      ]).then(([cpRes, expRes, commRes]) => {
+        if (cancelled) return;
+        if (cpRes.data && cpRes.data.length > 0) {
+          setCreditParties(cpRes.data.map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            active: p.is_active,
+            sortOrder: p.sort_order
+          })));
+        }
+        if (expRes.data && expRes.data.length > 0) {
+          setExpenseCategories(expRes.data.map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            active: c.is_active,
+            sortOrder: c.sort_order
+          })));
+        }
+        if (commRes.data && commRes.data.length > 0) {
+          setCommissionCategories(commRes.data.map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            active: c.is_active,
+            sortOrder: c.sort_order
+          })));
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (roleCan(role, "catalogs")) void ensureDefaultCatalogs().catch((err) => setStatus(err instanceof Error ? err.message : "Could not seed catalogs."));
 
     const unsubscribers = [
@@ -2051,112 +2184,163 @@ function App() {
     }
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [user, role]);
+  }, [calendarSelectionReady, monthId, role, user]);
 
   useEffect(() => {
     if (!user || !role) return;
-    let monthRecordReceived = false;
-    let monthDaysReceived = false;
-
-    const checkComplete = () => {
-      if (monthRecordReceived && monthDaysReceived) {
-        setLoading(false);
-      }
-    };
-
-    const unsubscribers = [
-      subscribeMonthRecord(
-        monthId,
-        (record, metadata) => {
-          applySnapshotMetadata(metadata);
-          if (!record) {
-            if (!roleCan(role, "daily")) {
-              setStatus("This month does not exist yet. Owner or admin access is required to create it.");
-              setDays([]);
-              setComputed(null);
-              monthRecordReceived = true;
-              checkComplete();
-              return;
-            }
-            if (creatingMonthsRef.current.has(monthId)) return;
-            creatingMonthsRef.current.add(monthId);
-            void Promise.all([resolveOpeningBalance(monthId), resolveOwnerOpeningBalance(monthId)])
-              .then(([resolvedOpening, resolvedOwnerOpening]) => {
-                const created = createMonth(monthId, resolvedOpening, resolvedOwnerOpening);
-                setOpeningBalance(created.openingBalance);
-                setOwnerOpeningBalance(created.ownerOpeningBalance ?? resolvedOwnerOpening);
-                setMonthStatusState(created.status);
-                setDays([]);
-                setComputed(computeMonth([], created.openingBalance, created.id, created.ownerOpeningBalance ?? resolvedOwnerOpening, expenseCarryForwardSeed ?? undefined));
-                handleQueuedWrite(saveMonthRecord(created, []), `Could not create ${formatMonth(monthId)}.`);
-                setStatus(`Created ${formatMonth(monthId)} locally. Firestore will sync when online.`);
-              })
-              .catch((err) => setStatus(err instanceof Error ? err.message : "Could not create Firestore month."))
-              .finally(() => {
-                creatingMonthsRef.current.delete(monthId);
-                monthRecordReceived = true;
-                checkComplete();
-              });
+    if (isPostgreSqlPeriod(monthId)) {
+      let cancelled = false;
+      void (async () => {
+        try {
+          const periodData = await getAccountingPeriodWithDays(monthId);
+          if (cancelled) return;
+          if (!periodData) {
+            setMonthStatusState("open");
+            setOpeningBalance(0);
+            setOwnerOpeningBalance(0);
+            setDays([]);
+            setComputed(null);
+            setLoading(false);
             return;
           }
-          setOpeningBalance(record.openingBalance);
-          if (record.ownerOpeningBalance != null) {
-            setOwnerOpeningBalance(record.ownerOpeningBalance);
-          } else {
-            setOwnerOpeningBalance(defaultOwnerOpeningBalance);
-            void resolveOwnerOpeningBalance(record.id)
-              .then((resolvedOwnerOpening) => {
-                if (record.id === monthId) setOwnerOpeningBalance(resolvedOwnerOpening);
-              })
-              .catch(() => {});
+          setMonthStatusState(periodData.period.status as "open" | "closed");
+          setPeriodFinalSettlementStatus(periodData.period.final_settlement_status ?? null);
+          try {
+            const seedsRes = await ledgerApiClient.periods.getSeeds(periodData.period.id);
+            if (!cancelled && seedsRes?.seeds?.financial) {
+              const fin = seedsRes.seeds.financial as any;
+              const cashOpening = Number(fin.opening_cash ?? fin.opening_cash_balance ?? 0);
+              const ownerOpening = Number(fin.opening_owner_balance ?? fin.owner_opening_balance ?? 0);
+              setOpeningBalance(cashOpening);
+              setOwnerOpeningBalance(ownerOpening);
+
+              setMonths((currentMonths) =>
+                currentMonths.map((m) =>
+                  m.id === monthId
+                    ? { ...m, openingBalance: cashOpening, ownerOpeningBalance: ownerOpening }
+                    : m
+                )
+              );
+
+              const creditPartiesCatalog = await ledgerApiClient.catalogs.getCreditParties().catch(() => ({ data: [] }));
+              const partyNameMap = new Map((creditPartiesCatalog.data || []).map((cp: any) => [cp.id, cp.name]));
+              
+              const creditBalances: ExpenseCarryForwardCreditBalance[] = (seedsRes.seeds.creditParties || []).map((cp: any) => ({
+                partyId: cp.party_id,
+                partyName: partyNameMap.get(cp.party_id) || cp.party_id,
+                balance: Number(cp.opening_balance ?? 0)
+              }));
+
+              const isGenesis = isGenesisPeriod(monthId) || !fin.source_period_key;
+              const carrySeed: ExpenseCarryForwardSeed = {
+                isGenesis,
+                sourceMonthId: fin.source_period_key || (isGenesis ? "genesis" : ""),
+                sourceDayNo: fin.source_day_no || 0,
+                openingBalance: cashOpening,
+                ownerOpeningBalance: ownerOpening,
+                creditBalances
+              };
+              setExpenseCarryForwardSeed(carrySeed);
+            }
+          } catch {
+            // Seeds may be uninitialized or inaccessible to some roles
           }
-          setMonthStatusState(record.status);
-          monthRecordReceived = true;
-          checkComplete();
-        },
-        (err) => {
-          handleFirestoreError(err.message);
-          monthRecordReceived = true;
-          checkComplete();
+          const pgDays: DailyLedgerInput[] = [];
+          const dayCount = periodData.days.size || 31;
+          for (let d = 1; d <= dayCount; d++) {
+            const dayRec = periodData.days.get(d);
+            const status = dayRec?.status ?? "closed";
+            pgDays.push({
+              dayNo: d,
+              date: `${monthId}-${String(d).padStart(2, "0")}`,
+              status,
+              lockedAt: status === "closed" ? (dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : Date.now()) : undefined,
+              closedAt: dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : undefined,
+              reopenedAt: dayRec?.reopened_at ? new Date(dayRec.reopened_at).getTime() : undefined,
+              expenses: [],
+              commissions: [],
+              credits: [],
+              ownerBalances: []
+            });
+          }
+
+          let finalDayRecord: DailyLedgerInput | null = null;
+          if (canUseFinalPeriod(monthId, new Date())) {
+            try {
+              finalDayRecord = await loadExpenseDayPostgres(monthId, 32);
+            } catch {
+              // Non-blocking
+            }
+          }
+
+          if (!cancelled) {
+            setDays((currentDays) => {
+              const currentMap = new Map(currentDays.map((d) => [d.dayNo, d]));
+              const merged = pgDays.map((pgDay) => {
+                const existing = currentMap.get(pgDay.dayNo);
+                if (existing && isServerLoadedDay(existing)) {
+                  return {
+                    ...pgDay,
+                    ...existing,
+                    status: pgDay.status,
+                    lockedAt: pgDay.lockedAt,
+                    closedAt: pgDay.closedAt,
+                    reopenedAt: pgDay.reopenedAt,
+                    openingCash: existing.openingCash,
+                    ownerOpeningBalance: existing.ownerOpeningBalance,
+                    expenses: existing.expenses,
+                    commissions: existing.commissions,
+                    credits: existing.credits,
+                    ownerBalances: existing.ownerBalances,
+                    notes: existing.notes ?? pgDay.notes,
+                    updatedAt: existing.updatedAt
+                  };
+                }
+                return pgDay;
+              });
+
+              const existingFinal = currentMap.get(32);
+              if (finalDayRecord) {
+                merged.push(finalDayRecord);
+              } else if (existingFinal && isServerLoadedDay(existingFinal) && (!existingFinal.date || existingFinal.date.startsWith(monthId))) {
+                merged.push(existingFinal);
+              }
+
+              for (const [dayNo, existingDay] of currentMap.entries()) {
+                if (dayNo > dayCount && dayNo !== 32 && isServerLoadedDay(existingDay) && (!existingDay.date || existingDay.date.startsWith(monthId))) {
+                  merged.push(existingDay);
+                }
+              }
+
+              return merged;
+            });
+            setLoading(false);
+          }
+        } catch (err) {
+          if (!cancelled) {
+            setLoading(false);
+            setStatus(err instanceof Error ? err.message : "Failed to load PostgreSQL period.");
+          }
         }
-      ),
-      subscribeMonthDays(
-        monthId,
-        (nextDays, metadata) => {
-          setDays(nextDays);
-          applySnapshotMetadata(metadata);
-          monthDaysReceived = true;
-          checkComplete();
-        },
-        (err) => {
-          handleFirestoreError(err.message);
-          monthDaysReceived = true;
-          checkComplete();
-        },
-        { readDecision: expenseReadDecision }
-      )
-    ];
-    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [calendarSelectionReady, expenseReadDecision, monthId, role, user]);
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [calendarSelectionReady, monthId, role, user]);
 
   useEffect(() => {
-    if (!user || !role || !calendarSelectionReady) {
-      setExpenseCarryForwardSeed(null);
-      return;
-    }
+    if (!user || !role || !calendarSelectionReady || !isPostgreSqlPeriod(monthId)) return;
     let cancelled = false;
-    setExpenseCarryForwardSeed(null);
-    void resolveExpenseCarryForwardSeed(monthId)
-      .then((seed) => {
-        if (!cancelled) setExpenseCarryForwardSeed(seed);
-      })
-      .catch(() => {
-        if (!cancelled) setExpenseCarryForwardSeed(null);
-      });
+    void loadExpenseDayPostgres(monthId, selectedDay).then((dayData) => {
+      if (!cancelled && dayData) {
+        setDays((currentDays) => replaceDay(currentDays, dayData));
+      }
+    }).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [calendarSelectionReady, monthId, role, user]);
+  }, [calendarSelectionReady, monthId, role, selectedDay, user]);
 
   const calculatedOpeningBalance = expenseCarryForwardSeed?.openingBalance ?? openingBalance;
   const calculatedOwnerOpeningBalance = expenseCarryForwardSeed?.ownerOpeningBalance ?? ownerOpeningBalance;
@@ -2181,9 +2365,18 @@ function App() {
   );
 
   const selectedOpening = useMemo(() => {
+    if (selectedDay === 32) {
+      if (isPostgreSqlPeriod(monthId) && selectedDayInput.openingCash !== undefined) {
+        return selectedDayInput.openingCash;
+      }
+      return 0;
+    }
+    if (isPostgreSqlPeriod(monthId) && selectedDayInput.openingCash !== undefined) {
+      return selectedDayInput.openingCash;
+    }
     const previous = computed?.days.find((day) => day.dayNo === selectedDay - 1);
     return selectedDay === 1 ? calculatedOpeningBalance : previous?.returnBalance ?? calculatedOpeningBalance;
-  }, [calculatedOpeningBalance, computed?.days, selectedDay]);
+  }, [calculatedOpeningBalance, computed?.days, monthId, selectedDay, selectedDayInput.openingCash]);
 
   useEffect(() => {
     const nextDay = clampSelectedDay(selectedDay, monthId, now);
@@ -2222,10 +2415,39 @@ function App() {
       setStatus(message);
       throw new Error(message);
     }
+
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!pgPeriodRouting.checked || pgPeriodRouting.status !== "INITIALIZED") {
+        const message = `Cannot save: Accounting period ${formatMonth(monthId)} is not initialized in PostgreSQL.`;
+        if (!options.silent) setStatus(message);
+        throw new Error(message);
+      }
+      if (!days.some((entry) => entry.dayNo === day.dayNo)) {
+        const message = `Cannot save: Accounting day ${day.dayNo} is not resolved for ${formatMonth(monthId)}.`;
+        if (!options.silent) setStatus(message);
+        throw new Error(message);
+      }
+      try {
+        const saveRes = await saveExpenseDayPostgres(monthId, day);
+        const rehydratedDay = saveRes.rehydratedDay ?? day;
+        const nextDays = replaceDay(days, rehydratedDay);
+        const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
+        setDays(nextDays);
+        setComputed(nextComputed);
+        if (!options.silent) setStatus(`Saved ${day.label ?? `Day ${day.dayNo}`} to PostgreSQL.`);
+        return;
+      } catch (pgErr) {
+        const message = pgErr instanceof Error ? pgErr.message : "Failed to save day to PostgreSQL.";
+        if (!options.silent) setStatus(message);
+        throw new Error(message);
+      }
+    }
+
     const nextDays = replaceDay(days, day);
     const nextComputed = computeMonth(nextDays, calculatedOpeningBalance, monthId, calculatedOwnerOpeningBalance, expenseCarryForwardSeed ?? undefined);
     setDays(nextDays);
     setComputed(nextComputed);
+
     const write = queueDayAndSummaryWrite(currentMonthRecord(), day, nextComputed);
     if (options.awaitRemote) {
       const wrote = await handleQueuedWrite(write, "Could not save day to Firestore.");
@@ -2238,6 +2460,61 @@ function App() {
   }
 
   async function closeDay(day: DailyLedgerInput) {
+    if (day.dayNo === 32) {
+      if (isPostgreSqlPeriod(monthId)) {
+        if (!roleCan(role, "daily")) {
+          const message = "Your role cannot verify FINAL.";
+          setStatus(message);
+          throw new Error(message);
+        }
+        try {
+          const periodData = await getAccountingPeriodWithDays(monthId);
+          if (!periodData) throw new Error("Period not found.");
+          await ledgerApiClient.periods.verifyFinalSettlement(periodData.period.id);
+          setPeriodFinalSettlementStatus("VERIFIED");
+          const rehydrated = await loadExpenseDayPostgres(monthId, 32);
+          if (rehydrated) {
+            setDays((currentDays) => replaceDay(currentDays, rehydrated));
+          }
+          await getAccountingPeriodWithDays(monthId, true);
+          setStatus("FINAL month-end settlement formally verified.");
+          setMonthCloseModal({
+            isOpen: true,
+            step: "prompt",
+            errorMessage: null
+          });
+          return;
+        } catch (err: any) {
+          const message = err.message || "Failed to verify FINAL.";
+          setStatus(message);
+          throw new Error(message);
+        }
+      }
+      setStatus("FINAL is a month-end closing snapshot and is already closed.");
+      return;
+    }
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!roleCan(role, "daily")) {
+        setStatus("Your role can view this month but cannot close days.");
+        return;
+      }
+      try {
+        const periodData = await getAccountingPeriodWithDays(monthId);
+        if (!periodData) {
+          setStatus(`Cannot close day: period ${monthId} not initialized in PostgreSQL.`);
+          return;
+        }
+        await ledgerApiClient.periods.closeDay(periodData.period.id, day.dayNo, null);
+        await getAccountingPeriodWithDays(monthId, true);
+        setStatus(`Day ${day.dayNo} successfully closed in PostgreSQL authoritative ledger.`);
+        setDays((currentDays) => replaceDay(currentDays, { ...day, status: "closed" }));
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to close day in PostgreSQL.";
+        setStatus(`Error closing day: ${msg}`);
+        return;
+      }
+    }
     if (!roleCan(role, "daily")) {
       setStatus("Your role can view this month but cannot close days.");
       return;
@@ -2300,6 +2577,35 @@ function App() {
   }
 
   async function reopenDay(dayNo: number) {
+    if (dayNo === 32) {
+      setStatus("FINAL is a month-end closing snapshot and cannot be reopened. Reopen an operational day (such as Day 31) to make corrections.");
+      return;
+    }
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!canReopenOperationalDay({ role, isLiveDay: isLiveDay(monthId, dayNo, now) })) {
+        setStatus("Only owner can reopen days.");
+        return;
+      }
+      try {
+        const periodData = await getAccountingPeriodWithDays(monthId);
+        if (!periodData) {
+          setStatus(`Cannot reopen day: period ${monthId} not initialized in PostgreSQL.`);
+          return;
+        }
+        await ledgerApiClient.periods.reopenDay(periodData.period.id, dayNo, "Governed UI day reopen");
+        await getAccountingPeriodWithDays(monthId, true);
+        setStatus(`Day ${dayNo} successfully reopened in PostgreSQL authoritative ledger.`);
+        setDays((currentDays) => {
+          const d = currentDays.find((entry) => entry.dayNo === dayNo) ?? emptyDay(dayNo);
+          return replaceDay(currentDays, { ...d, status: "reopen" });
+        });
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to reopen day in PostgreSQL.";
+        setStatus(`Error reopening day: ${msg}`);
+        return;
+      }
+    }
     if (!canReopenOperationalDay({ role, isLiveDay: isLiveDay(monthId, dayNo, now) })) {
       setStatus("Only owner can reopen days.");
       return;
@@ -2329,6 +2635,10 @@ function App() {
   }
 
   async function reopenMonthDays(scope: "selected" | "all") {
+    if (isPostgreSqlPeriod(monthId)) {
+      setStatus("Bulk day actions for PostgreSQL operational periods are managed through PostgreSQL governance workflows.");
+      return;
+    }
     if (role !== "owner") {
       setStatus("Only owner can reopen selected or all days for a month.");
       return;
@@ -2393,6 +2703,10 @@ function App() {
   }
 
   function closeAllDaysExceptToday() {
+    if (isPostgreSqlPeriod(monthId)) {
+      setStatus("Bulk day actions for PostgreSQL operational periods are managed through PostgreSQL governance workflows.");
+      return;
+    }
     if (role !== "owner") {
       setStatus("Only owner can close all days for a month.");
       return;
@@ -2611,7 +2925,91 @@ function App() {
     }
   }
 
+  async function handleGuidedCloseMonth() {
+    if (!isPostgreSqlPeriod(monthId)) {
+      setStatus("Guided month close is only supported for PostgreSQL periods.");
+      return;
+    }
+    if (!roleCan(role, "ownerControls")) {
+      const msg = "Closing periods is restricted to owner access.";
+      setStatus(msg);
+      setMonthCloseModal((prev) => ({
+        ...prev,
+        isOpen: true,
+        step: "prompt",
+        errorMessage: msg
+      }));
+      return;
+    }
+
+    setMonthClosing(true);
+    setMonthCloseModal((prev) => ({
+      ...prev,
+      isOpen: true,
+      errorMessage: null
+    }));
+
+    try {
+      const periodData = await getAccountingPeriodWithDays(monthId);
+      if (!periodData) {
+        throw new Error(`Cannot close period: ${monthId} not initialized in PostgreSQL.`);
+      }
+
+      const closeRes = await ledgerApiClient.periods.closePeriod(periodData.period.id);
+      setMonthStatusState("closed");
+      clearPeriodCache();
+      if (closeRes.targetPeriod?.periodKey) {
+        registerPostgreSqlPeriod(closeRes.targetPeriod.periodKey);
+        registerInitializedPeriod(closeRes.targetPeriod.periodKey);
+        await getAccountingPeriodWithDays(closeRes.targetPeriod.periodKey, true);
+      }
+      await getAccountingPeriodWithDays(monthId, true);
+      await refreshMonthList();
+
+      const successMsg = `Period ${formatMonth(monthId)} closed in PostgreSQL authoritative ledger.`;
+      setStatus(successMsg);
+
+      setMonthCloseModal({
+        isOpen: true,
+        step: "success",
+        errorMessage: null
+      });
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : (err?.message || "Failed to close accounting period.");
+      setStatus(`Cannot close month: ${errorMsg}`);
+      setMonthCloseModal({
+        isOpen: true,
+        step: "prompt",
+        errorMessage: errorMsg
+      });
+    } finally {
+      setMonthClosing(false);
+    }
+  }
+
+  function handleNotNowMonthClose() {
+    setMonthCloseModal((prev) => ({ ...prev, isOpen: false, errorMessage: null }));
+  }
+
+  function handleProceedToNextMonth() {
+    setMonthCloseModal((prev) => ({ ...prev, isOpen: false, errorMessage: null }));
+    const { nextPeriodKey } = getNextPeriodKey(monthId);
+    void loadMonth(nextPeriodKey, { targetDay: 1 });
+  }
+
   async function toggleClosed() {
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!roleCan(role, "ownerControls")) {
+        setStatus("Closing and reopening periods is restricted to owner access.");
+        return;
+      }
+      if (monthStatus === "open") {
+        await handleGuidedCloseMonth();
+      } else {
+        setStatus("Reopening a closed PostgreSQL period requires governed correction/rollover workflows.");
+      }
+      return;
+    }
     if (!roleCan(role, "ownerControls")) {
       setStatus("Closing and reopening months is restricted to owner access.");
       return;
@@ -2724,7 +3122,7 @@ function App() {
   }, [expenseSection, role]);
 
   const expenseCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
-    return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
+    const list: UniversalDaySnapshot[] = Array.from({ length: daysInMonth(monthId) }, (_, index) => {
       const dayNo = index + 1;
       const day = days.find((entry) => entry.dayNo === dayNo);
       const future = !availableDayNumbers(monthId, now).includes(dayNo);
@@ -2749,8 +3147,48 @@ function App() {
         disabledReason: future ? "Future days are disabled and cannot create records." : undefined
       };
     });
+    if (canUseFinalPeriod(monthId, now)) {
+      const finalDayEntry = days.find((d) => d.dayNo === 32);
+      const isFinalClosed = finalDayEntry?.status === "closed";
+      list.push({
+        moduleKey: "expense",
+        monthId,
+        dayNo: 32,
+        status: (finalDayEntry?.status as any) ?? "open",
+        future: false,
+        saved: true,
+        dateLabel: `FINAL - ${formatMonth(monthId)}`,
+        disabledReason: isFinalClosed ? "FINAL is verified and closed." : undefined
+      });
+    }
+    return list;
   }, [days, monthId, now]);
-  const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? (selectedDay === 32 ? "closed" : "open");
+  const monthChoices = useMemo(() => {
+    const periodMap = new Map<string, string>();
+    // 1. August 2026 genesis period is always present and authoritative
+    const augRecord = months.find((m) => m.id === "2026-08");
+    periodMap.set("2026-08", augRecord?.status ?? "open");
+
+    // 2. All initialized periods from PostgreSQL
+    for (const m of months) {
+      if (m.id >= "2026-08") {
+        periodMap.set(m.id, m.status);
+      }
+    }
+
+    // 3. Current active monthId if >= 2026-08
+    if (monthId >= "2026-08" && !periodMap.has(monthId)) {
+      periodMap.set(monthId, "uninitialized");
+    }
+
+    // 4. September 2026 (for uninitialized lifecycle testing)
+    if (!periodMap.has("2026-09")) {
+      periodMap.set("2026-09", "uninitialized");
+    }
+
+    return Array.from(periodMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [monthId, months]);
+  const selectedExpenseStatus = expenseCalendarDays.find((day) => day.dayNo === selectedDay)?.status ?? "closed";
   const topActivityActive = loading || isAutosaving || syncState === "syncing" || pageActivityLoading || authBusy || !authReady;
   const topActivityLabel = loading
     ? loadingMessage
@@ -2764,7 +3202,6 @@ function App() {
             ? "Checking access..."
             : "";
 
-  if (!isFirebaseConfigured) return <FirebaseMissing />;
   if (!authReady || !user || !role || !calendarSelectionReady) {
     return (
       <>
@@ -2772,8 +3209,7 @@ function App() {
         <AuthPanel
           message={authMessage || authStatus}
           busy={authBusy || !authReady}
-          onEmailSubmit={handleEmailAuth}
-          onGoogleSubmit={handleGoogleAuth}
+          onSubmit={handleAuthLogin}
         />
       </>
     );
@@ -2782,7 +3218,9 @@ function App() {
   const currentExpenseMonth = months.find((month) => month.id === monthId);
   const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed);
   const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
-  const isClosed = monthStatus === "closed";
+  const isPeriodRoutingPending = isPostgreSqlPeriod(monthId) && (!pgPeriodRouting.checked || loading);
+  const isPeriodUninitialized = isPostgreSqlPeriod(monthId) && pgPeriodRouting.checked && pgPeriodRouting.status === "UNINITIALIZED";
+  const isClosed = !isPeriodUninitialized && monthStatus === "closed";
   const isSelectedCanonicalReopen = selectedDayInput.status === "reopen";
   const isSelectedCanonicalClosed = selectedDayInput.status === "closed";
   const isSelectedLegacyLocked =
@@ -2795,22 +3233,30 @@ function App() {
   const selectedDayLocked =
     isSelectedCanonicalClosed ||
     isSelectedLegacyLocked;
-  const canEditDaily = roleCan(role, "daily") && !isClosed;
+  const isSelectedDayPresent = days.some((entry) => entry.dayNo === selectedDay);
+  const canEditDaily = roleCan(role, "daily") && !isClosed && !isPeriodUninitialized && !isPeriodRoutingPending;
   const liveDate = currentDateState(now);
-  const canEditSelectedDay = canEditOperationalDailyEntry({
-    role,
-    canWriteDaily: roleCan(role, "daily"),
-    monthClosed: isClosed,
-    isLiveDay: isSelectedLiveDay,
-    dayClosed: selectedDayLocked,
-    day: selectedDayInput,
-    nowMs: now.getTime()
-  });
+  const canEditSelectedDay =
+    !isPeriodUninitialized &&
+    !isPeriodRoutingPending &&
+    isSelectedDayPresent &&
+    (selectedDay === 32
+      ? (roleCan(role, "daily") && !isClosed && !selectedDayLocked)
+      : canEditOperationalDailyEntry({
+          role,
+          canWriteDaily: roleCan(role, "daily"),
+          monthClosed: isClosed,
+          isLiveDay: isSelectedLiveDay,
+          dayClosed: selectedDayLocked,
+          day: selectedDayInput,
+          nowMs: now.getTime()
+        }));
   const canCloseSelectedDay =
     canEditDaily &&
     (role === "owner" || role === "admin") &&
     !selectedDayLocked;
   const canReopenSelectedDay =
+    selectedDay !== 32 &&
     canEditDaily &&
     selectedDayLocked &&
     canReopenOperationalDay({ role, isLiveDay: isSelectedLiveDay }) &&
@@ -2838,11 +3284,14 @@ function App() {
   const canUseBackup = roleCan(role, "importBackup");
   const canUseExcelImport = role === "owner";
   const jazzLoadMonth = jazzLoadMonths.find((record) => record.id === monthId);
-  const currentMonthStatus = view === "jazz-load" ? (jazzLoadMonth?.status ?? "new") : monthStatus;
-  const canToggleCurrentMonth =
-    view === "jazz-load" ? roleCanJazzLoad(role, "monthControls") : roleCan(role, "ownerControls");
+  const canToggleCurrentMonth = roleCan(role, "ownerControls") && canAccessView(role, "expense") && !isPeriodUninitialized;
+  const currentMonthStatus = months.find((month) => month.id === monthId)?.status ?? (isPeriodUninitialized ? "uninitialized" : monthStatus);
+  const finalDayEntry = days.find((d) => d.dayNo === 32);
+  const isFinalClosed = finalDayEntry?.status === "closed" || periodFinalSettlementStatus === "VERIFIED";
+  const isMonthCloseRequired = isPostgreSqlPeriod(monthId) && isFinalClosed && currentMonthStatus === "open";
+  const isMonthCloseAction = currentMonthStatus === "open";
   const handleMonthToggle = view === "jazz-load" ? toggleJazzLoadClosed : toggleClosed;
-  const monthToggleLabel = currentMonthStatus === "closed" ? "Reopen Month" : "Close Month";
+  const monthToggleLabel = isMonthCloseAction ? "Close Month" : "Reopen Month";
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
@@ -2867,9 +3316,6 @@ function App() {
     shadowAllowedRoles.includes(role as UserRole) &&
     (ledgerReadModeConfig.monthId ?? monthId) === monthId;
   const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[6rem_minmax(0,1fr)]";
-  const monthChoices = Array.from(
-    new Map([liveDate.monthId, monthId, ...months.map((month) => month.id)].map((id) => [id, months.find((month) => month.id === id)?.status ?? (id === liveDate.monthId ? "current" : "new")]))
-  );
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -2907,6 +3353,114 @@ function App() {
       setStatus("Only owner can manage Expense settings.");
       return;
     }
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        if (catalog === "expenseCategories") {
+          const isExisting = item.id && expenseCategories.some((c) => c.id === item.id);
+          if (isExisting) {
+            const res = await ledgerApiClient.catalogs.updateExpenseCategory(item.id, {
+              name: item.name,
+              is_active: item.active,
+              sort_order: item.sortOrder
+            });
+            const updated = res.data;
+            setExpenseCategories((prev) =>
+              prev.map((c) =>
+                c.id === updated.id
+                  ? { id: updated.id, name: updated.name, active: updated.is_active, sortOrder: updated.sort_order }
+                  : c
+              )
+            );
+            setStatus(`${item.name} updated in PostgreSQL catalog.`);
+            return;
+          }
+
+          const res = await ledgerApiClient.catalogs.createExpenseCategory({
+            slug: item.id && !item.id.includes("-") ? item.id : item.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
+            name: item.name,
+            sort_order: item.sortOrder ?? (expenseCategories.length + 1),
+            is_active: item.active ?? true
+          });
+          const created = res.data;
+          setExpenseCategories((prev) => [
+            ...prev.filter((c) => c.id !== created.id),
+            { id: created.id, name: created.name, active: created.is_active, sortOrder: created.sort_order }
+          ]);
+          setStatus(`${item.name} saved to PostgreSQL catalog.`);
+          return;
+        } else if (catalog === "commissionCategories") {
+          const isExisting = item.id && commissionCategories.some((c) => c.id === item.id);
+          if (isExisting) {
+            const res = await ledgerApiClient.catalogs.updateCommissionCategory(item.id, {
+              name: item.name,
+              is_active: item.active,
+              sort_order: item.sortOrder
+            });
+            const updated = res.data;
+            setCommissionCategories((prev) =>
+              prev.map((c) =>
+                c.id === updated.id
+                  ? { id: updated.id, name: updated.name, active: updated.is_active, sortOrder: updated.sort_order }
+                  : c
+              )
+            );
+            setStatus(`${item.name} updated in PostgreSQL catalog.`);
+            return;
+          }
+
+          const res = await ledgerApiClient.catalogs.createCommissionCategory({
+            slug: item.id && !item.id.includes("-") ? item.id : item.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
+            name: item.name,
+            sort_order: item.sortOrder ?? (commissionCategories.length + 1),
+            is_active: item.active ?? true
+          });
+          const created = res.data;
+          setCommissionCategories((prev) => [
+            ...prev.filter((c) => c.id !== created.id),
+            { id: created.id, name: created.name, active: created.is_active, sortOrder: created.sort_order }
+          ]);
+          setStatus(`${item.name} saved to PostgreSQL catalog.`);
+          return;
+        } else if (catalog === "creditParties") {
+          const isExisting = item.id && creditParties.some((p) => p.id === item.id);
+          if (isExisting) {
+            const res = await ledgerApiClient.catalogs.updateCreditParty(item.id, {
+              name: item.name,
+              is_active: item.active,
+              sort_order: item.sortOrder
+            });
+            const updated = res.data;
+            setCreditParties((prev) =>
+              prev.map((p) =>
+                p.id === updated.id
+                  ? { id: updated.id, name: updated.name, active: updated.is_active, sortOrder: updated.sort_order }
+                  : p
+              )
+            );
+            setStatus(`${item.name} updated in PostgreSQL catalog.`);
+            return;
+          }
+
+          const res = await ledgerApiClient.catalogs.createCreditParty({
+            slug: item.id && !item.id.includes("-") ? item.id : item.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
+            name: item.name,
+            sort_order: item.sortOrder ?? (creditParties.length + 1),
+            is_active: item.active ?? true
+          });
+          const created = res.data;
+          setCreditParties((prev) => [
+            ...prev.filter((p) => p.id !== created.id),
+            { id: created.id, name: created.name, active: created.is_active, sortOrder: created.sort_order }
+          ]);
+          setStatus(`${item.name} saved to PostgreSQL catalog.`);
+          return;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to save catalog item to PostgreSQL.";
+        setStatus(msg);
+        throw new Error(msg);
+      }
+    }
     handleQueuedWrite(upsertCatalogItem(catalog, { ...item, active: true }), `Could not queue ${item.name}.`);
     setStatus(`${item.name} saved locally. Firestore will sync automatically.`);
   }
@@ -2919,8 +3473,94 @@ function App() {
       setStatus("Only owner can manage Expense settings.");
       return;
     }
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        if (catalog === "expenseCategories") {
+          const res = await ledgerApiClient.catalogs.deleteExpenseCategory(itemId);
+          if (res.data?.soft_deleted) {
+            setExpenseCategories((prev) =>
+              prev.map((c) => (c.id === itemId ? { ...c, active: false } : c))
+            );
+            setStatus("Category has existing transactions; marked inactive.");
+          } else {
+            setExpenseCategories((prev) => prev.filter((c) => c.id !== itemId));
+            setStatus("Category deleted from PostgreSQL catalog.");
+          }
+        } else if (catalog === "commissionCategories") {
+          const res = await ledgerApiClient.catalogs.deleteCommissionCategory(itemId);
+          if (res.data?.soft_deleted) {
+            setCommissionCategories((prev) =>
+              prev.map((c) => (c.id === itemId ? { ...c, active: false } : c))
+            );
+            setStatus("Category has existing transactions; marked inactive.");
+          } else {
+            setCommissionCategories((prev) => prev.filter((c) => c.id !== itemId));
+            setStatus("Category deleted from PostgreSQL catalog.");
+          }
+        } else if (catalog === "creditParties") {
+          const res = await ledgerApiClient.catalogs.deleteCreditParty(itemId);
+          if (res.data?.soft_deleted) {
+            setCreditParties((prev) =>
+              prev.map((p) => (p.id === itemId ? { ...p, active: false } : p))
+            );
+            setStatus("Credit party has existing transactions; marked inactive.");
+          } else {
+            setCreditParties((prev) => prev.filter((p) => p.id !== itemId));
+            setStatus("Credit party deleted from PostgreSQL catalog.");
+          }
+        }
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to delete catalog item from PostgreSQL.";
+        setStatus(msg);
+        throw new Error(msg);
+      }
+    }
     handleQueuedWrite(deleteCatalogItem(catalog, itemId), `Could not queue ${itemId} delete.`);
     setStatus(`${itemId} deleted locally. Firestore will sync automatically.`);
+  }
+
+  async function handleReorderCatalog(
+    catalog: "expenseCategories" | "creditParties" | "commissionCategories",
+    before: CatalogItem[],
+    after: CatalogItem[]
+  ) {
+    if (role !== "owner") {
+      setStatus("Only owner can manage Expense settings.");
+      return;
+    }
+    if (isPostgreSqlPeriod(monthId)) {
+      const patches = changedSortOrderPatches(before, after);
+      if (patches.length === 0) return;
+      try {
+        if (catalog === "expenseCategories") {
+          await Promise.all(
+            patches.map((p) =>
+              ledgerApiClient.catalogs.updateExpenseCategory(p.id, { sort_order: p.sortOrder })
+            )
+          );
+        } else if (catalog === "commissionCategories") {
+          await Promise.all(
+            patches.map((p) =>
+              ledgerApiClient.catalogs.updateCommissionCategory(p.id, { sort_order: p.sortOrder })
+            )
+          );
+        } else if (catalog === "creditParties") {
+          await Promise.all(
+            patches.map((p) =>
+              ledgerApiClient.catalogs.updateCreditParty(p.id, { sort_order: p.sortOrder })
+            )
+          );
+        }
+        setStatus("Catalog order updated in PostgreSQL.");
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to update catalog order in PostgreSQL.";
+        setStatus(msg);
+        throw new Error(msg);
+      }
+    }
+    handleQueuedWrite(updateCatalogSortOrder(catalog, before, after), "Could not queue sort order update.");
   }
 
   async function saveUserRole(uid: string, updates: Pick<UserProfile, "role" | "active">) {
@@ -3058,18 +3698,28 @@ function App() {
         }
         permissions={{
           canCloseSelectedDay: expenseSection === "daily-entry" && canCloseSelectedDay && Boolean(user),
-          canReopenSelectedDay: expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
+          canReopenSelectedDay: selectedDay !== 32 && expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
           canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
           canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
           canRunMasterRefresh: Boolean(user) && roleCan(role, MASTER_REFRESH_ACCESS),
-          closeDisabledReason: selectedDayLocked ? "This day is already closed." : "This day cannot be closed for your role.",
-          reopenDisabledReason: "Only owner can reopen days.",
+          closeDisabledReason:
+            selectedDayLocked
+              ? (selectedDay === 32 ? "FINAL is verified and closed." : "This day is already closed.")
+              : "This day cannot be closed for your role.",
+          reopenDisabledReason:
+            selectedDay === 32
+              ? "FINAL is a month-end closing snapshot and cannot be reopened. Reopen an operational day (such as Day 31) to make corrections."
+              : "Only owner can reopen days.",
           reopenAllDisabledReason: "Only owner can reopen all days.",
           closePreviousDisabledReason: "Only owner can close previous days.",
           masterRefreshDisabledReason: "Only owner/admin can run master refresh."
         }}
+        closeDayLabel={selectedDay === 32 ? "Verify & Close FINAL" : "Close Day"}
         onCloseSelectedDay={() => {
-          if (!window.confirm(`Close ${selectedDayInput.label ?? `Day ${selectedDay}`}?`)) return;
+          const confirmMsg = selectedDay === 32
+            ? "Verify and close FINAL month-end settlement?"
+            : `Close ${selectedDayInput.label ?? `Day ${selectedDay}`}?`;
+          if (!window.confirm(confirmMsg)) return;
           void closeDay(selectedDayInput);
         }}
         onReopenSelectedDay={() => {
@@ -3119,10 +3769,29 @@ function App() {
         state={masterRefreshModal}
         onClose={() => setMasterRefreshModal({ open: false, title: "", progress: [] })}
       />
+      <GuidedMonthCloseModal
+        isOpen={monthCloseModal.isOpen}
+        step={monthCloseModal.step}
+        monthId={monthId}
+        nextMonthId={getNextPeriodKey(monthId).nextPeriodKey}
+        isClosing={monthClosing}
+        errorMessage={monthCloseModal.errorMessage}
+        onCloseMonth={handleGuidedCloseMonth}
+        onNotNow={handleNotNowMonthClose}
+        onProceedToNextMonth={handleProceedToNextMonth}
+        onDismiss={handleNotNowMonthClose}
+      />
       <header className="mobile-topbar lg:hidden">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-300">{currentViewLabel}</p>
-          <h1 className="truncate text-base font-semibold text-white">{formatMonth(monthId)} · {currentMonthStatus}</h1>
+          <h1 className="truncate text-base font-semibold text-white">
+            {formatMonth(monthId)} · {currentMonthStatus}
+            {isMonthCloseRequired && (
+              <span className="ml-2 rounded border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                Month Close Required
+              </span>
+            )}
+          </h1>
           <p className="truncate text-xs text-slate-400">{syncLabel}</p>
         </div>
         <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setMobileMenuOpen((open) => !open)} title="Open menu">
@@ -3183,7 +3852,7 @@ function App() {
             <p className="text-sm font-semibold text-white">{displayName}</p>
             <p className="mt-1 text-xs text-slate-400">ID {displayId} · {accessLabel}</p>
             <p className="mt-2 flex items-center gap-2 text-xs text-slate-400"><Cloud /> {authStatus}</p>
-            <button className="btn-secondary mt-3 !w-full" onClick={() => auth && signOut(auth)}>Sign Out</button>
+            <button className="btn-secondary mt-3 !w-full" onClick={() => void handleSignOut()}>Sign Out</button>
           </div>
         </section>
       )}
@@ -3252,7 +3921,14 @@ function App() {
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-slate-500">Month Status</span>
-                    <span className="font-medium capitalize text-slate-100">{currentMonthStatus}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium capitalize text-slate-100">{currentMonthStatus}</span>
+                      {isMonthCloseRequired && (
+                        <span className="rounded border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                          Close Required
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="mt-4 border-t border-slate-800 pt-4">
@@ -3269,7 +3945,7 @@ function App() {
                     <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
                       {monthChoices.map(([id, status]) => (
                         <option key={id} value={id}>
-                          {formatMonth(id)} · {currentMonthStatus}
+                          {formatMonth(id)} · {status}
                         </option>
                       ))}
                     </select>
@@ -3307,7 +3983,7 @@ function App() {
                 <p className="mt-3 flex items-center gap-2 text-sm text-slate-400">
                   <Shield /> {syncLabel}
                 </p>
-                <button className="btn-secondary mt-4 !w-full" onClick={() => auth && signOut(auth)}>Sign Out</button>
+                <button className="btn-secondary mt-4 !w-full" onClick={() => void handleSignOut()}>Sign Out</button>
               </div>
             </>
           )}
@@ -3315,22 +3991,57 @@ function App() {
 
         <div className="min-w-0 px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8">
           {status && <p className="status">{status}</p>}
-          {pwaNotice === "offline-ready" && (
-            <div className="status flex flex-wrap items-center justify-between gap-3">
-              <span>Offline reload is ready on this device.</span>
-              <button className="btn-secondary !h-9" onClick={() => setPwaNotice(null)}>Later</button>
-            </div>
-          )}
-          {pwaNotice === "update-available" && (
-            <div className="warning flex flex-wrap items-center justify-between gap-3">
-              <span>New version available. Update when no entry is being edited.</span>
-              <div className="flex flex-wrap gap-2">
-                <button className="btn-primary !h-9" onClick={() => void applyPwaUpdate()}>Update now</button>
-                <button className="btn-secondary !h-9" onClick={() => setPwaNotice(null)}>Later</button>
+          {isMonthCloseRequired && (
+            <div
+              data-testid="month-close-required-banner"
+              className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-100 shadow-lg shadow-black/20"
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+                  <div>
+                    <h3 className="font-semibold text-amber-300">Month Open — Month Close Required</h3>
+                    <p className="mt-0.5 text-sm text-amber-200/90">
+                      FINAL is closed, but {formatMonth(monthId)} has not been closed yet.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  data-testid="btn-banner-close-month"
+                  className="btn-primary shrink-0 self-start sm:self-center"
+                  disabled={loading || monthClosing}
+                  onClick={() => void handleGuidedCloseMonth()}
+                >
+                  {monthClosing && <LoadingIcon label="Closing month" />}
+                  Close Month
+                </button>
               </div>
             </div>
           )}
           {showOfflineOwnerWarning && <p className="warning">Owner will see updates after this machine reconnects.</p>}
+          {isPeriodUninitialized && (
+            <div className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-amber-200">
+              <div className="flex items-center gap-2 font-semibold text-amber-300">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
+                <span>Period not initialized</span>
+              </div>
+              <p className="mt-1 text-sm text-amber-200/90">
+                Accounting period {formatMonth(monthId)} has not been initialized in the PostgreSQL authoritative ledger.
+              </p>
+            </div>
+          )}
+          {isPostgreSqlPeriod(monthId) && pgPeriodRouting.checked && (pgPeriodRouting.status === "AUTH_REQUIRED" || pgPeriodRouting.status === "UNAUTHORIZED") && (
+            <div className="mb-4 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-rose-200">
+              <div className="flex items-center gap-2 font-semibold text-rose-300">
+                <AlertTriangle className="h-5 w-5 shrink-0 text-rose-400" />
+                <span>Authentication Required</span>
+              </div>
+              <p className="mt-1 text-sm text-rose-200/90">
+                You do not have permission to access PostgreSQL accounting period {formatMonth(monthId)}. Please sign in with an authorized account.
+              </p>
+            </div>
+          )}
           {expenseMismatchCount > 0 && (
             <p className="warning">
               {expenseMismatchCount} Expense balance mismatch{expenseMismatchCount === 1 ? "" : "es"} detected. Run Master Calculation Refresh before treating this month as final.
@@ -3338,7 +4049,7 @@ function App() {
           )}
           {expenseOpeningMismatchCount > 0 && (role === "owner" || role === "admin") && (
             <div className="warning">
-              <p>{expenseOpeningMismatchCount} Expense month-to-month opening mismatch{expenseOpeningMismatchCount === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair June openings from May final projections.</p>
+              <p>{expenseOpeningMismatchCount} Expense month-to-month opening mismatch{expenseOpeningMismatchCount === 1 ? "" : "es"} detected. Verify opening carry-forward balances.</p>
               <ul className="mt-2 list-disc pl-5 text-sm">
                 {expenseCarryForwardWarningList.slice(0, 5).map((warning) => (
                   <li key={warning}>{warning}</li>
@@ -3359,12 +4070,14 @@ function App() {
               LedgerV2 UI reads are active for {v2ActiveModules.join(", ")}.
             </p>
           )}
-          {isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
+          {!isPeriodUninitialized && isClosed && <p className="warning">This month is closed. Reopen it before editing.</p>}
           {selectedDayLocked && (
             <p className="warning">
-              {isSelectedLiveDay
-                ? `Day ${selectedDay} is closed.`
-                : `Day ${selectedDay} is closed. Reopen it to edit until it is manually closed.`}
+              {selectedDay === 32
+                ? "FINAL is the authoritative month-end closing snapshot. To make corrections, reopen an operational day (such as Day 31)."
+                : isSelectedLiveDay
+                  ? `Day ${selectedDay} is closed.`
+                  : `Day ${selectedDay} is closed. Reopen it to edit until it is manually closed.`}
             </p>
           )}
           {isSelectedCanonicalReopen && (
@@ -3466,8 +4179,20 @@ function App() {
                     entryMonth={selectedDateParts.entryMonth}
                     entryDay={selectedDateParts.entryDay}
                     openingBalance={selectedOpening}
-                    ownerOpeningBalance={calculatedOwnerOpeningBalance}
-                    previousOwnerClosingBalance={computed?.days.find((day) => day.dayNo === selectedDay - 1)?.ownerBalanceTotal ?? calculatedOwnerOpeningBalance}
+                    ownerOpeningBalance={
+                      selectedDay === 32
+                        ? (selectedDayInput.ownerOpeningBalance ?? 0)
+                        : (isPostgreSqlPeriod(monthId) && selectedDayInput.ownerOpeningBalance !== undefined
+                            ? selectedDayInput.ownerOpeningBalance
+                            : calculatedOwnerOpeningBalance)
+                    }
+                    previousOwnerClosingBalance={
+                      selectedDay === 32
+                        ? (selectedDayInput.ownerOpeningBalance ?? 0)
+                        : (isPostgreSqlPeriod(monthId) && selectedDayInput.ownerOpeningBalance !== undefined
+                            ? selectedDayInput.ownerOpeningBalance
+                            : (computed?.days.find((day) => day.dayNo === selectedDay - 1)?.ownerBalanceTotal ?? calculatedOwnerOpeningBalance))
+                    }
                     dateLabel={dateLabel}
                     expenseCategories={expenseCategories}
                     commissionCategories={commissionCategories}
@@ -3488,6 +4213,8 @@ function App() {
                     canSendEmail={false}
                     onCreateCatalog={saveCatalog}
                     onPendingStateChange={setHasPendingDayChanges}
+                    isOwner={role === "owner"}
+                    monthId={monthId}
                   />
                 </>
               )}
@@ -3509,7 +4236,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("expenseCategories", item)}
                   onDelete={(itemId) => removeCatalogItem("expenseCategories", itemId)}
-                  onReorder={(before, after) => updateCatalogSortOrder("expenseCategories", before, after)}
+                  onReorder={(before, after) => handleReorderCatalog("expenseCategories", before, after)}
                 />
               )}
               {expenseSection === "credit-parties" && (
@@ -3520,7 +4247,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("creditParties", item)}
                   onDelete={(itemId) => removeCatalogItem("creditParties", itemId)}
-                  onReorder={(before, after) => updateCatalogSortOrder("creditParties", before, after)}
+                  onReorder={(before, after) => handleReorderCatalog("creditParties", before, after)}
                 />
               )}
               {expenseSection === "commission-categories" && (
@@ -3531,7 +4258,7 @@ function App() {
                   lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
                   onSave={(item) => saveCatalog("commissionCategories", item)}
                   onDelete={(itemId) => removeCatalogItem("commissionCategories", itemId)}
-                  onReorder={(before, after) => updateCatalogSortOrder("commissionCategories", before, after)}
+                  onReorder={(before, after) => handleReorderCatalog("commissionCategories", before, after)}
                 />
               )}
             </section>
@@ -3553,6 +4280,7 @@ function App() {
               onImportBackup={importBackup}
               onTriggerMasterRefresh={triggerMasterRefresh}
               ledgerReadModeConfig={ledgerReadModeConfig}
+              onPendingStateChange={setHasPendingDayChanges}
             />
           )}
 
@@ -3570,6 +4298,7 @@ function App() {
               onStatus={setStatus}
               onTriggerMasterRefresh={triggerMasterRefresh}
               ledgerReadModeConfig={ledgerReadModeConfig}
+              onPendingStateChange={setHasPendingDayChanges}
             />
           )}
 

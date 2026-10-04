@@ -75,8 +75,16 @@ interface SetupData {
 
 async function cleanupTestData() {
   await sql`
-    UPDATE accounting_days SET status = 'open'
-    WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-PERIOD-F1', 'TEST-PERIOD-F2'));
+    ALTER TABLE expense_items DISABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items DISABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions DISABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions DISABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records DISABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries DISABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders DISABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines DISABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments DISABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments DISABLE TRIGGER trg_jazz_payable_payments_immutability;
   `.execute(db);
 
   await sql`
@@ -125,6 +133,19 @@ async function cleanupTestData() {
     DELETE FROM accounting_periods WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-PERIOD-F1', 'TEST-PERIOD-F2'));
     DELETE FROM franchises WHERE code IN ('TEST-PERIOD-F1', 'TEST-PERIOD-F2');
     DELETE FROM users WHERE firebase_uid LIKE 'test-period-%';
+  `.execute(db);
+
+  await sql`
+    ALTER TABLE expense_items ENABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items ENABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions ENABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions ENABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records ENABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries ENABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders ENABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines ENABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments ENABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments ENABLE TRIGGER trg_jazz_payable_payments_immutability;
   `.execute(db);
 }
 
@@ -217,7 +238,7 @@ async function setupTestData(): Promise<SetupData> {
 
   const rate1 = await sql<{ id: string }>`
     INSERT INTO jazz_load_rates (franchise_id, ml_rate, is_active, effective_from)
-    VALUES (${f1Id}, 2.5000, true, '2026-09-01T00:00:00Z')
+    VALUES (${f1Id}, 2.5000, true, '2026-01-01T00:00:00Z')
     RETURNING id;
   `.execute(db);
   const rateId = rate1.rows[0].id;
@@ -266,6 +287,16 @@ async function req(
   const res = await fetch(`${baseUrl}${path}`, opts);
   const json = await res.json().catch(() => null);
   return { status: res.status, body: json };
+}
+
+function formatDate(val: unknown): string {
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, "0");
+    const d = String(val.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return String(val).split("T")[0];
 }
 
 let pass = 0;
@@ -331,16 +362,6 @@ async function runPeriodTests() {
         .where("period_id", "=", f1PeriodId)
         .orderBy("day_no", "asc")
         .execute();
-
-      const formatDate = (val: unknown) => {
-        if (val instanceof Date) {
-          const y = val.getFullYear();
-          const m = String(val.getMonth() + 1).padStart(2, "0");
-          const d = String(val.getDate()).padStart(2, "0");
-          return `${y}-${m}-${d}`;
-        }
-        return String(val).split("T")[0];
-      };
 
       assert(days.length === 30, "Exactly 30 day records created in DB");
       assert(days[0].day_no === 1, "First day is Day 1");
@@ -900,8 +921,10 @@ async function runPeriodTests() {
 
       assert(triggerBlocked, "PostgreSQL trigger trg_enforce_ledger_immutability blocked mutation on closed day");
 
-      // Re-open Day 1 so subsequent operations/cleanup can proceed
+      // Re-open Day 1 to delete test expense, then close Day 1 so subsequent tests start with a clean period
       await sql`UPDATE accounting_days SET status = 'open' WHERE id = ${day1.id};`.execute(db);
+      await sql`DELETE FROM expense_items WHERE id = ${openRes.body.data.id};`.execute(db);
+      await sql`UPDATE accounting_days SET status = 'closed' WHERE id = ${day1.id};`.execute(db);
     }
 
     // -------------------------------------------------------------------------
@@ -934,6 +957,298 @@ async function runPeriodTests() {
 
       const aAct = await req(base, "POST", `/api/v1/periods/${f1PeriodId}/activate`, "period-admin");
       assert(aAct.status === 403, "Admin rejected from POST /activate (403)");
+    }
+
+    // -------------------------------------------------------------------------
+    // 17. Dynamic Calendar Days & Genesis Support for August 2026 (Phase 13)
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 17: Dynamic Calendar Days & Genesis Support for August 2026 (Phase 13)");
+    let augPeriodId = "";
+    {
+      // A. Rejection of period prior to 2026-08
+      const rPrior = await req(base, "POST", "/api/v1/periods/initialize", "period-owner", {
+        periodKey: "2026-07"
+      });
+      assert(rPrior.status === 422, "Initializing period prior to 2026-08 is rejected (422)", rPrior.status);
+      assert(rPrior.body?.error === "HISTORICAL_PERIOD_IMMUTABLE", "Error code is HISTORICAL_PERIOD_IMMUTABLE");
+
+      // B. Initialization of August 2026 (31 days)
+      const rAug = await req(base, "POST", "/api/v1/periods/initialize", "period-owner", {
+        periodKey: "2026-08"
+      });
+      assert(rAug.status === 201, "August 2026 initialized successfully (201 Created)", rAug.status);
+      assert(rAug.body?.daysCount === 31, "August 2026 has exactly 31 calendar days (dynamic daysCount)");
+      assert(rAug.body?.period?.period_key === "2026-08", "Period key is 2026-08");
+      augPeriodId = rAug.body?.period?.id;
+
+      // Verify days in DB: 31 days, Day 1 is 2026-08-01, Day 31 is 2026-08-31
+      const augDays = await db
+        .selectFrom("accounting_days")
+        .selectAll()
+        .where("period_id", "=", augPeriodId)
+        .orderBy("day_no", "asc")
+        .execute();
+      assert(augDays.length === 31, "DB contains exactly 31 days for August 2026");
+      const fmtDate = (d: any) => {
+        if (d instanceof Date) {
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, "0");
+          const day = String(d.getDate()).padStart(2, "0");
+          return `${y}-${m}-${day}`;
+        }
+        return String(d).slice(0, 10);
+      };
+      assert(fmtDate(augDays[0].calendar_date) === "2026-08-01", "Day 1 is 2026-08-01");
+      assert(fmtDate(augDays[30].calendar_date) === "2026-08-31", "Day 31 is 2026-08-31");
+      assert(augDays.every((d) => d.status === "closed"), "All 31 August days are initially closed");
+
+      // C. Manual Genesis Opening Seeds Staging
+      const genesisSeedBundle = {
+        financial: {
+          openingCash: 25000.00,
+          openingOwnerBalance: 12000.00,
+          openingJazzLifting: 35000.00,
+          openingJazzPayable: 18000.00,
+          sourcePeriodKey: null,
+          sourceDayNo: null,
+          notes: "MANUAL_INITIAL_GENESIS_SEED"
+        },
+        creditParties: [
+          { partyId: data.party1Id, openingBalance: 5000.00, sourcePeriodKey: null, sourceDayNo: null }
+        ],
+        stockProducts: [
+          { productId: data.prod1Id, openingQuantity: 80, sourcePeriodKey: null, sourceDayNo: null },
+          { productId: data.prod2Id, openingQuantity: 0, sourcePeriodKey: null, sourceDayNo: null }
+        ],
+        stockAccounts: [
+          { accountId: data.acct1Id, openingReceivable: 4500.00, sourcePeriodKey: null, sourceDayNo: null }
+        ],
+        jazzDoProfiles: [
+          { doProfileId: data.do1Id, openingBaseBalance: 10000.00, sourcePeriodKey: null, sourceDayNo: null }
+        ]
+      };
+
+      const rGenesisStage = await req(base, "PUT", `/api/v1/periods/${augPeriodId}/seeds`, "period-admin", genesisSeedBundle);
+      assert(rGenesisStage.status === 200, "Manual genesis seeds staged successfully (200 OK)", rGenesisStage.status);
+
+      // Verify DB provenance
+      const finSeed = await db
+        .selectFrom("period_financial_seeds")
+        .selectAll()
+        .where("period_id", "=", augPeriodId)
+        .executeTakeFirstOrThrow();
+      assert(finSeed.source_period_key === null, "Genesis financial seed source_period_key is NULL");
+      assert(finSeed.source_day_no === null, "Genesis financial seed source_day_no is NULL");
+      assert(finSeed.notes === "MANUAL_INITIAL_GENESIS_SEED", "Genesis notes recorded as MANUAL_INITIAL_GENESIS_SEED");
+
+      // D. Verify Seeds & Activate Day 1
+      const rVer = await req(base, "POST", `/api/v1/periods/${augPeriodId}/verify-seeds`, "period-owner");
+      if (rVer.status !== 200) {
+        console.error("rVer failure details:", JSON.stringify(rVer.body, null, 2));
+      }
+      assert(rVer.status === 200, "Genesis seeds verified by owner", rVer.status);
+
+      const rAct = await req(base, "POST", `/api/v1/periods/${augPeriodId}/activate`, "period-owner");
+      assert(rAct.status === 200, "August Day 1 activated (200 OK)", rAct.status);
+
+      const d1Aug = await db
+        .selectFrom("accounting_days")
+        .select(["status"])
+        .where("period_id", "=", augPeriodId)
+        .where("day_no", "=", 1)
+        .executeTakeFirstOrThrow();
+      assert(d1Aug.status === "open", "August Day 1 is OPEN");
+    }
+
+    // -------------------------------------------------------------------------
+    // 18. Sequential Day Progression & Concurrency Invariants (Phase 13)
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 18: Sequential Day Progression & Concurrency Invariants (Phase 13)");
+    {
+      // A. Attempting to open Day 3 while Day 1 is open -> rejected
+      const rSkipOpen = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/3/open`, "period-admin");
+      assert(rSkipOpen.status === 409 || rSkipOpen.status === 400, "Opening Day 3 skipping Day 2 is rejected (409/400)");
+
+      // B. Attempting to open Day 2 while Day 1 is still open -> rejected
+      const rOpenD2WhileD1Open = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/2/open`, "period-admin");
+      assert(rOpenD2WhileD1Open.status === 409 || rOpenD2WhileD1Open.status === 422, "Opening Day 2 while Day 1 is OPEN is rejected (409/422)", rOpenD2WhileD1Open.status);
+
+      // C. Close Day 1
+      const rCloseD1 = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/1/close`, "period-admin", {
+        notes: "End of Day 1 operations"
+      });
+      assert(rCloseD1.status === 200, "August Day 1 successfully closed (200 OK)", rCloseD1.status);
+      assert(rCloseD1.body?.day?.status === "closed", "Returned Day 1 status is closed");
+
+      // D. Attempt to close Day 1 again -> idempotent / already closed
+      const rCloseD1Again = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/1/close`, "period-admin");
+      assert(rCloseD1Again.status === 200 || rCloseD1Again.status === 409, "Closing already-closed Day 1 is handled gracefully (200/409)");
+
+      // E. Open Day 2 (Day 1 is closed) -> succeeds
+      const rOpenD2 = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/2/open`, "period-admin");
+      assert(rOpenD2.status === 200, "August Day 2 opened sequentially (200 OK)", rOpenD2.status);
+      assert(rOpenD2.body?.day?.status === "open", "Returned Day 2 status is open");
+
+      // F. Attempt to reopen Day 1 while Day 2 is OPEN -> rejected (violates single open day)
+      const rReopenD1Conflict = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/1/reopen`, "period-owner", {
+        reason: "Correction conflict test"
+      });
+      assert(rReopenD1Conflict.status === 409, "Reopening Day 1 while Day 2 is open rejected (409 MULTIPLE_OPEN_DAYS)");
+
+      // G. Close Day 2, then reopen Day 1 -> succeeds
+      const rCloseD2 = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/2/close`, "period-admin");
+      assert(rCloseD2.status === 200, "Day 2 closed");
+
+      const rReopenD1 = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/1/reopen`, "period-owner", {
+        reason: "Governed correction of Day 1"
+      });
+      assert(rReopenD1.status === 200, "Day 1 reopened when no other day is open (200 OK)", rReopenD1.status);
+      assert(rReopenD1.body?.day?.status === "reopen", "Day 1 status is reopen");
+
+      // Close Day 1 again, and reopen Day 2
+      await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/1/close`, "period-admin");
+      const rReopenD2 = await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/2/open`, "period-admin");
+      assert(rReopenD2.status === 200, "Day 2 reopened");
+    }
+
+    // -------------------------------------------------------------------------
+    // 19. Server-Authoritative Period Close & Rollover (August -> September)
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 19: Server-Authoritative Period Close & Rollover (Phase 13)");
+    let rolledOverSepPeriodId = "";
+    {
+      // A. Attempting to close period while Day 2 is OPEN -> rejected
+      const rPrematureClose = await req(base, "POST", `/api/v1/periods/${augPeriodId}/close`, "period-owner");
+      assert(rPrematureClose.status === 422 || rPrematureClose.status === 409, "Closing period with open day rejected (422 PERIOD_HAS_OPEN_DAYS)", rPrematureClose.status);
+
+      // B. Attempting rollover while period is NOT closed -> rejected
+      const rPrematureRollover = await req(base, "POST", `/api/v1/periods/${augPeriodId}/rollover`, "period-owner");
+      assert(rPrematureRollover.status === 422 || rPrematureRollover.status === 409, "Rollover on unclosed period rejected (422 PERIOD_NOT_CLOSED)", rPrematureRollover.status);
+
+      // C. Close all days through Day 31
+      await req(base, "POST", `/api/v1/periods/${augPeriodId}/days/2/close`, "period-admin");
+      const openCount = await db
+        .selectFrom("accounting_days")
+        .select(db.fn.count("id").as("cnt"))
+        .where("period_id", "=", augPeriodId)
+        .where("status", "in", ["open", "reopen"])
+        .executeTakeFirstOrThrow();
+      assert(Number(openCount.cnt) === 0, "All 31 days in August are closed");
+
+      // D. Authoritative Period Close
+      const rClosePeriod = await req(base, "POST", `/api/v1/periods/${augPeriodId}/close`, "period-owner", {
+        notes: "August 2026 month-end authoritative close"
+      });
+      assert(rClosePeriod.status === 200, "August 2026 period closed successfully (200 OK)", rClosePeriod.status);
+      assert(rClosePeriod.body?.period?.status === "closed", "August period status is closed");
+      assert(rClosePeriod.body?.targetPeriod?.periodKey === "2026-09", "Atomic transition returned target period 2026-09");
+      assert(rClosePeriod.body?.targetDayNo === 1, "Atomic transition targeted Day 1");
+      assert(rClosePeriod.body?.activatedDay?.status === "open", "Atomic transition activated Day 1 as open");
+
+      // E. Rollover August -> September
+      const rRollover = await req(base, "POST", `/api/v1/periods/${augPeriodId}/rollover`, "period-owner", {
+        notes: "Rollover August to September 2026"
+      });
+      assert(rRollover.status === 200, "Rollover August -> September succeeded (200 OK)", rRollover.status);
+      assert(rRollover.body?.sourcePeriod?.periodKey === "2026-08", "Source period is 2026-08");
+      assert(rRollover.body?.targetPeriod?.periodKey === "2026-09", "Target period is 2026-09");
+      assert(rRollover.body?.targetPeriod?.daysCount === 30, "September target period has 30 days (dynamic calendar length)");
+      rolledOverSepPeriodId = rRollover.body?.targetPeriod?.id;
+
+      // Verify generated September opening seeds
+      const sepFinSeed = await db
+        .selectFrom("period_financial_seeds")
+        .selectAll()
+        .where("period_id", "=", rolledOverSepPeriodId)
+        .executeTakeFirstOrThrow();
+      assert(sepFinSeed.source_period_key === "2026-08", "September opening seed provenance source_period_key is 2026-08");
+      assert(sepFinSeed.source_day_no === 31, "September opening seed provenance source_day_no is 31 (from August 31)");
+      assert(Number(sepFinSeed.opening_cash) === 25000.00, "September opening cash matches August 31 closing snapshot: 25000.00", Number(sepFinSeed.opening_cash));
+
+      // F. Idempotency test: calling rollover again on August
+      const rRolloverRetry = await req(base, "POST", `/api/v1/periods/${augPeriodId}/rollover`, "period-owner");
+      assert(rRolloverRetry.status === 200, "Rollover retry is idempotent (200 OK)", rRolloverRetry.status);
+      assert(rRolloverRetry.body?.rolloverAlreadyComplete === true, "rolloverAlreadyComplete flag is true");
+      assert(rRolloverRetry.body?.targetPeriod?.id === rolledOverSepPeriodId, "Returns same target period ID");
+    }
+
+    // -------------------------------------------------------------------------
+    // 20. Governed Seed Delta & Seed Correction Workflow (Phase 13)
+    // -------------------------------------------------------------------------
+    console.log("\nGroup 20: Governed Seed Delta & Seed Correction Workflow (Phase 13)");
+    {
+      // A. Seed Delta endpoint
+      const rDelta = await req(base, "GET", `/api/v1/periods/${rolledOverSepPeriodId}/seed-delta`, "period-admin");
+      assert(rDelta.status === 200, "GET /seed-delta returns 200 OK", rDelta.status);
+      assert(rDelta.body?.targetPeriodKey === "2026-09", "Target period is 2026-09");
+      assert(rDelta.body?.sourcePeriodKey === "2026-08", "Source period is 2026-08");
+      assert(rDelta.body?.hasDelta === false, "Zero delta immediately after rollover");
+
+      // B. Viewer / Admin cannot apply seed correction (Owner only)
+      const rViewerCorr = await req(base, "POST", `/api/v1/periods/${rolledOverSepPeriodId}/seed-correction`, "period-viewer", {
+        reason: "Unauthorized attempt",
+        seeds: {}
+      });
+      assert(rViewerCorr.status === 403, "Viewer cannot apply seed correction (403)");
+
+      const rAdminCorr = await req(base, "POST", `/api/v1/periods/${rolledOverSepPeriodId}/seed-correction`, "period-admin", {
+        reason: "Unauthorized attempt",
+        seeds: {}
+      });
+      assert(rAdminCorr.status === 403, "Admin cannot apply seed correction (403)");
+
+      // C. Owner Governed Seed Correction
+      const correctedSeeds = {
+        reason: "Audited owner adjustment to opening cash after bank statement reconciliation",
+        seeds: {
+          financial: {
+            openingCash: 28000.00,
+            openingOwnerBalance: 12000.00,
+            openingJazzLifting: 35000.00,
+            openingJazzPayable: 18000.00,
+            sourcePeriodKey: "2026-08",
+            sourceDayNo: 31,
+            notes: "Corrected from 25000 to 28000"
+          },
+          creditParties: [
+            { partyId: data.party1Id, openingBalance: 5000.00, sourcePeriodKey: "2026-08", sourceDayNo: 31 }
+          ],
+          stockProducts: [
+            { productId: data.prod1Id, openingQuantity: 80, sourcePeriodKey: "2026-08", sourceDayNo: 31 },
+            { productId: data.prod2Id, openingQuantity: 0, sourcePeriodKey: "2026-08", sourceDayNo: 31 }
+          ],
+          stockAccounts: [
+            { accountId: data.acct1Id, openingReceivable: 4500.00, sourcePeriodKey: "2026-08", sourceDayNo: 31 }
+          ],
+          jazzDo: [
+            { doProfileId: data.do1Id, openingBaseBalance: 10000.00, sourcePeriodKey: "2026-08", sourceDayNo: 31 }
+          ]
+        }
+      };
+
+      const rOwnerCorr = await req(base, "POST", `/api/v1/periods/${rolledOverSepPeriodId}/seed-correction`, "period-owner", correctedSeeds);
+      assert(rOwnerCorr.status === 200, "Owner successfully applied seed correction (200 OK)", rOwnerCorr.status);
+      assert(rOwnerCorr.body?.correctionApplied === true, "correctionApplied is true");
+      assert(rOwnerCorr.body?.isVerified === false, "Verification reset to false upon seed correction");
+
+      // Verify updated seed in DB
+      const updatedFin = await db
+        .selectFrom("period_financial_seeds")
+        .selectAll()
+        .where("period_id", "=", rolledOverSepPeriodId)
+        .executeTakeFirstOrThrow();
+      assert(Number(updatedFin.opening_cash) === 28000.00, "Opening cash updated to 28000.00 in DB");
+      assert(updatedFin.is_verified === false, "is_verified reset to false in DB");
+
+      // Verify audit log
+      const corrAudit = await db
+        .selectFrom("audit_logs")
+        .selectAll()
+        .where("franchise_id", "=", data.f1Id)
+        .where("action", "=", "UPDATE")
+        .where("entity_type", "=", "period_seed_correction")
+        .execute();
+      assert(corrAudit.length > 0, "Audit log recorded for period_seed_correction");
     }
   } finally {
     server.close();

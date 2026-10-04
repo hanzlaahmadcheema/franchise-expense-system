@@ -69,12 +69,15 @@ export function resolveUniversalDayStatus(input: {
   day?: ReopenedDayState | null;
   nowMs?: number;
 }): UniversalDayStatus {
-  void input.exists;
   void input.future;
   void input.live;
-  if (input.day?.status === "reopen" || isActiveReopenWindow(input.day, input.nowMs)) return "reopen";
-  if (input.day?.status === "closed" || input.day?.lockedAt != null || input.day?.closedAt != null) return "closed";
-  return "open";
+  if (!input.exists || !input.day) {
+    return "closed";
+  }
+  if (input.day.status === "reopen" || isActiveReopenWindow(input.day, input.nowMs)) return "reopen";
+  if (input.day.status === "closed" || input.day.lockedAt != null || input.day.closedAt != null) return "closed";
+  if (input.day.status === "open") return "open";
+  return "closed";
 }
 
 export function buildDaySnapshot(input: {

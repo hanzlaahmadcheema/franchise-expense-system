@@ -19,7 +19,7 @@ function fallbackStatus(monthId: string, dayNo: number, now: Date): UniversalDay
   void monthId;
   void dayNo;
   void now;
-  return "open";
+  return "closed";
 }
 
 function statusDotClass(status: UniversalDayStatus) {
@@ -105,18 +105,40 @@ export function UniversalCalendar({
           );
         })}
       </div>
-      {showFinal && (
-        <div className={`${mini ? "mt-2" : "mt-4"} flex justify-end`}>
-          <button
-            type="button"
-            className={`${selectedDay === 32 ? "btn-chip btn-chip-active" : "btn-chip"} ${mini ? "!h-8 text-[10px]" : ""}`}
-            disabled={disabled || !canSelectFinal || daysInMonth(monthId) < 1}
-            onClick={() => onSelect(32)}
-          >
-            {getFinalLabel()}
-          </button>
-        </div>
-      )}
+      {showFinal && (() => {
+        const finalSnapshot = dayByNo.get(32);
+        const finalStatus: UniversalDayStatus = finalSnapshot?.status ?? "closed";
+        const selected = selectedDay === 32;
+        const label = statusLabel(finalStatus);
+        return (
+          <div className={`${mini ? "mt-2" : "mt-4"} flex justify-end`}>
+            <button
+              type="button"
+              className={[
+                mini
+                  ? "min-h-8 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[10px]"
+                  : "min-h-9 inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs",
+                "font-semibold transition",
+                selected ? selectedCellClass(finalStatus) : unselectedCellClass(finalStatus),
+                disabled || !canSelectFinal || daysInMonth(monthId) < 1 ? "cursor-not-allowed opacity-60" : ""
+              ].join(" ")}
+              disabled={disabled || !canSelectFinal || daysInMonth(monthId) < 1}
+              onClick={() => onSelect(32)}
+              title={finalSnapshot?.disabledReason ?? `FINAL Month-End Closing Snapshot - ${label}`}
+            >
+              <span>{getFinalLabel()}</span>
+              {mini ? (
+                <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(finalStatus)}`} aria-label={label} />
+              ) : (
+                <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${statusChipClass(finalStatus)}`}>
+                  {label}
+                </span>
+              )}
+              {selected && !mini && <span className="text-[9px] uppercase tracking-wide text-slate-400">Selected</span>}
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
