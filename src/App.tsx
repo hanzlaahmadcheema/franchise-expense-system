@@ -1700,6 +1700,7 @@ function App() {
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
   const [periodFinalSettlementStatus, setPeriodFinalSettlementStatus] = useState<string | null>(null);
   const [monthClosing, setMonthClosing] = useState(false);
+  const [initializingNextPeriod, setInitializingNextPeriod] = useState(false);
   const [monthCloseModal, setMonthCloseModal] = useState<{
     isOpen: boolean;
     step: "prompt" | "success";
@@ -2997,6 +2998,49 @@ function App() {
     void loadMonth(nextPeriodKey, { targetDay: 1 });
   }
 
+  async function handleInitializeNextPeriod(sourceMonthKey?: string) {
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Initializing accounting periods is restricted to owner access.");
+      return;
+    }
+
+    const sourceKey = sourceMonthKey || (isPeriodUninitialized ? "2026-08" : monthId);
+    const targetKey = getNextPeriodKey(sourceKey).nextPeriodKey;
+
+    setInitializingNextPeriod(true);
+    setLoadingMessage(`Initializing ${formatMonth(targetKey)} from ${formatMonth(sourceKey)} FINAL...`);
+    setLoading(true);
+
+    try {
+      const sourcePeriodData = await getAccountingPeriodWithDays(sourceKey);
+      if (!sourcePeriodData) {
+        throw new Error(`Cannot initialize: Source period ${sourceKey} not found in PostgreSQL.`);
+      }
+
+      const initRes = await ledgerApiClient.periods.initializeNextPeriod(sourcePeriodData.period.id);
+
+      // Clear old period cache before loading the new period
+      clearPeriodCache();
+
+      const targetPeriodKey = initRes.targetPeriod?.periodKey || targetKey;
+      registerPostgreSqlPeriod(targetPeriodKey);
+      registerInitializedPeriod(targetPeriodKey);
+
+      await refreshMonthList();
+      await getAccountingPeriodWithDays(targetPeriodKey, true);
+
+      setStatus(`Accounting period ${formatMonth(targetPeriodKey)} initialized successfully. Day 1 is OPEN.`);
+      await loadMonth(targetPeriodKey, { targetDay: 1 });
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : (err?.message || "Failed to initialize next period.");
+      setStatus(`Cannot initialize period: ${errorMsg}`);
+      alert(`Cannot initialize period: ${errorMsg}`);
+    } finally {
+      setInitializingNextPeriod(false);
+      setLoading(false);
+    }
+  }
+
   async function toggleClosed() {
     if (isPostgreSqlPeriod(monthId)) {
       if (!roleCan(role, "ownerControls")) {
@@ -3006,7 +3050,13 @@ function App() {
       if (monthStatus === "open") {
         await handleGuidedCloseMonth();
       } else {
-        setStatus("Reopening a closed PostgreSQL period requires governed correction/rollover workflows.");
+        const { nextPeriodKey } = getNextPeriodKey(monthId);
+        const nextPeriodUninitialized = !months.some((m) => m.id === nextPeriodKey);
+        if (nextPeriodUninitialized) {
+          await handleInitializeNextPeriod(monthId);
+        } else {
+          setStatus("Reopening a closed PostgreSQL period requires governed correction/rollover workflows.");
+        }
       }
       return;
     }
@@ -3287,11 +3337,21 @@ function App() {
   const canToggleCurrentMonth = roleCan(role, "ownerControls") && canAccessView(role, "expense") && !isPeriodUninitialized;
   const currentMonthStatus = months.find((month) => month.id === monthId)?.status ?? (isPeriodUninitialized ? "uninitialized" : monthStatus);
   const finalDayEntry = days.find((d) => d.dayNo === 32);
-  const isFinalClosed = finalDayEntry?.status === "closed" || periodFinalSettlementStatus === "VERIFIED";
+  const isFinalClosed = finalDayEntry?.status === "closed" || periodFinalSettlementStatus === "VERIFIED" || periodFinalSettlementStatus === "CLOSED";
   const isMonthCloseRequired = isPostgreSqlPeriod(monthId) && isFinalClosed && currentMonthStatus === "open";
+  const { nextPeriodKey } = getNextPeriodKey(monthId);
+  const isNextPeriodUninitialized =
+    isPostgreSqlPeriod(monthId) &&
+    currentMonthStatus === "closed" &&
+    isFinalClosed &&
+    !months.some((m) => m.id === nextPeriodKey);
   const isMonthCloseAction = currentMonthStatus === "open";
   const handleMonthToggle = view === "jazz-load" ? toggleJazzLoadClosed : toggleClosed;
-  const monthToggleLabel = isMonthCloseAction ? "Close Month" : "Reopen Month";
+  const monthToggleLabel = isMonthCloseAction
+    ? "Close Month"
+    : isNextPeriodUninitialized
+    ? `Initialize ${formatMonth(nextPeriodKey)}`
+    : "Reopen Month";
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
@@ -4019,16 +4079,66 @@ function App() {
               </div>
             </div>
           )}
+          {isNextPeriodUninitialized && (
+            <div
+              data-testid="initialize-next-period-banner"
+              className="mb-4 rounded-xl border border-blue-500/40 bg-blue-500/10 p-4 text-blue-100 shadow-lg shadow-black/20"
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
+                  <div>
+                    <h3 className="font-semibold text-blue-300">{formatMonth(nextPeriodKey)} is not initialized</h3>
+                    <p className="mt-0.5 text-sm text-blue-200/90">
+                      {formatMonth(nextPeriodKey)} will be initialized from {formatMonth(monthId)} FINAL closing balances and Day 1 will be opened.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  data-testid="btn-initialize-next-period"
+                  className="btn-primary shrink-0 self-start sm:self-center"
+                  disabled={loading || initializingNextPeriod}
+                  onClick={() => void handleInitializeNextPeriod(monthId)}
+                >
+                  {initializingNextPeriod && <LoadingIcon label="Initializing..." />}
+                  Initialize &amp; Open {formatMonth(nextPeriodKey)} Day 1
+                </button>
+              </div>
+            </div>
+          )}
           {showOfflineOwnerWarning && <p className="warning">Owner will see updates after this machine reconnects.</p>}
           {isPeriodUninitialized && (
-            <div className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-amber-200">
-              <div className="flex items-center gap-2 font-semibold text-amber-300">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
-                <span>Period not initialized</span>
+            <div
+              data-testid="period-uninitialized-banner"
+              className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-200"
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+                  <div>
+                    <h3 className="font-semibold text-amber-300">{formatMonth(monthId)} is not initialized</h3>
+                    <p className="mt-0.5 text-sm text-amber-200/90">
+                      Accounting period {formatMonth(monthId)} has not been initialized in the PostgreSQL authoritative ledger.
+                      {(monthId === "2026-09" || months.find((m) => m.id === "2026-08")?.status === "closed") && (
+                        <span> It will be initialized from {formatMonth("2026-08")} FINAL closing balances and Day 1 will be opened.</span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+                {(monthId === "2026-09" || months.find((m) => m.id === "2026-08")?.status === "closed") && (
+                  <button
+                    type="button"
+                    data-testid="btn-initialize-uninitialized-period"
+                    className="btn-primary shrink-0 self-start sm:self-center"
+                    disabled={loading || initializingNextPeriod}
+                    onClick={() => void handleInitializeNextPeriod("2026-08")}
+                  >
+                    {initializingNextPeriod && <LoadingIcon label="Initializing..." />}
+                    Initialize &amp; Open {formatMonth(monthId)} Day 1
+                  </button>
+                )}
               </div>
-              <p className="mt-1 text-sm text-amber-200/90">
-                Accounting period {formatMonth(monthId)} has not been initialized in the PostgreSQL authoritative ledger.
-              </p>
             </div>
           )}
           {isPostgreSqlPeriod(monthId) && pgPeriodRouting.checked && (pgPeriodRouting.status === "AUTH_REQUIRED" || pgPeriodRouting.status === "UNAUTHORIZED") && (

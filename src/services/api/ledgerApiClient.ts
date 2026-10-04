@@ -769,6 +769,20 @@ export const ledgerApiClient = {
           body: JSON.stringify({ notes: notes ?? null })
         }
       ),
+    initializeNextPeriod: (periodId: string) =>
+      apiRequest<{
+        initialized: boolean;
+        alreadyInitialized?: boolean;
+        sourcePeriod: { id: string; periodKey: string; status: string };
+        targetPeriod: { id: string; periodKey: string; status: string; daysCount: number };
+        targetDayNo: number;
+        activatedDay: { id: string; dayNo: number; status: string; calendarDate?: string };
+      }>(
+        `/api/v1/periods/${periodId}/initialize-next`,
+        {
+          method: "POST"
+        }
+      ),
     rollover: (periodId: string, notes?: string | null) =>
       apiRequest<{
         message: string;

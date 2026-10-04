@@ -736,10 +736,22 @@ export async function validateSeeds(
       if (seed.opening_quantity !== null && seed.opening_quantity !== undefined) {
         errors.push(`Stock product seed for '${prod.name}' is marked SKIPPED but has non-null opening quantity (${seed.opening_quantity}).`);
       }
-    } else if (seed.opening_quantity === null || seed.opening_quantity === undefined) {
+    } else if (
+      seed.opening_quantity === null ||
+      seed.opening_quantity === undefined ||
+      (typeof seed.opening_quantity === "string" && (seed.opening_quantity as string).trim() === "")
+    ) {
       errors.push(`Stock product seed for '${prod.name}' has null opening quantity but is not marked SKIPPED.`);
-    } else if (seed.opening_quantity < 0) {
-      errors.push(`Stock product seed for '${prod.name}' has invalid negative quantity (${seed.opening_quantity}).`);
+    } else if (
+      isNaN(Number(seed.opening_quantity)) ||
+      !Number.isFinite(Number(seed.opening_quantity)) ||
+      !Number.isInteger(Number(seed.opening_quantity))
+    ) {
+      errors.push(`Stock product seed for '${prod.name}' has invalid numeric quantity (${seed.opening_quantity}).`);
+    } else if (Number(seed.opening_quantity) < 0) {
+      warnings.push(
+        `Stock product seed for '${prod.name}' has negative opening quantity (${seed.opening_quantity}). Carried forward from day projections.`
+      );
     }
   }
 
@@ -1764,6 +1776,237 @@ export async function verifyPeriodFinalSettlement(
 }
 
 /**
+ * 10.5 Governed recovery operation: initialize successor period from an already-closed period.
+ * When source period is closed and FINAL is verified/closed, but next period is absent,
+ * atomically rolls over FINAL seedBundle (including legitimate negative stock quantities),
+ * provisions 30 calendar days (Days 2..30 closed), verifies seeds, and activates Day 1.
+ * Idempotent: returns existing state if already initialized with Day 1 open.
+ * Detects and safely reports inconsistent states.
+ */
+export async function initializeNextPeriodFromClosedPeriod(
+  franchiseId: string,
+  sourcePeriodId: string,
+  user: PeriodServiceUser,
+  clientMutationId?: string,
+  customTrx?: Transaction<Database>
+) {
+  const payloadHash = computePayloadHash({ sourcePeriodId, action: "initializeNextPeriodFromClosedPeriod" });
+
+  if (clientMutationId && !customTrx) {
+    const idemp = await checkIdempotency(db, franchiseId, clientMutationId, payloadHash);
+    if (idemp.isDuplicate) {
+      return idemp.body as any;
+    }
+  }
+
+  const runInTrx = async (trx: Transaction<Database>) => {
+    // 1. Fetch & lock source period
+    const sourcePeriod = await trx
+      .selectFrom("accounting_periods")
+      .selectAll()
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", sourcePeriodId)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!sourcePeriod) {
+      throw new PeriodNotFoundError(sourcePeriodId);
+    }
+
+    // 1. Validates source period is genuinely closed
+    if (sourcePeriod.status !== "closed") {
+      throw new PeriodNotClosedError(sourcePeriod.period_key, {
+        reason: `Source period '${sourcePeriod.period_key}' is not closed (status is '${sourcePeriod.status}'). Only a closed period can initialize the next period.`
+      });
+    }
+
+    // 2. Validates source period FINAL is CLOSED/verified/resolved
+    if (sourcePeriod.final_settlement_status !== "CLOSED" && sourcePeriod.final_settlement_status !== "VERIFIED") {
+      throw new PeriodNotReadyError(
+        `Source period '${sourcePeriod.period_key}' FINAL settlement status is '${sourcePeriod.final_settlement_status}'. It must be CLOSED or VERIFIED before initializing next period.`
+      );
+    }
+
+    const { nextPeriodKey, daysInNextMonth } = getNextPeriodKey(sourcePeriod.period_key);
+
+    // Check if next period already exists
+    const existingNextPeriod = await trx
+      .selectFrom("accounting_periods")
+      .selectAll()
+      .where("franchise_id", "=", franchiseId)
+      .where("period_key", "=", nextPeriodKey)
+      .executeTakeFirst();
+
+    if (existingNextPeriod) {
+      const existingDays = await trx
+        .selectFrom("accounting_days")
+        .selectAll()
+        .where("franchise_id", "=", franchiseId)
+        .where("period_id", "=", existingNextPeriod.id)
+        .orderBy("day_no", "asc")
+        .execute();
+
+      const day1 = existingDays.find((d) => d.day_no === 1);
+
+      // Idempotency: if already completely initialized and Day 1 is open
+      if (day1 && day1.status === "open") {
+        const idempResult = {
+          initialized: true,
+          alreadyInitialized: true,
+          sourcePeriod: {
+            id: sourcePeriod.id,
+            periodKey: sourcePeriod.period_key,
+            status: sourcePeriod.status
+          },
+          targetPeriod: {
+            id: existingNextPeriod.id,
+            periodKey: existingNextPeriod.period_key,
+            status: existingNextPeriod.status,
+            daysCount: existingDays.length || daysInNextMonth
+          },
+          targetDayNo: 1,
+          activatedDay: {
+            id: day1.id,
+            dayNo: 1,
+            status: day1.status,
+            calendarDate: day1.calendar_date
+          }
+        };
+
+        if (clientMutationId && !customTrx) {
+          await saveIdempotencyRecord(trx, {
+            franchiseId,
+            clientMutationId,
+            userId: user.id,
+            endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
+            payloadHash,
+            responseStatus: 200,
+            responseBody: idempResult
+          });
+        }
+
+        return idempResult;
+      }
+
+      // If seeds are already verified in existingNextPeriod, activate Day 1 directly
+      const existingFinSeed = await trx
+        .selectFrom("period_financial_seeds")
+        .selectAll()
+        .where("franchise_id", "=", franchiseId)
+        .where("period_id", "=", existingNextPeriod.id)
+        .executeTakeFirst();
+
+      if (existingFinSeed && existingFinSeed.is_verified) {
+        const actRes = await activatePeriod(franchiseId, existingNextPeriod.id, user, trx);
+        const res = {
+          initialized: true,
+          alreadyInitialized: false,
+          sourcePeriod: {
+            id: sourcePeriod.id,
+            periodKey: sourcePeriod.period_key,
+            status: sourcePeriod.status
+          },
+          targetPeriod: {
+            id: existingNextPeriod.id,
+            periodKey: existingNextPeriod.period_key,
+            status: existingNextPeriod.status,
+            daysCount: existingDays.length || daysInNextMonth
+          },
+          targetDayNo: 1,
+          activatedDay: actRes.day1
+        };
+
+        if (clientMutationId && !customTrx) {
+          await saveIdempotencyRecord(trx, {
+            franchiseId,
+            clientMutationId,
+            userId: user.id,
+            endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
+            payloadHash,
+            responseStatus: 200,
+            responseBody: res
+          });
+        }
+
+        return res;
+      }
+    }
+
+    // 3. Derives next period exclusively from August FINAL seedBundle
+    // 4. Creates September period
+    // 5. Creates its 30 accounting days (all closed)
+    // 6. Creates all required September seed rows
+    // 7. Preserves provenance (source_period_key = '2026-08', source_day_no = 31)
+    const rollRes = await rolloverPeriod(franchiseId, sourcePeriod.id, user, undefined, trx);
+
+    // 8. Verifies September seeds (atomic baseline calculation & identity verification)
+    await verifySeeds(franchiseId, rollRes.targetPeriod.id, user, trx);
+
+    // 9-10. Activates September Day 1 (Day 1 -> open, Days 2..30 remain closed)
+    const actRes = await activatePeriod(franchiseId, rollRes.targetPeriod.id, user, trx);
+
+    // 11. Record lifecycle transition audit log
+    await recordAuditLog(trx, {
+      franchiseId,
+      userId: user.id,
+      userEmail: user.email,
+      action: "UPDATE",
+      entityType: "period_lifecycle_transition",
+      entityId: sourcePeriod.id,
+      afterState: {
+        fromPeriod: sourcePeriod.period_key,
+        toPeriod: rollRes.targetPeriod.periodKey,
+        transition: "CLOSED_PERIOD_RECOVERY_INITIALIZATION",
+        activatedDay: actRes.day1?.dayNo,
+        timestamp: new Date().toISOString()
+      }
+    });
+
+    const successResult = {
+      initialized: true,
+      alreadyInitialized: false,
+      sourcePeriod: {
+        id: sourcePeriod.id,
+        periodKey: sourcePeriod.period_key,
+        status: sourcePeriod.status
+      },
+      targetPeriod: {
+        id: rollRes.targetPeriod.id,
+        periodKey: rollRes.targetPeriod.periodKey,
+        status: "open",
+        daysCount: daysInNextMonth
+      },
+      targetDayNo: 1,
+      activatedDay: {
+        id: actRes.day1.id,
+        dayNo: actRes.day1.dayNo,
+        status: actRes.day1.status,
+        calendarDate: actRes.day1.calendarDate
+      }
+    };
+
+    if (clientMutationId && !customTrx) {
+      await saveIdempotencyRecord(trx, {
+        franchiseId,
+        clientMutationId,
+        userId: user.id,
+        endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
+        payloadHash,
+        responseStatus: 200,
+        responseBody: successResult
+      });
+    }
+
+    return successResult;
+  };
+
+  if (customTrx) {
+    return await runInTrx(customTrx);
+  }
+  return await db.transaction().execute(runInTrx);
+}
+
+/**
  * 11. Close an Accounting Period (Owner Only).
  * Requires all days in the period to be closed, FINAL to be VERIFIED, and zero unresolved critical invariant violations.
  */
@@ -1797,189 +2040,129 @@ export async function closeAccountingPeriod(
       throw new PeriodNotFoundError(periodId);
     }
 
-    const { nextPeriodKey, daysInNextMonth } = getNextPeriodKey(period.period_key);
-
-    // Idempotency check: if period is already closed, check if next period is already active
+    // Idempotency / closed source check: delegate to initializeNextPeriodFromClosedPeriod
     if (period.status === "closed") {
-      const existingNextPeriod = await trx
-        .selectFrom("accounting_periods")
-        .selectAll()
-        .where("franchise_id", "=", franchiseId)
-        .where("period_key", "=", nextPeriodKey)
-        .executeTakeFirst();
-
-      if (existingNextPeriod) {
-        const day1 = await trx
-          .selectFrom("accounting_days")
-          .selectAll()
-          .where("franchise_id", "=", franchiseId)
-          .where("period_id", "=", existingNextPeriod.id)
-          .where("day_no", "=", 1)
-          .executeTakeFirst();
-
-        if (day1 && day1.status === "open") {
-          return {
-            closed: true,
-            alreadyClosed: true,
-            periodId: period.id,
-            periodKey: period.period_key,
-            status: "closed",
-            period: {
-              id: period.id,
-              periodKey: period.period_key,
-              status: "closed"
-            },
-            closedAt: period.closed_at ? new Date(period.closed_at).toISOString() : new Date().toISOString(),
-            targetPeriod: {
-              id: existingNextPeriod.id,
-              periodKey: existingNextPeriod.period_key,
-              daysCount: daysInNextMonth
-            },
-            targetDayNo: 1,
-            activatedDay: {
-              id: day1.id,
-              dayNo: 1,
-              status: day1.status,
-              calendarDate: day1.calendar_date
-            }
-          };
-        }
-      }
-      // If next period is not yet initialized or Day 1 is not yet open, proceed to complete rollover & activation!
-    } else {
-      // 1. Assert all days are closed
-      const unclosedDays = await trx
-        .selectFrom("accounting_days")
-        .select(["day_no", "status"])
-        .where("franchise_id", "=", franchiseId)
-        .where("period_id", "=", periodId)
-        .where("status", "!=", "closed")
-        .execute();
-
-      if (unclosedDays.length > 0) {
-        throw new PeriodHasOpenDaysError(unclosedDays.length, {
-          unclosedDayNumbers: unclosedDays.map((d) => d.day_no)
-        });
-      }
-
-      // 2. Assert zero unresolved critical invariant violations
-      const violations = await trx
-        .selectFrom("invariant_violations")
-        .selectAll()
-        .where("franchise_id", "=", franchiseId)
-        .where("period_id", "=", periodId)
-        .where("severity", "=", "critical")
-        .execute();
-
-      if (violations.length > 0) {
-        throw new PeriodNotReadyError(
-          `Cannot close period '${period.period_key}' with ${violations.length} unresolved critical invariant violation(s).`
-        );
-      }
-
-      // 3. Assert Month-End FINAL Settlement is VERIFIED or all pending commission/settlement obligations resolved
-      if (period.final_settlement_status !== "VERIFIED") {
-        const finalClosing = await getPeriodFinalProjectionsInternal(trx, franchiseId, period.id);
-        if (!finalClosing) {
-          throw new PeriodNotReadyError(`Cannot close period '${period.period_key}': Projections could not be loaded.`);
-        }
-
-        const commReceivable = Number(finalClosing.commissionSettlement?.outstandingCommissionReceivable ?? 0);
-        if (commReceivable > 0) {
-          throw new PeriodNotReadyError(
-            `Cannot close period '${period.period_key}': Outstanding commission receivable of ${commReceivable} remains unsettled. Settle commission or verify FINAL first.`
-          );
-        }
-
-        const closingCash = Number(finalClosing.closingBalances.financial.closingCash);
-        if (closingCash < 0) {
-          throw new PeriodNotReadyError(
-            `Cannot close period '${period.period_key}': Closing cash is negative (${closingCash}). Record a cash settlement on FINAL or verify FINAL first.`
-          );
-        }
-
-        if (finalClosing.finalSettlements.entries.length > 0 && !finalClosing.finalSettlements.allResolved) {
-          throw new PeriodNotReadyError(
-            `Cannot close period '${period.period_key}': Active settlement entries exist but remaining balances are not fully resolved. Verify FINAL first.`
-          );
-        }
-      }
-
-      // 4. Update period status to closed
-      await trx
-        .updateTable("accounting_periods")
-        .set({
-          status: "closed",
-          final_settlement_status: "CLOSED",
-          closed_at: sql`clock_timestamp()`,
-          closed_by_user_id: user.id,
-          updated_at: sql`clock_timestamp()`
-        })
-        .where("id", "=", period.id)
-        .execute();
-
-      // Record audit log for period close
-      await recordAuditLog(trx, {
+      const recoveryResult = await initializeNextPeriodFromClosedPeriod(
         franchiseId,
-        userId: user.id,
-        userEmail: user.email,
-        action: "UPDATE",
-        entityType: "accounting_period",
-        entityId: period.id,
-        afterState: {
+        period.id,
+        user,
+        clientMutationId,
+        trx
+      );
+      return {
+        closed: true,
+        alreadyClosed: true,
+        periodId: period.id,
+        periodKey: period.period_key,
+        status: "closed",
+        period: {
+          id: period.id,
           periodKey: period.period_key,
-          status: "closed",
-          closedAt: new Date().toISOString(),
-          closedBy: user.email,
-          notes
-        }
+          status: "closed"
+        },
+        closedAt: period.closed_at ? new Date(period.closed_at).toISOString() : new Date().toISOString(),
+        targetPeriod: recoveryResult.targetPeriod,
+        targetDayNo: recoveryResult.targetDayNo,
+        activatedDay: recoveryResult.activatedDay
+      };
+    }
+
+    // 1. Assert all days are closed
+    const unclosedDays = await trx
+      .selectFrom("accounting_days")
+      .select(["day_no", "status"])
+      .where("franchise_id", "=", franchiseId)
+      .where("period_id", "=", periodId)
+      .where("status", "!=", "closed")
+      .execute();
+
+    if (unclosedDays.length > 0) {
+      throw new PeriodHasOpenDaysError(unclosedDays.length, {
+        unclosedDayNumbers: unclosedDays.map((d) => d.day_no)
       });
     }
 
-    // 5. ATOMIC TRANSITION: Rollover -> Seed Verification -> Day 1 Activation
-    // 5.1 Execute rolloverPeriod within the same atomic transaction
-    const rollRes = await rolloverPeriod(franchiseId, period.id, user, undefined, trx);
-
-    // Check if target period is already verified or active
-    const targetFinSeed = await trx
-      .selectFrom("period_financial_seeds")
+    // 2. Assert zero unresolved critical invariant violations
+    const violations = await trx
+      .selectFrom("invariant_violations")
       .selectAll()
       .where("franchise_id", "=", franchiseId)
-      .where("period_id", "=", rollRes.targetPeriod.id)
-      .executeTakeFirst();
+      .where("period_id", "=", periodId)
+      .where("severity", "=", "critical")
+      .execute();
 
-    const targetDay1 = await trx
-      .selectFrom("accounting_days")
-      .selectAll()
-      .where("franchise_id", "=", franchiseId)
-      .where("period_id", "=", rollRes.targetPeriod.id)
-      .where("day_no", "=", 1)
-      .executeTakeFirst();
-
-    // 5.2 Execute verifySeeds for target period if not already verified
-    if (!targetFinSeed?.is_verified && targetDay1?.status !== "open") {
-      await verifySeeds(franchiseId, rollRes.targetPeriod.id, user, trx);
+    if (violations.length > 0) {
+      throw new PeriodNotReadyError(
+        `Cannot close period '${period.period_key}' with ${violations.length} unresolved critical invariant violation(s).`
+      );
     }
 
-    // 5.3 Execute activatePeriod for target period within the same atomic transaction
-    const actRes = await activatePeriod(franchiseId, rollRes.targetPeriod.id, user, trx);
+    // 3. Assert Month-End FINAL Settlement is VERIFIED or all pending commission/settlement obligations resolved
+    if (period.final_settlement_status !== "VERIFIED") {
+      const finalClosing = await getPeriodFinalProjectionsInternal(trx, franchiseId, period.id);
+      if (!finalClosing) {
+        throw new PeriodNotReadyError(`Cannot close period '${period.period_key}': Projections could not be loaded.`);
+      }
 
-    // 5.4 Record governance lifecycle transition audit log
+      const commReceivable = Number(finalClosing.commissionSettlement?.outstandingCommissionReceivable ?? 0);
+      if (commReceivable > 0) {
+        throw new PeriodNotReadyError(
+          `Cannot close period '${period.period_key}': Outstanding commission receivable of ${commReceivable} remains unsettled. Settle commission or verify FINAL first.`
+        );
+      }
+
+      const closingCash = Number(finalClosing.closingBalances.financial.closingCash);
+      if (closingCash < 0) {
+        throw new PeriodNotReadyError(
+          `Cannot close period '${period.period_key}': Closing cash is negative (${closingCash}). Record a cash settlement on FINAL or verify FINAL first.`
+        );
+      }
+
+      if (finalClosing.finalSettlements.entries.length > 0 && !finalClosing.finalSettlements.allResolved) {
+        throw new PeriodNotReadyError(
+          `Cannot close period '${period.period_key}': Active settlement entries exist but remaining balances are not fully resolved. Verify FINAL first.`
+        );
+      }
+    }
+
+    // 4. Update period status to closed
+    await trx
+      .updateTable("accounting_periods")
+      .set({
+        status: "closed",
+        final_settlement_status: "CLOSED",
+        closed_at: sql`clock_timestamp()`,
+        closed_by_user_id: user.id,
+        updated_at: sql`clock_timestamp()`
+      })
+      .where("id", "=", period.id)
+      .execute();
+
+    // Record audit log for period close
     await recordAuditLog(trx, {
       franchiseId,
       userId: user.id,
       userEmail: user.email,
       action: "UPDATE",
-      entityType: "period_lifecycle_transition",
+      entityType: "accounting_period",
       entityId: period.id,
       afterState: {
-        fromPeriod: period.period_key,
-        toPeriod: rollRes.targetPeriod.periodKey,
-        transition: "MONTH_CLOSE_AUTO_ROLLOVER_ACTIVATION",
-        activatedDay: actRes.day1?.dayNo,
-        timestamp: new Date().toISOString()
+        periodKey: period.period_key,
+        status: "closed",
+        closedAt: new Date().toISOString(),
+        closedBy: user.email,
+        notes
       }
     });
+
+    // 5. ATOMIC TRANSITION: Initialize and activate next period from now-closed period
+    const recoveryResult = await initializeNextPeriodFromClosedPeriod(
+      franchiseId,
+      period.id,
+      user,
+      undefined,
+      trx
+    );
 
     const result = {
       closed: true,
@@ -1991,24 +2174,10 @@ export async function closeAccountingPeriod(
         periodKey: period.period_key,
         status: "closed"
       },
-      closedAt: period.closed_at ? new Date(period.closed_at).toISOString() : new Date().toISOString(),
-      targetPeriod: {
-        id: rollRes.targetPeriod.id,
-        periodKey: rollRes.targetPeriod.periodKey,
-        daysCount: rollRes.targetPeriod.daysCount
-      },
-      targetDayNo: 1,
-      activatedDay: actRes.day1 ? {
-        id: actRes.day1.id,
-        dayNo: actRes.day1.dayNo,
-        status: actRes.day1.status,
-        calendarDate: actRes.day1.calendarDate
-      } : {
-        id: "",
-        dayNo: 1,
-        status: "open" as const,
-        calendarDate: ""
-      }
+      closedAt: new Date().toISOString(),
+      targetPeriod: recoveryResult.targetPeriod,
+      targetDayNo: recoveryResult.targetDayNo,
+      activatedDay: recoveryResult.activatedDay
     };
 
     if (clientMutationId && !customTrx) {

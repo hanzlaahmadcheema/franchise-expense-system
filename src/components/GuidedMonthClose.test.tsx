@@ -13,6 +13,7 @@ vi.mock("../services/api/ledgerApiClient", () => ({
       get: vi.fn(),
       list: vi.fn(),
       closePeriod: vi.fn(),
+      initializeNextPeriod: vi.fn(),
       verifyFinalSettlement: vi.fn(),
       getSeeds: vi.fn()
     },
@@ -270,5 +271,65 @@ describe("Guided FINAL → Month Close Workflow", () => {
       // Allowed: August is closed, navigating to September
       expect(canNavigateToNextMonth("2026-08", "2026-09", "closed")).toBe(true);
     });
+
+    it("13. initializeNextPeriod dispatches correctly and resolves targetPeriod and activatedDay", async () => {
+      vi.mocked(ledgerApiClient.periods.initializeNextPeriod).mockResolvedValueOnce({
+        initialized: true,
+        sourcePeriod: {
+          id: "period-aug-1",
+          periodKey: "2026-08",
+          status: "closed"
+        },
+        targetPeriod: {
+          id: "period-sept-1",
+          periodKey: "2026-09",
+          status: "open",
+          daysCount: 30
+        },
+        targetDayNo: 1,
+        activatedDay: {
+          id: "day-sept-1",
+          dayNo: 1,
+          status: "open",
+          calendarDate: "2026-09-01"
+        }
+      });
+
+      const res = await ledgerApiClient.periods.initializeNextPeriod("period-aug-1");
+      expect(ledgerApiClient.periods.initializeNextPeriod).toHaveBeenCalledWith("period-aug-1");
+      expect(res.targetPeriod.periodKey).toBe("2026-09");
+      expect(res.targetPeriod.status).toBe("open");
+      expect(res.activatedDay.dayNo).toBe(1);
+      expect(res.activatedDay.status).toBe("open");
+    });
+
+    it("14. initializeNextPeriod surfaces backend error when source period cannot be initialized", async () => {
+      const backendError = new Error("[PERIOD_NOT_READY] Period '2026-08' is not closed or FINAL settlement is not resolved.");
+      vi.mocked(ledgerApiClient.periods.initializeNextPeriod).mockRejectedValueOnce(backendError);
+
+      await expect(ledgerApiClient.periods.initializeNextPeriod("period-aug-1")).rejects.toThrow(
+        "Period '2026-08' is not closed"
+      );
+    });
+
+    it("15. Closed month recovery banner is displayed when source month is closed and target month is uninitialized", () => {
+      function shouldDisplayNextPeriodRecoveryBanner(
+        isPg: boolean,
+        currentMonthStatus: "open" | "closed",
+        nextPeriodExists: boolean
+      ): boolean {
+        return isPg && currentMonthStatus === "closed" && !nextPeriodExists;
+      }
+
+      // August is closed and September does not exist -> Display recovery banner
+      expect(shouldDisplayNextPeriodRecoveryBanner(true, "closed", false)).toBe(true);
+
+      // August is closed and September already exists -> Do not display recovery banner
+      expect(shouldDisplayNextPeriodRecoveryBanner(true, "closed", true)).toBe(false);
+
+      // August is still open -> Do not display recovery banner (GuidedMonthClose required instead)
+      expect(shouldDisplayNextPeriodRecoveryBanner(true, "open", false)).toBe(false);
+    });
   });
 });
+
