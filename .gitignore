@@ -16,4 +16,8 @@ backend/dist/
 backend/.env
 backend/.env.local
 backend/.env.*.local
+backend/.env.production
+backend/.env.*
 sheets/
+.~lock.*
+

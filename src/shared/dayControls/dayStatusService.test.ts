@@ -75,4 +75,23 @@ describe("shared day status helpers", () => {
       day: null
     })).toBe("closed");
   });
+
+  it("authoritatively resolves status = 'open' to 'open' even if residual closedAt/lockedAt timestamps exist", () => {
+    const historicalClosedAt = now.getTime() - 86400000;
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: false,
+      day: { status: "open", closedAt: historicalClosedAt, lockedAt: historicalClosedAt },
+      nowMs: now.getTime()
+    })).toBe("open");
+
+    expect(resolveUniversalDayStatus({
+      exists: true,
+      future: false,
+      live: true,
+      day: { status: "open", closedAt: historicalClosedAt },
+      nowMs: now.getTime()
+    })).toBe("open");
+  });
 });

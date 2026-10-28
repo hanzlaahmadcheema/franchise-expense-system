@@ -75,8 +75,8 @@ export function resolveUniversalDayStatus(input: {
     return "closed";
   }
   if (input.day.status === "reopen" || isActiveReopenWindow(input.day, input.nowMs)) return "reopen";
-  if (input.day.status === "closed" || input.day.lockedAt != null || input.day.closedAt != null) return "closed";
   if (input.day.status === "open") return "open";
+  if (input.day.status === "closed" || input.day.lockedAt != null || input.day.closedAt != null) return "closed";
   return "closed";
 }
 

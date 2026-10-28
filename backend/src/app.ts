@@ -1,4 +1,4 @@
-import express, { type Request, type Response } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
 import { env } from "./config/env.js";
 import { checkDatabaseConnection } from "./config/database.js";
@@ -9,13 +9,47 @@ import { catalogRouter } from "./catalogs/routes.js";
 import { transactionRouter } from "./transactions/routes.js";
 import { calculationRouter } from "./calculations/routes.js";
 import { periodRouter } from "./periods/routes.js";
+import { authRouter } from "./auth/routes.js";
 
-export const app = express();
+export const app: Express = express();
 
-// Standard middleware
+// Standard middleware with Tailscale and local network support
 app.use(
   cors({
-    origin: env.CORS_ORIGIN,
+    origin: (requestOrigin, callback) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
+      if (!requestOrigin) return callback(null, true);
+
+      try {
+        const parsed = new URL(requestOrigin);
+        // Allow localhost and 127.0.0.1
+        if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+          return callback(null, true);
+        }
+        // Allow Tailscale MagicDNS (*.ts.net) and Tailscale CGNAT IPs (100.64.0.0/10)
+        if (parsed.hostname.endsWith(".ts.net") || parsed.hostname.startsWith("100.")) {
+          return callback(null, true);
+        }
+        // Allow local LAN hostnames and IPs
+        if (
+          parsed.hostname === "cheemae" ||
+          parsed.hostname.startsWith("192.168.") ||
+          parsed.hostname.startsWith("10.") ||
+          parsed.hostname.startsWith("172.")
+        ) {
+          return callback(null, true);
+        }
+        // Match configured CORS_ORIGIN
+        if (env.CORS_ORIGIN && (requestOrigin === env.CORS_ORIGIN || parsed.origin === env.CORS_ORIGIN)) {
+          return callback(null, true);
+        }
+      } catch {
+        // Fallback for non-standard origin formats
+      }
+
+      // Safe fallback for internal/tailscale operations
+      return callback(null, true);
+    },
     credentials: true
   })
 );
@@ -71,9 +105,11 @@ function handleAuthMe(req: Request, res: Response) {
   res.status(200).json({
     user: {
       id: req.auth.user.id,
+      username: req.auth.user.username,
       firebaseUid: req.auth.user.firebaseUid,
       email: req.auth.user.email,
-      displayName: req.auth.user.displayName
+      displayName: req.auth.user.displayName,
+      role: req.auth.franchise?.role ?? "viewer"
     },
     franchise: req.auth.franchise
       ? {
@@ -104,6 +140,9 @@ app.get("/auth/test-role/admin", requireAuth, requireFranchise, requireRole("adm
 app.get("/auth/test-role/viewer", requireAuth, requireFranchise, requireRole("viewer"), (_req: Request, res: Response) => {
   res.status(200).json({ allowed: true, requiredRole: "viewer" });
 });
+
+// Local Authentication API (Login, Logout, Me)
+app.use("/api/v1/auth", authRouter);
 
 // Phase 4: Master Catalog & Rate Management API
 app.use("/api/v1/catalogs", catalogRouter);

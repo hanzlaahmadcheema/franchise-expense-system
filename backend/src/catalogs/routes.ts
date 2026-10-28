@@ -49,14 +49,17 @@ import {
   getExpenseCategory,
   createExpenseCategory,
   updateExpenseCategory,
+  deleteExpenseCategory,
   listCommissionCategories,
   getCommissionCategory,
   createCommissionCategory,
   updateCommissionCategory,
+  deleteCommissionCategory,
   listCreditParties,
   getCreditParty,
   createCreditParty,
   updateCreditParty,
+  deleteCreditParty,
   listJazzLoadRates,
   getJazzLoadRate,
   createJazzLoadRate,
@@ -88,7 +91,7 @@ const authChain = [requireAuth, requireFranchise];
 const readOnlyMin = [...authChain, requireRole("viewer")];
 const mutateMin = [...authChain, requireRole("admin")];
 
-export const catalogRouter = Router();
+export const catalogRouter: Router = Router();
 
 // ---------------------------------------------------------------------------
 // Helper: extract authenticated franchise_id from resolved tenant context
@@ -168,6 +171,18 @@ catalogRouter.patch("/expense-categories/:id", mutateMin, async (req: Request, r
   }
 });
 
+catalogRouter.delete("/expense-categories/:id", mutateMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const row = await deleteExpenseCategory(getFranchiseId(req), id);
+    if (!row) return void sendNotFound(res, "Expense category");
+    res.json({ data: row });
+  } catch (err) {
+    if (err instanceof ZodError) return void sendValidationError(res, err);
+    sendInternalError(res, "DELETE /expense-categories/:id", err);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Commission Categories
 // ---------------------------------------------------------------------------
@@ -222,6 +237,18 @@ catalogRouter.patch("/commission-categories/:id", mutateMin, async (req: Request
   }
 });
 
+catalogRouter.delete("/commission-categories/:id", mutateMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const row = await deleteCommissionCategory(getFranchiseId(req), id);
+    if (!row) return void sendNotFound(res, "Commission category");
+    res.json({ data: row });
+  } catch (err) {
+    if (err instanceof ZodError) return void sendValidationError(res, err);
+    sendInternalError(res, "DELETE /commission-categories/:id", err);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Credit Parties
 // ---------------------------------------------------------------------------
@@ -273,6 +300,18 @@ catalogRouter.patch("/credit-parties/:id", mutateMin, async (req: Request, res: 
     if (err instanceof ZodError) return void sendValidationError(res, err);
     if (isUniqueViolation(err)) return void sendDuplicateError(res, "slug");
     sendInternalError(res, "PATCH /credit-parties/:id", err);
+  }
+});
+
+catalogRouter.delete("/credit-parties/:id", mutateMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const row = await deleteCreditParty(getFranchiseId(req), id);
+    if (!row) return void sendNotFound(res, "Credit party");
+    res.json({ data: row });
+  } catch (err) {
+    if (err instanceof ZodError) return void sendValidationError(res, err);
+    sendInternalError(res, "DELETE /credit-parties/:id", err);
   }
 });
 

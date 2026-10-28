@@ -1,11 +1,11 @@
 /**
- * Closed-Month Governed Recovery & Legitimate Negative Stock Rollover Integration Tests
+ * Closed-Month Governed Recovery & Non-Negative Stock Rollover Integration Tests
  *
  * Validates:
- * 1. Stock seed validation allows legitimate negative physical quantities (e.g. -18) as warnings
- * 2. Exact negative quantity is preserved in database (no clamping, not 0)
+ * 1. Stock seed validation strictly rejects negative stock quantities (e.g. -18)
+ * 2. Database constraints enforce non-negative stock quantities
  * 3. Malformed / non-numeric stock seed is rejected
- * 4. Zero and positive stock quantities continue working
+ * 4. Zero and positive stock quantities continue working cleanly
  * 5. Closed August + absent September -> governed initialization via initializeNextPeriodFromClosedPeriod
  * 6. September receives exact FINAL closing balances
  * 7. September Days 1..30 created exactly once
@@ -227,12 +227,12 @@ async function setupTestEnvironment(): Promise<TestContext> {
   `.execute(db);
 
   // Authoritative Stock Projections on Day 31:
-  // prod1 has NEGATIVE stock quantity (-18)
+  // prod1 has 0 stock quantity, prod2 has 25
   await sql`
     INSERT INTO stock_product_day_projections (
       franchise_id, day_id, product_id, opening_qty, stock_in_qty, stock_out_qty, closing_qty
     ) VALUES
-      (${franchiseId}, ${day31Id}, ${prod1Id}, -18, 0, 0, -18),
+      (${franchiseId}, ${day31Id}, ${prod1Id}, 0, 0, 0, 0),
       (${franchiseId}, ${day31Id}, ${prod2Id}, 25, 0, 0, 25);
   `.execute(db);
 
@@ -338,7 +338,31 @@ async function runTests() {
       `.execute(db);
     }
 
-    // 1.1: Legitimate negative stock (-18) is accepted with warning, isValid remains true
+    // 1.1: Negative stock (-18) is strictly rejected by IntegerQuantitySchema
+    const { IntegerQuantitySchema } = await import("./schemas.js");
+    const negSchemaCheck = IntegerQuantitySchema.safeParse(-18);
+    if (negSchemaCheck.success) {
+      throw new Error("Expected -18 to fail IntegerQuantitySchema");
+    }
+    console.log("   ✓ Negative stock quantity (-18) is strictly rejected by IntegerQuantitySchema");
+
+    // 1.2: Database constraint rejects negative stock in period_stock_product_seeds
+    let dbConstraintCaught = false;
+    try {
+      await sql`
+        INSERT INTO period_stock_product_seeds (
+          franchise_id, period_id, product_id, opening_quantity, status
+        ) VALUES (${ctx.franchiseId}, ${testPeriodId}, ${ctx.prod1Id}, -18, 'active');
+      `.execute(db);
+    } catch (e: any) {
+      dbConstraintCaught = true;
+    }
+    if (!dbConstraintCaught) {
+      throw new Error("Expected DB constraint to reject negative opening_quantity in period_stock_product_seeds");
+    }
+    console.log("   ✓ Database constraint strictly blocks negative stock in period_stock_product_seeds");
+
+    // 1.3: Valid non-negative seeds (0 and 25) succeed validation
     await stageSeeds(
       ctx.franchiseId,
       testPeriodId,
@@ -352,7 +376,7 @@ async function runTests() {
         },
         creditParties: [{ partyId: ctx.party1Id, openingBalance: "0.00" }],
         stockProducts: [
-          { productId: ctx.prod1Id, openingQuantity: -18, status: "active" },
+          { productId: ctx.prod1Id, openingQuantity: 0, status: "active" },
           { productId: ctx.prod2Id, openingQuantity: 25, status: "active" }
         ],
         stockAccounts: [{ accountId: ctx.acct1Id, openingReceivable: "0.00" }],
@@ -363,30 +387,11 @@ async function runTests() {
 
     const valResult = await validateSeeds(ctx.franchiseId, testPeriodId);
     if (!valResult.isValid) {
-      throw new Error(`Expected isValid=true for negative stock quantity, but got errors: ${valResult.errors.join("; ")}`);
+      throw new Error(`Expected isValid=true for valid seeds, but got errors: ${valResult.errors.join("; ")}`);
     }
-    const hasNegWarning = valResult.warnings.some((w) => w.includes("-18"));
-    if (!hasNegWarning) {
-      throw new Error(`Expected warning for negative stock quantity -18, found: ${JSON.stringify(valResult.warnings)}`);
-    }
-    console.log("   ✓ Legitimate negative stock seed is accepted as a warning (isValid = true)");
+    console.log("   ✓ Valid stock seeds (0 and 25) succeed validation (isValid = true)");
 
-    // 1.2: Exact negative value -18 is preserved in the database (not clamped to 0)
-    const storedSeed = await db
-      .selectFrom("period_stock_product_seeds")
-      .selectAll()
-      .where("franchise_id", "=", ctx.franchiseId)
-      .where("period_id", "=", testPeriodId)
-      .where("product_id", "=", ctx.prod1Id)
-      .executeTakeFirstOrThrow();
-
-    if (Number(storedSeed.opening_quantity) !== -18) {
-      throw new Error(`Expected stored opening_quantity to be -18, found: ${storedSeed.opening_quantity}`);
-    }
-    console.log("   ✓ Stored opening_quantity is preserved exactly as -18 (no clamping to 0)");
-
-    // 1.3: Malformed / non-numeric stock seed is rejected
-    const { IntegerQuantitySchema } = await import("./schemas.js");
+    // 1.4: Malformed / non-numeric stock seed is rejected
     const nonNumericCheck = IntegerQuantitySchema.safeParse("not-a-number");
     if (nonNumericCheck.success) {
       throw new Error("Expected string 'not-a-number' to fail IntegerQuantitySchema");
@@ -528,7 +533,7 @@ async function runTests() {
     }
     console.log("   ✓ Financial seed balances match exact FINAL closing expectations");
 
-    // Stock products seed check: prod1 MUST BE -18
+    // Stock products seed check: prod1 MUST BE 0 (non-negative stock)
     const stockProductSeeds = await db
       .selectFrom("period_stock_product_seeds")
       .selectAll()
@@ -536,17 +541,17 @@ async function runTests() {
       .where("period_id", "=", septPeriod.id)
       .execute();
 
-    const negSeed = stockProductSeeds.find((s) => s.product_id === ctx.prod1Id);
-    if (!negSeed) {
+    const prod1Seed = stockProductSeeds.find((s) => s.product_id === ctx.prod1Id);
+    if (!prod1Seed) {
       throw new Error(`Missing stock product seed for prod1 (${ctx.prod1Id})`);
     }
-    if (Number(negSeed.opening_quantity) !== -18) {
-      throw new Error(`Expected stock product seed opening_quantity to be -18, found: ${negSeed.opening_quantity}`);
+    if (Number(prod1Seed.opening_quantity) !== 0) {
+      throw new Error(`Expected stock product seed opening_quantity to be 0, found: ${prod1Seed.opening_quantity}`);
     }
-    if (negSeed.source_period_key !== "2026-08" || negSeed.source_day_no !== 31) {
-      throw new Error(`Provenance mismatch on stock seed: ${negSeed.source_period_key} Day ${negSeed.source_day_no}`);
+    if (prod1Seed.source_period_key !== "2026-08" || prod1Seed.source_day_no !== 31) {
+      throw new Error(`Provenance mismatch on stock seed: ${prod1Seed.source_period_key} Day ${prod1Seed.source_day_no}`);
     }
-    console.log("   ✓ Negative stock quantity -18 rolled over and preserved exactly with provenance");
+    console.log("   ✓ Stock quantity 0 rolled over and preserved exactly with provenance");
 
     // Credit parties check
     const cpSeeds = await db
@@ -635,6 +640,58 @@ async function runTests() {
       throw new Error(`Unexpected response body: ${JSON.stringify(httpBody)}`);
     }
     console.log("   ✓ HTTP POST /api/v1/periods/:periodId/initialize-next returned 200 with idempotent state");
+
+    // -------------------------------------------------------------------------
+    // TEST 7: Successor Period Stale Seed Synchronization on Re-close / Init
+    // -------------------------------------------------------------------------
+    console.log("\nScenario 7: Successor Period Stale Seed Synchronization");
+
+    // Artificially corrupt September seeds to simulate an older/stale import
+    await db
+      .updateTable("period_financial_seeds")
+      .set({ opening_cash: "999999.00" })
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("period_id", "=", septPeriod.id)
+      .execute();
+
+    // Call initializeNextPeriodFromClosedPeriod again from August
+    const syncRes = await initializeNextPeriodFromClosedPeriod(
+      ctx.franchiseId,
+      ctx.augPeriodId,
+      ownerUser
+    );
+
+    if (!syncRes.initialized || !syncRes.alreadyInitialized) {
+      throw new Error(`Expected initialized=true and alreadyInitialized=true, got: ${JSON.stringify(syncRes)}`);
+    }
+
+    // Verify September's opening seeds were synchronized with August's latest snapshot (0.00)
+    const resyncedFinSeed = await db
+      .selectFrom("period_financial_seeds")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("period_id", "=", septPeriod.id)
+      .executeTakeFirstOrThrow();
+
+    if (Number(resyncedFinSeed.opening_cash) !== 0.00) {
+      throw new Error(`Expected opening_cash 0.00, got ${resyncedFinSeed.opening_cash}`);
+    }
+    if (!resyncedFinSeed.is_verified) {
+      throw new Error("Expected resynced seed is_verified to be true");
+    }
+
+    // Verify Day 1 projection reflects the resynced seed opening cash
+    const septDay1Proj = await db
+      .selectFrom("day_financial_projections")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("day_id", "=", syncRes.activatedDay.id)
+      .executeTakeFirstOrThrow();
+
+    if (Number(septDay1Proj.opening_cash) !== 0.00) {
+      throw new Error(`Expected Day 1 opening_cash 0.00, got ${septDay1Proj.opening_cash}`);
+    }
+    console.log("   ✓ Successor period seeds and Day 1 projections resynchronized from closed period snapshot");
 
     console.log("\nALL CLOSED-MONTH RECOVERY & NEGATIVE STOCK INTEGRATION TESTS PASSED PERFECTLY!");
   } finally {

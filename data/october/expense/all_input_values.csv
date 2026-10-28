@@ -1,0 +1,80 @@
+sheet,date,section,sheet_row,party_or_category,description_or_details,amount_or_net
+1,2026-10-01,Expense,Row 3,,Do meeting + FAWA SB ( Freshment,3100
+1,2026-10-01,Expense,Row 4,,CHAY+BIST+WATWER ( FAWAD  SB,880
+1,2026-10-01,Expense,Row 5,,SHOP RENT,45000
+3,2026-10-03,Expense,Row 3,,Retailer Promo 02-October-2026  (30*150,3300
+3,2026-10-03,Expense,Row 4,,Do Promo  02-October-2026 (9*100,900
+5,2026-10-05,Expense,Row 3,,Retailer Promo 03-October-2026  (53*150,6650
+5,2026-10-05,Expense,Row 4,,Do Promo  03-October-2026 (21*100,2100
+5,2026-10-05,Expense,Row 5,,Retailer Promo 04-October-2026  (43*150,5300
+5,2026-10-05,Expense,Row 6,,Do Promo  04-October-2026 (7*100,700
+5,2026-10-05,Expense,Row 7,,braf,30
+5,2026-10-05,Expense,Row 8,AKHTAR,Salary September-2026,18000
+5,2026-10-05,Expense,Row 9,ABID,Salary September-2026,45000
+5,2026-10-05,Expense,Row 10,TETAS,Salary September-2026,10000
+5,2026-10-05,Expense,Row 11,SEHAR,Salary September-2026,10000
+5,2026-10-05,Expense,Row 12,SARAM,Salary September-2026,10000
+5,2026-10-05,Expense,Row 13,Qurat ul Anny,Salary September-2026,10000
+5,2026-10-05,Expense,Row 14,,Pospaid commission  September  35*500,18000
+5,2026-10-05,Expense,Row 15,,ROX  Commission September 25*500,7500
+5,2026-10-05,Expense,Row 16,,Perpaid  Commission  September  601*40,24040
+5,2026-10-05,Expense,Row 17,ABID,Target cdr 108 % ( September-2026,30000
+5,2026-10-05,Expense,Row 18,ABID,Enablersas  110 % ( September-2026,10000
+6,2026-10-06,Expense,Row 3,,CDR Month of Seoptember-2026 ( 1631*280,456680
+6,2026-10-06,Expense,Row 4,,Retailer Prmo September-2026 ( 1129*280,316120
+6,2026-10-06,Expense,Row 5,,Retailer Prmo September-2026 ( 616*100,61600
+6,2026-10-06,Expense,Row 6,,Retailer Promo 05-October-2026  (43*150,5200
+6,2026-10-06,Expense,Row 7,,Do Promo  05-October-2026 (21*100,2100
+6,2026-10-06,Expense,Row 8,,braf,30
+7,2026-10-07,Expense,Row 3,AKHTAR,Retailer Promo 06-October-2026  (42*150,5100
+7,2026-10-07,Expense,Row 4,,Do Promo  06-October-2026 (8*100,800
+8,2026-10-08,Expense,Row 3,,Retailer Promo 07-October-2026  (53*150,6450
+8,2026-10-08,Expense,Row 4,,Do Promo  07-October-2026 (33*100,3300
+9,2026-10-09,Expense,Row 3,,Retailer Promo 08-October-2026  (42*150,5000
+9,2026-10-09,Expense,Row 4,,Do Promo  08-October-2026 (17*100,1700
+9,2026-10-09,Expense,Row 5,Akhtar,water ( saqib sb,120
+FINAL,FINAL,Expense,Row 3,,POSPAID IMSI February ( 20*390,7800
+1,2026-10-01,Commission,Row 3,Jazz Load,,12470
+1,2026-10-01,Commission,Row 6,Efics BILL,,162
+2,2026-10-02,Commission,Row 3,Jazz Load,,11378
+2,2026-10-02,Commission,Row 4,Jazz Cash,,399
+2,2026-10-02,Commission,Row 6,Efics BILL,,78
+3,2026-10-03,Commission,Row 3,Jazz Load,,8371
+3,2026-10-03,Commission,Row 4,Jazz Cash,,653
+3,2026-10-03,Commission,Row 5,Efics MFS,,88
+3,2026-10-03,Commission,Row 6,Efics BILL,,175
+5,2026-10-05,Commission,Row 3,Jazz Load,,24566
+5,2026-10-05,Commission,Row 4,Jazz Cash,,686
+5,2026-10-05,Commission,Row 5,Efics MFS,,54
+5,2026-10-05,Commission,Row 6,Efics BILL,,192
+6,2026-10-06,Commission,Row 3,Jazz Load,,12658
+6,2026-10-06,Commission,Row 4,Jazz Cash,,543
+6,2026-10-06,Commission,Row 5,Efics MFS,,36
+6,2026-10-06,Commission,Row 6,Efics BILL,,224
+7,2026-10-07,Commission,Row 3,Jazz Load,,12775
+7,2026-10-07,Commission,Row 4,Jazz Cash,,364
+7,2026-10-07,Commission,Row 5,Efics MFS,,53
+7,2026-10-07,Commission,Row 6,Efics BILL,,152
+7,2026-10-07,Commission,Row 7,SIM Commission,,165000
+7,2026-10-07,Commission,Row 8,Retail IMSI,,70000
+7,2026-10-07,Commission,Row 12,MNP Comm,,2385
+8,2026-10-08,Commission,Row 3,Jazz Load,,12525
+8,2026-10-08,Commission,Row 4,Jazz Cash,,334
+8,2026-10-08,Commission,Row 5,Efics MFS,,10
+8,2026-10-08,Commission,Row 6,Efics BILL,,115
+9,2026-10-09,Commission,Row 3,Jazz Load,,12493
+9,2026-10-09,Commission,Row 4,Jazz Cash,,540
+9,2026-10-09,Commission,Row 5,Efics MFS,,55
+9,2026-10-09,Commission,Row 6,Efics BILL,,72
+FINAL,FINAL,Commission,Row 3,Jazz Load,,14806
+1,2026-10-01,Franchise Owner,Row 4,,SHOP RENT,-45000
+2,2026-10-02,Franchise Owner,Row 4,,USMAN CHEEMA SB,28459
+3,2026-10-03,Franchise Owner,Row 4,,fakhar,1000
+5,2026-10-05,Franchise Owner,Row 4,,MCB,-100000
+2,2026-10-02,Credit,Row 23,Usman cheema,Received: 28459,-28459.0
+3,2026-10-03,Credit,Row 26,Majid ACCOUNT,Given: 30000; Received: 58000,-28000.0
+5,2026-10-05,Credit,Row 24,AKHTAR,Received: 14000,-14000.0
+5,2026-10-05,Credit,Row 29,Tetas ccr,Received: 6000,-6000.0
+6,2026-10-06,Credit,Row 24,AKHTAR,Given: 10000,10000.0
+8,2026-10-08,Credit,Row 29,DO NAVEED,Given: 80000,80000.0
+9,2026-10-09,Credit,Row 23,Usman cheema,Given: 2300,2300.0

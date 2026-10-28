@@ -58,6 +58,7 @@ export type UniversalDayControlBarProps = {
   onReopenAllDays: () => void | Promise<void>;
   onClosePreviousDaysExceptToday: () => void | Promise<void>;
   onRunMasterRefresh: () => void | Promise<void>;
+  closeDayLabel?: string;
   extraActions?: ReactNode;
 };
 

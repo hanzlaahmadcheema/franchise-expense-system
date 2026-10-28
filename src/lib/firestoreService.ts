@@ -643,7 +643,7 @@ export function roleCan(
   if (permission === MASTER_REFRESH_ACCESS) return canRunMasterRefresh(role);
   if (role === "owner") return true;
   if (role === "admin") {
-    return permission === "daily";
+    return permission === "daily" || permission === "catalogs";
   }
   return false;
 }

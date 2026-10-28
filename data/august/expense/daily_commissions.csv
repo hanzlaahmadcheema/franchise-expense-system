@@ -1,0 +1,417 @@
+﻿sheet,day,row,commission,amount
+1,1,3,Jazz Load,11660
+1,1,4,Jazz Cash,
+1,1,5,Efics MFS,95
+1,1,6,Efics BILL,81
+1,1,7,SIM Commission,
+1,1,8,Retail IMSI,
+1,1,9,Franchise IMSI,
+1,1,10,GST Comm,
+1,1,11,Tax Claim Rebate,
+1,1,12,MNP Comm,
+1,1,13,Other,
+1,1,14,Other,
+1,1,15,Total,11836
+2,2,3,Jazz Load,
+2,2,4,Jazz Cash,
+2,2,5,Efics MFS,
+2,2,6,Efics BILL,
+2,2,7,SIM Commission,
+2,2,8,Retail IMSI,
+2,2,9,Franchise IMSI,
+2,2,10,GST Comm,
+2,2,11,Tax Claim Rebate,
+2,2,12,MNP Comm,
+2,2,13,Other,
+2,2,14,Other,
+2,2,15,Total,0
+3,3,3,Jazz Load,23393
+3,3,4,Jazz Cash,1256
+3,3,5,Efics MFS,154
+3,3,6,Efics BILL,68
+3,3,7,SIM Commission,
+3,3,8,Retail IMSI,
+3,3,9,Franchise IMSI,
+3,3,10,GST Comm,
+3,3,11,Tax Claim Rebate,
+3,3,12,MNP Comm,
+3,3,13,Other,
+3,3,14,Other,
+3,3,15,Total,24871
+4,4,3,Jazz Load,12178
+4,4,4,Jazz Cash,459
+4,4,5,Efics MFS,118
+4,4,6,Efics BILL,42
+4,4,7,SIM Commission,130000
+4,4,8,Retail IMSI,70000
+4,4,9,Franchise IMSI,
+4,4,10,GST Comm,
+4,4,11,Tax Claim Rebate,
+4,4,12,MNP Comm,
+4,4,13,Other,
+4,4,14,Other,
+4,4,15,Total,212797
+5,5,3,Jazz Load,10612
+5,5,4,Jazz Cash,1079
+5,5,5,Efics MFS,145
+5,5,6,Efics BILL,113
+5,5,7,SIM Commission,
+5,5,8,Retail IMSI,
+5,5,9,Franchise IMSI,
+5,5,10,GST Comm,
+5,5,11,Tax Claim Rebate,
+5,5,12,MNP Comm,
+5,5,13,Other,
+5,5,14,Other,
+5,5,15,Total,11949
+6,6,3,Jazz Load,16481
+6,6,4,Jazz Cash,695
+6,6,5,Efics MFS,145
+6,6,6,Efics BILL,238
+6,6,7,SIM Commission,
+6,6,8,Retail IMSI,
+6,6,9,Franchise IMSI,
+6,6,10,GST Comm,
+6,6,11,Tax Claim Rebate,
+6,6,12,MNP Comm,
+6,6,13,Other,
+6,6,14,Other,
+6,6,15,Total,17559
+7,7,3,Jazz Load,10469
+7,7,4,Jazz Cash,592
+7,7,5,Efics MFS,22
+7,7,6,Efics BILL,129
+7,7,7,SIM Commission,
+7,7,8,Retail IMSI,
+7,7,9,Franchise IMSI,
+7,7,10,GST Comm,
+7,7,11,Tax Claim Rebate,
+7,7,12,MNP Comm,
+7,7,13,Other,
+7,7,14,Other,
+7,7,15,Total,11212
+8,8,3,Jazz Load,12072
+8,8,4,Jazz Cash,360
+8,8,5,Efics MFS,96
+8,8,6,Efics BILL,185
+8,8,7,SIM Commission,20000
+8,8,8,Retail IMSI,
+8,8,9,Franchise IMSI,
+8,8,10,GST Comm,
+8,8,11,Tax Claim Rebate,
+8,8,12,MNP Comm,
+8,8,13,Other,
+8,8,14,Other,
+8,8,15,Total,32713
+9,9,3,Jazz Load,
+9,9,4,Jazz Cash,
+9,9,5,Efics MFS,
+9,9,6,Efics BILL,
+9,9,7,SIM Commission,
+9,9,8,Retail IMSI,
+9,9,9,Franchise IMSI,
+9,9,10,GST Comm,
+9,9,11,Tax Claim Rebate,
+9,9,12,MNP Comm,
+9,9,13,Other,
+9,9,14,Other,
+9,9,15,Total,0
+10,10,3,Jazz Load,19923
+10,10,4,Jazz Cash,855
+10,10,5,Efics MFS,105
+10,10,6,Efics BILL,95
+10,10,7,SIM Commission,
+10,10,8,Retail IMSI,
+10,10,9,Franchise IMSI,
+10,10,10,GST Comm,
+10,10,11,Tax Claim Rebate,
+10,10,12,MNP Comm,
+10,10,13,Other,
+10,10,14,Other,
+10,10,15,Total,20978
+11,11,3,Jazz Load,10738
+11,11,4,Jazz Cash,815
+11,11,5,Efics MFS,124
+11,11,6,Efics BILL,238
+11,11,7,SIM Commission,
+11,11,8,Retail IMSI,
+11,11,9,Franchise IMSI,
+11,11,10,GST Comm,
+11,11,11,Tax Claim Rebate,
+11,11,12,MNP Comm,
+11,11,13,Other,
+11,11,14,Other,
+11,11,15,Total,11915
+12,12,3,Jazz Load,12699
+12,12,4,Jazz Cash,598
+12,12,5,Efics MFS,128
+12,12,6,Efics BILL,115
+12,12,7,SIM Commission,
+12,12,8,Retail IMSI,
+12,12,9,Franchise IMSI,
+12,12,10,GST Comm,
+12,12,11,Tax Claim Rebate,
+12,12,12,MNP Comm,
+12,12,13,Other,
+12,12,14,Other,
+12,12,15,Total,13540
+13,13,3,Jazz Load,13444
+13,13,4,Jazz Cash,452
+13,13,5,Efics MFS,31
+13,13,6,Efics BILL,118
+13,13,7,SIM Commission,
+13,13,8,Retail IMSI,
+13,13,9,Franchise IMSI,
+13,13,10,GST Comm,
+13,13,11,Tax Claim Rebate,
+13,13,12,MNP Comm,
+13,13,13,Other,
+13,13,14,Other,
+13,13,15,Total,14045
+14,14,3,Jazz Load,1388
+14,14,4,Jazz Cash,384
+14,14,5,Efics MFS,
+14,14,6,Efics BILL,
+14,14,7,SIM Commission,
+14,14,8,Retail IMSI,
+14,14,9,Franchise IMSI,
+14,14,10,GST Comm,
+14,14,11,Tax Claim Rebate,
+14,14,12,MNP Comm,
+14,14,13,Other,
+14,14,14,Other,
+14,14,15,Total,1772
+15,15,3,Jazz Load,11752
+15,15,4,Jazz Cash,128
+15,15,5,Efics MFS,90
+15,15,6,Efics BILL,
+15,15,7,SIM Commission,
+15,15,8,Retail IMSI,
+15,15,9,Franchise IMSI,
+15,15,10,GST Comm,
+15,15,11,Tax Claim Rebate,
+15,15,12,MNP Comm,
+15,15,13,Other,
+15,15,14,Other,
+15,15,15,Total,11970
+16,16,3,Jazz Load,
+16,16,4,Jazz Cash,
+16,16,5,Efics MFS,
+16,16,6,Efics BILL,
+16,16,7,SIM Commission,
+16,16,8,Retail IMSI,
+16,16,9,Franchise IMSI,
+16,16,10,GST Comm,
+16,16,11,Tax Claim Rebate,
+16,16,12,MNP Comm,
+16,16,13,Other,
+16,16,14,Other,
+16,16,15,Total,0
+17,17,3,Jazz Load,24533
+17,17,4,Jazz Cash,996
+17,17,5,Efics MFS,118
+17,17,6,Efics BILL,174
+17,17,7,SIM Commission,
+17,17,8,Retail IMSI,
+17,17,9,Franchise IMSI,
+17,17,10,GST Comm,
+17,17,11,Tax Claim Rebate,
+17,17,12,MNP Comm,
+17,17,13,Other,
+17,17,14,Other,
+17,17,15,Total,25821
+18,18,3,Jazz Load,12034
+18,18,4,Jazz Cash,445
+18,18,5,Efics MFS,50
+18,18,6,Efics BILL,162
+18,18,7,SIM Commission,4250
+18,18,8,Retail IMSI,
+18,18,9,Franchise IMSI,
+18,18,10,GST Comm,
+18,18,11,Tax Claim Rebate,
+18,18,12,MNP Comm,
+18,18,13,Other,
+18,18,14,Other,
+18,18,15,Total,16941
+19,19,3,Jazz Load,8772
+19,19,4,Jazz Cash,469
+19,19,5,Efics MFS,105
+19,19,6,Efics BILL,69
+19,19,7,SIM Commission,
+19,19,8,Retail IMSI,
+19,19,9,Franchise IMSI,
+19,19,10,GST Comm,
+19,19,11,Tax Claim Rebate,
+19,19,12,MNP Comm,
+19,19,13,Other,
+19,19,14,Other,
+19,19,15,Total,9415
+20,20,3,Jazz Load,11064
+20,20,4,Jazz Cash,312
+20,20,5,Efics MFS,
+20,20,6,Efics BILL,176
+20,20,7,SIM Commission,100000
+20,20,8,Retail IMSI,
+20,20,9,Franchise IMSI,125000
+20,20,10,GST Comm,
+20,20,11,Tax Claim Rebate,
+20,20,12,MNP Comm,
+20,20,13,Other,
+20,20,14,Other,
+20,20,15,Total,236552
+21,21,3,Jazz Load,12084
+21,21,4,Jazz Cash,569
+21,21,5,Efics MFS,14
+21,21,6,Efics BILL,138
+21,21,7,SIM Commission,
+21,21,8,Retail IMSI,
+21,21,9,Franchise IMSI,
+21,21,10,GST Comm,
+21,21,11,Tax Claim Rebate,
+21,21,12,MNP Comm,
+21,21,13,Other,
+21,21,14,Other,
+21,21,15,Total,12805
+22,22,3,Jazz Load,6854
+22,22,4,Jazz Cash,569
+22,22,5,Efics MFS,56
+22,22,6,Efics BILL,88
+22,22,7,SIM Commission,
+22,22,8,Retail IMSI,
+22,22,9,Franchise IMSI,
+22,22,10,GST Comm,
+22,22,11,Tax Claim Rebate,
+22,22,12,MNP Comm,
+22,22,13,Other,
+22,22,14,Other,
+22,22,15,Total,7567
+23,23,3,Jazz Load,
+23,23,4,Jazz Cash,
+23,23,5,Efics MFS,
+23,23,6,Efics BILL,
+23,23,7,SIM Commission,
+23,23,8,Retail IMSI,
+23,23,9,Franchise IMSI,
+23,23,10,GST Comm,
+23,23,11,Tax Claim Rebate,
+23,23,12,MNP Comm,
+23,23,13,Other,
+23,23,14,Other,
+23,23,15,Total,0
+24,24,3,Jazz Load,26283
+24,24,4,Jazz Cash,1024
+24,24,5,Efics MFS,5
+24,24,6,Efics BILL,257
+24,24,7,SIM Commission,
+24,24,8,Retail IMSI,
+24,24,9,Franchise IMSI,
+24,24,10,GST Comm,
+24,24,11,Tax Claim Rebate,
+24,24,12,MNP Comm,
+24,24,13,Other,
+24,24,14,Other,
+24,24,15,Total,27569
+25,25,3,Jazz Load,11150
+25,25,4,Jazz Cash,799
+25,25,5,Efics MFS,
+25,25,6,Efics BILL,211
+25,25,7,SIM Commission,
+25,25,8,Retail IMSI,
+25,25,9,Franchise IMSI,
+25,25,10,GST Comm,
+25,25,11,Tax Claim Rebate,
+25,25,12,MNP Comm,
+25,25,13,Other,
+25,25,14,Other,
+25,25,15,Total,12160
+26,26,3,Jazz Load,
+26,26,4,Jazz Cash,
+26,26,5,Efics MFS,
+26,26,6,Efics BILL,
+26,26,7,SIM Commission,
+26,26,8,Retail IMSI,
+26,26,9,Franchise IMSI,
+26,26,10,GST Comm,
+26,26,11,Tax Claim Rebate,
+26,26,12,MNP Comm,
+26,26,13,Other,
+26,26,14,Other,
+26,26,15,Total,0
+27,27,3,Jazz Load,14093
+27,27,4,Jazz Cash,647
+27,27,5,Efics MFS,31
+27,27,6,Efics BILL,196
+27,27,7,SIM Commission,
+27,27,8,Retail IMSI,
+27,27,9,Franchise IMSI,
+27,27,10,GST Comm,
+27,27,11,Tax Claim Rebate,
+27,27,12,MNP Comm,
+27,27,13,Other,
+27,27,14,Other,
+27,27,15,Total,14967
+28,28,3,Jazz Load,11241
+28,28,4,Jazz Cash,579
+28,28,5,Efics MFS,84
+28,28,6,Efics BILL,156
+28,28,7,SIM Commission,
+28,28,8,Retail IMSI,
+28,28,9,Franchise IMSI,
+28,28,10,GST Comm,
+28,28,11,Tax Claim Rebate,
+28,28,12,MNP Comm,
+28,28,13,Other,
+28,28,14,Other,
+28,28,15,Total,12060
+29,29,3,Jazz Load,5722
+29,29,4,Jazz Cash,315
+29,29,5,Efics MFS,120
+29,29,6,Efics BILL,165
+29,29,7,SIM Commission,65000
+29,29,8,Retail IMSI,140000
+29,29,9,Franchise IMSI,
+29,29,10,GST Comm,
+29,29,11,Tax Claim Rebate,
+29,29,12,MNP Comm,
+29,29,13,Other,
+29,29,14,Other,
+29,29,15,Total,211322
+30,30,3,Jazz Load,
+30,30,4,Jazz Cash,
+30,30,5,Efics MFS,
+30,30,6,Efics BILL,
+30,30,7,SIM Commission,
+30,30,8,Retail IMSI,
+30,30,9,Franchise IMSI,
+30,30,10,GST Comm,
+30,30,11,Tax Claim Rebate,
+30,30,12,MNP Comm,
+30,30,13,Other,
+30,30,14,Other,
+30,30,15,Total,0
+31,31,3,Jazz Load,18975
+31,31,4,Jazz Cash,709
+31,31,5,Efics MFS,148
+31,31,6,Efics BILL,338
+31,31,7,SIM Commission,
+31,31,8,Retail IMSI,
+31,31,9,Franchise IMSI,
+31,31,10,GST Comm,
+31,31,11,Tax Claim Rebate,
+31,31,12,MNP Comm,
+31,31,13,Other,
+31,31,14,Other,
+31,31,15,Total,20170
+FINAL,31,3,Jazz Load,
+FINAL,31,4,Jazz Cash,471
+FINAL,31,5,Efics MFS,
+FINAL,31,6,Efics BILL,
+FINAL,31,7,SIM Commission,
+FINAL,31,8,Retail IMSI,
+FINAL,31,9,Franchise IMSI,
+FINAL,31,10,GST Comm,
+FINAL,31,11,Tax Claim Rebate,
+FINAL,31,12,MNP Comm,
+FINAL,31,13,Other,348287
+FINAL,31,14,Other,
+FINAL,31,15,Total,348758

@@ -91,8 +91,10 @@ export async function calculateDayInternal(
   let ownerOpeningBalance = 0;
   let openingJazzLifting = 0;
   let openingJazzPayable = 0;
+  let openingCommissionReceivable = 0;
   const creditPartyOpenings = new Map<string, number>();
   const stockProductOpenings = new Map<string, number>();
+  const skippedStockProductIds = new Set<string>();
   const stockAccountOpenings = new Map<string, number>();
   const jazzDoOpenings = new Map<string, number>();
 
@@ -117,6 +119,7 @@ export async function calculateDayInternal(
     ownerOpeningBalance = Number(finSeed.opening_owner_balance);
     openingJazzLifting = Number(finSeed.opening_jazz_lifting);
     openingJazzPayable = Number(finSeed.opening_jazz_payable);
+    openingCommissionReceivable = Number(finSeed.opening_commission_receivable ?? 0);
 
     const creditSeeds = await trx
       .selectFrom("period_credit_party_seeds")
@@ -130,12 +133,16 @@ export async function calculateDayInternal(
 
     const stockProdSeeds = await trx
       .selectFrom("period_stock_product_seeds")
-      .select(["product_id", "opening_quantity"])
+      .select(["product_id", "opening_quantity", "status"])
       .where("franchise_id", "=", franchiseId)
       .where("period_id", "=", day.period_id)
       .execute();
     for (const sps of stockProdSeeds) {
-      stockProductOpenings.set(sps.product_id, Number(sps.opening_quantity));
+      if (sps.status === "skipped" || sps.opening_quantity === null) {
+        skippedStockProductIds.add(sps.product_id);
+      } else {
+        stockProductOpenings.set(sps.product_id, Number(sps.opening_quantity));
+      }
     }
 
     const stockAccSeeds = await trx
@@ -179,6 +186,7 @@ export async function calculateDayInternal(
         openingCash = Number(prevFin.closing_cash);
         ownerOpeningBalance = Number(prevFin.owner_closing_balance);
         openingJazzPayable = Number(prevFin.closing_jazz_payable ?? 0);
+        openingCommissionReceivable = Number(prevFin.closing_commission_receivable ?? 0);
       }
 
       const prevLifting = await trx
@@ -249,6 +257,13 @@ export async function calculateDayInternal(
     WHERE franchise_id = ${franchiseId} AND day_id = ${day.id};
   `.execute(trx);
   const totalIssues = Number(commissionsAgg.rows[0]?.total ?? 0);
+
+  const settlementsAgg = await sql<{ total: string }>`
+    SELECT COALESCE(SUM(amount), 0) as total
+    FROM commission_settlement_receipts
+    WHERE franchise_id = ${franchiseId} AND day_id = ${day.id};
+  `.execute(trx);
+  const commissionSettlementReceipts = Number(settlementsAgg.rows[0]?.total ?? 0);
 
   // 3.2 Owner Transactions
   const ownerAgg = await sql<{ total: string }>`
@@ -332,6 +347,20 @@ export async function calculateDayInternal(
     GROUP BY account_id;
   `.execute(trx);
 
+  // 3.7 Stock Balance Transfers
+  const transferRows = await sql<{
+    source_account_id: string;
+    destination_account_id: string;
+    transfer_type: "credit" | "debt";
+    amount: string;
+  }>`
+    SELECT source_account_id, destination_account_id, transfer_type, amount
+    FROM stock_balance_transfers
+    WHERE franchise_id = ${franchiseId}
+      AND day_id = ${day.id}
+      AND status IN ('completed', 'reversed');
+  `.execute(trx);
+
   // 4. Compute Domain Projections & Invariants
   // 4.1 Financial Projections (Cash, Profit, Owner, Jazz Payable)
   const financial = evaluateFinancialState({
@@ -342,7 +371,9 @@ export async function calculateDayInternal(
     ownerNetMovement,
     openingJazzPayable,
     inboundStockAmount,
-    jazzPayablePayments
+    jazzPayablePayments,
+    commissionSettlementReceipts,
+    openingCommissionReceivable
   });
   warnings.push(...validateFinancialInvariants(day.id, day.period_id, financial));
 
@@ -421,6 +452,10 @@ export async function calculateDayInternal(
 
   const stockProductProjections: StockProductProjectionData[] = [];
   for (const productId of allProductIds) {
+    if (day.day_no === 1 && skippedStockProductIds.has(productId) && !productMovements.has(productId)) {
+      // Governed SKIPPED genesis product: intentionally excluded from August opening inventory
+      continue;
+    }
     const opening = stockProductOpenings.get(productId) ?? 0;
     const m = productMovements.get(productId) ?? { inQty: 0, outQty: 0 };
     const evalResult = evaluateStockProduct({
@@ -448,9 +483,30 @@ export async function calculateDayInternal(
     accountMovements.set(p.account_id, m);
   }
 
+  const accountTransfers = new Map<string, { transfersOut: number; transfersIn: number }>();
+  for (const t of transferRows.rows) {
+    const amt = Number(t.amount);
+    const src = accountTransfers.get(t.source_account_id) ?? { transfersOut: 0, transfersIn: 0 };
+    if (t.transfer_type === "credit") {
+      src.transfersOut += amt;
+    } else {
+      src.transfersIn += amt;
+    }
+    accountTransfers.set(t.source_account_id, src);
+
+    const dest = accountTransfers.get(t.destination_account_id) ?? { transfersOut: 0, transfersIn: 0 };
+    if (t.transfer_type === "credit") {
+      dest.transfersIn += amt;
+    } else {
+      dest.transfersOut += amt;
+    }
+    accountTransfers.set(t.destination_account_id, dest);
+  }
+
   const allAccountIds = new Set<string>([
     ...stockAccountOpenings.keys(),
-    ...accountMovements.keys()
+    ...accountMovements.keys(),
+    ...accountTransfers.keys()
   ]);
 
   const activeAccounts = await trx
@@ -467,11 +523,14 @@ export async function calculateDayInternal(
   for (const accountId of allAccountIds) {
     const opening = stockAccountOpenings.get(accountId) ?? 0;
     const m = accountMovements.get(accountId) ?? { stockTaken: 0, paymentReceived: 0 };
+    const tf = accountTransfers.get(accountId) ?? { transfersOut: 0, transfersIn: 0 };
     const evalResult = evaluateStockAccount({
       accountId,
       openingDue: opening,
       stockTakenAmount: m.stockTaken,
-      paymentReceivedAmount: m.paymentReceived
+      paymentReceivedAmount: m.paymentReceived,
+      transfersOutAmount: tf.transfersOut,
+      transfersInAmount: tf.transfersIn
     });
     warnings.push(...validateStockAccountInvariants(day.id, day.period_id, evalResult));
     stockAccountProjections.push(evalResult);
@@ -569,6 +628,9 @@ export async function calculateDayInternal(
         owner_closing_balance,
         opening_jazz_payable,
         closing_jazz_payable,
+        commission_settlement_receipts,
+        opening_commission_receivable,
+        closing_commission_receivable,
         calc_run_id,
         calculated_at
     ) VALUES (
@@ -583,6 +645,9 @@ export async function calculateDayInternal(
         ${financial.ownerClosingBalance},
         ${financial.openingJazzPayable},
         ${financial.closingJazzPayable},
+        ${financial.commissionSettlementReceipts ?? 0},
+        ${financial.openingCommissionReceivable ?? 0},
+        ${financial.closingCommissionReceivable ?? 0},
         ${calcRunId},
         clock_timestamp()
     )
@@ -596,6 +661,9 @@ export async function calculateDayInternal(
         owner_closing_balance = EXCLUDED.owner_closing_balance,
         opening_jazz_payable = EXCLUDED.opening_jazz_payable,
         closing_jazz_payable = EXCLUDED.closing_jazz_payable,
+        commission_settlement_receipts = EXCLUDED.commission_settlement_receipts,
+        opening_commission_receivable = EXCLUDED.opening_commission_receivable,
+        closing_commission_receivable = EXCLUDED.closing_commission_receivable,
         calc_run_id = EXCLUDED.calc_run_id,
         calculated_at = clock_timestamp();
   `.execute(trx);
@@ -638,6 +706,22 @@ export async function calculateDayInternal(
   }
 
   // 5.3 Stock Product Projections
+  const projectedProductIds = stockProductProjections.map((sp) => sp.productId);
+  if (projectedProductIds.length > 0) {
+    await trx
+      .deleteFrom("stock_product_day_projections")
+      .where("franchise_id", "=", franchiseId)
+      .where("day_id", "=", day.id)
+      .where("product_id", "not in", projectedProductIds)
+      .execute();
+  } else {
+    await trx
+      .deleteFrom("stock_product_day_projections")
+      .where("franchise_id", "=", franchiseId)
+      .where("day_id", "=", day.id)
+      .execute();
+  }
+
   for (const sp of stockProductProjections) {
     await sql`
       INSERT INTO stock_product_day_projections (
@@ -657,19 +741,41 @@ export async function calculateDayInternal(
   }
 
   // 5.4 Stock Account Projections
+  const projectedAccountIds = stockAccountProjections.map((sa) => sa.accountId);
+  if (projectedAccountIds.length > 0) {
+    await trx
+      .deleteFrom("stock_account_day_projections")
+      .where("franchise_id", "=", franchiseId)
+      .where("day_id", "=", day.id)
+      .where("account_id", "not in", projectedAccountIds)
+      .execute();
+  } else {
+    await trx
+      .deleteFrom("stock_account_day_projections")
+      .where("franchise_id", "=", franchiseId)
+      .where("day_id", "=", day.id)
+      .execute();
+  }
+
   for (const sa of stockAccountProjections) {
     await sql`
       INSERT INTO stock_account_day_projections (
           franchise_id, day_id, account_id, opening_due,
-          stock_taken_amount, payment_received_amount, closing_due, calculated_at
+          stock_taken_amount, payment_received_amount,
+          transfers_out_amount, transfers_in_amount,
+          closing_due, calculated_at
       ) VALUES (
           ${franchiseId}, ${day.id}, ${sa.accountId}, ${sa.openingDue},
-          ${sa.stockTakenAmount}, ${sa.paymentReceivedAmount}, ${sa.closingDue}, clock_timestamp()
+          ${sa.stockTakenAmount}, ${sa.paymentReceivedAmount},
+          ${sa.transfersOutAmount ?? 0}, ${sa.transfersInAmount ?? 0},
+          ${sa.closingDue}, clock_timestamp()
       )
       ON CONFLICT (franchise_id, day_id, account_id) DO UPDATE SET
           opening_due = EXCLUDED.opening_due,
           stock_taken_amount = EXCLUDED.stock_taken_amount,
           payment_received_amount = EXCLUDED.payment_received_amount,
+          transfers_out_amount = EXCLUDED.transfers_out_amount,
+          transfers_in_amount = EXCLUDED.transfers_in_amount,
           closing_due = EXCLUDED.closing_due,
           calculated_at = clock_timestamp();
     `.execute(trx);

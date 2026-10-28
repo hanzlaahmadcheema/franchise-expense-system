@@ -13,7 +13,7 @@ A Firestore-backed franchise operating ledger that converts the existing monthly
 - [Daily Entry Workflow](#daily-entry-workflow)
 - [Dashboard And Reports](#dashboard-and-reports)
 - [Backup And Restore](#backup-and-restore)
-- [Offline Mode And PWA Behavior](#offline-mode-and-pwa-behavior)
+- [Offline Mode Behavior](#offline-mode-behavior)
 - [Firestore Data Model](#firestore-data-model)
 - [Testing And Build](#testing-and-build)
 - [Deploy](#deploy)
@@ -56,7 +56,6 @@ Example:
 - Firebase Auth
 - Cloud Firestore
 - Firebase Functions
-- PWA service worker through `vite-plugin-pwa`
 - Recharts
 - Lucide React
 - SheetJS `xlsx`
@@ -397,41 +396,23 @@ If the app is offline and the full month has not been cached on this device, rec
 Some records may not be available offline. Reconnect before final backup.
 ```
 
-## Offline Mode And PWA Behavior
+## Offline Mode Behavior
 
-Firestore persistence caches data and queues writes in the browser. The service worker caches the app shell so the dashboard can reload after this device has already loaded the app online.
-
-First login and first full app load require internet. Offline reload works only after the device has cached the app. Owner sees offline changes only after the shop machine reconnects.
-
-The app update flow is intentionally prompted. A new service worker does not force a reload while a shop user is entering data.
+The application provides local and offline resilience for ledger operations.
 
 The sidebar sync labels mean:
 
 - `Connected to Firestore`: the signed-in account can reach Firestore.
-- `Offline mode - changes saved locally`: the device is offline, and allowed edits are saved in the local Firestore queue.
-- `Syncing changes...`: local writes are waiting for Firestore acknowledgement.
-- `All changes synced`: Firestore has acknowledged the visible local writes.
-- `Firestore permission/error`: Firestore rejected or failed a read/write operation.
+- `Offline mode - changes saved locally`: the device is offline, and allowed edits are saved in the local queue.
+- `Syncing changes...`: local writes are waiting for acknowledgment.
+- `All changes synced`: visible local writes have been acknowledged.
+- `Firestore permission/error`: rejected or failed read/write operation.
 
 When offline edits are pending, the app keeps Daily Entry save/close usable for roles that can normally edit and shows:
 
 ```text
 Owner will see updates after this machine reconnects.
 ```
-
-When the service worker is ready, the app shows:
-
-```text
-Offline reload is ready on this device.
-```
-
-When a new app build is available, the app shows:
-
-```text
-New version available. Update when no entry is being edited.
-```
-
-Use `Update now` only when no entry is being edited. Use `Later` to keep the current app loaded during data entry.
 
 ## Firestore Data Model
 
@@ -509,13 +490,6 @@ Build the frontend:
 
 ```bash
 npm run build
-```
-
-After a production build, confirm the PWA files exist:
-
-```bash
-test -f dist/manifest.webmanifest
-test -f dist/sw.js
 ```
 
 Build Firebase Functions:

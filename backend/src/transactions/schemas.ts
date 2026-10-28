@@ -52,14 +52,14 @@ export const ExpenseItemCreateSchema = z.object({
   day_id: z.string().uuid(),
   category_id: z.string().uuid().nullable().optional(),
   category_name_snapshot: z.string().max(100).optional(),
-  item_name: z.string().min(1).max(150),
+  item_name: z.string().max(150).nullish().default("").transform((val) => (val ?? "").trim()),
   description: z.string().max(1000).nullable().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" })
 });
 
 export const ExpenseItemUpdateSchema = withOptimisticLock({
   category_id: z.string().uuid().nullable().optional(),
-  item_name: z.string().min(1).max(150).optional(),
+  item_name: z.string().max(150).nullish().transform((val) => (val === undefined ? undefined : (val ?? "").trim())).optional(),
   description: z.string().max(1000).nullable().optional(),
   amount: z.number().positive({ message: "amount must be greater than 0" }).optional()
 });
@@ -256,3 +256,59 @@ export const JazzPayablePaymentUpdateSchema = withOptimisticLock({
 
 export type JazzPayablePaymentCreate = z.infer<typeof JazzPayablePaymentCreateSchema>;
 export type JazzPayablePaymentUpdate = z.infer<typeof JazzPayablePaymentUpdateSchema>;
+
+// ---------------------------------------------------------------------------
+// 11. Commission Settlement Receipts
+// ---------------------------------------------------------------------------
+export const CommissionSettlementReceiptCreateSchema = z.object({
+  ...IdempotencyFields,
+  day_id: z.string().uuid().optional(),
+  dayId: z.string().uuid().optional(),
+  source_period_key: z.string().regex(/^\d{4}-\d{2}$/, "source_period_key must be in YYYY-MM format").optional(),
+  sourcePeriodKey: z.string().regex(/^\d{4}-\d{2}$/, "sourcePeriodKey must be in YYYY-MM format").optional(),
+  amount: z.number().positive({ message: "amount must be greater than 0" }),
+  category_id: z.string().uuid().nullable().optional(),
+  categoryId: z.string().uuid().nullable().optional(),
+  category_name_snapshot: z.string().max(255).optional(),
+  categoryNameSnapshot: z.string().max(255).optional(),
+  notes: z.string().max(1000).nullable().optional()
+}).refine(
+  (data) => data.day_id !== undefined || data.dayId !== undefined,
+  { message: "dayId (or day_id) is required.", path: ["dayId"] }
+).refine(
+  (data) => data.source_period_key !== undefined || data.sourcePeriodKey !== undefined,
+  { message: "sourcePeriodKey (or source_period_key) is required.", path: ["sourcePeriodKey"] }
+);
+
+export const CommissionSettlementReceiptUpdateSchema = withOptimisticLock({
+  amount: z.number().positive({ message: "amount must be greater than 0" }).optional(),
+  notes: z.string().max(1000).nullable().optional()
+});
+
+export type CommissionSettlementReceiptCreate = z.infer<typeof CommissionSettlementReceiptCreateSchema>;
+export type CommissionSettlementReceiptUpdate = z.infer<typeof CommissionSettlementReceiptUpdateSchema>;
+
+// ---------------------------------------------------------------------------
+// 12. Stock Balance Transfers
+// ---------------------------------------------------------------------------
+export const StockBalanceTransferCreateSchema = z.object({
+  ...IdempotencyFields,
+  day_id: z.string().uuid(),
+  source_account_id: z.string().uuid(),
+  destination_account_id: z.string().uuid(),
+  amount: z.number().positive({ message: "amount must be greater than 0" }),
+  transfer_type: z.enum(["credit", "debt"]).default("credit"),
+  reason: z.string().min(1, "reason is required").max(500),
+  idempotency_key: z.string().max(128).optional()
+}).refine(
+  (data) => data.source_account_id !== data.destination_account_id,
+  { message: "Source and destination accounts must be distinct.", path: ["destination_account_id"] }
+);
+
+export const StockBalanceTransferReverseSchema = z.object({
+  reason: z.string().min(1, "reversal reason is required").max(500),
+  day_id: z.string().uuid().optional()
+});
+
+export type StockBalanceTransferCreate = z.infer<typeof StockBalanceTransferCreateSchema>;
+export type StockBalanceTransferReverse = z.infer<typeof StockBalanceTransferReverseSchema>;

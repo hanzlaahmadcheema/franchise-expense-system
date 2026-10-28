@@ -42,7 +42,8 @@ export function validateFinancialInvariants(
   const warnings: InvariantViolationItem[] = [];
 
   // Critical: Closing Cash Math
-  const expectedCash = round2(data.openingCash + data.totalIssues - data.totalExpenses);
+  const settlementReceipts = data.commissionSettlementReceipts ?? 0;
+  const expectedCash = round2(data.openingCash + data.totalIssues + settlementReceipts - data.totalExpenses);
   if (round2(data.closingCash) !== expectedCash) {
     throw new InvariantViolationError(
       "INV_CASH_CLOSING_MATH",
@@ -109,7 +110,7 @@ export function validateStockProductInvariants(
     );
   }
 
-  // Warning: Negative Stock Quantity (Permitted operationally to prevent warehouse block)
+  // Warning: Negative Stock Quantity (Permitted operationally to prevent warehouse block, logged as invariant violation)
   if (data.closingQty < 0) {
     warnings.push({
       invariantCode: "INV_STOCK_QTY_NEGATIVE",
@@ -133,7 +134,11 @@ export function validateStockAccountInvariants(
   data: StockAccountProjectionData
 ): InvariantViolationItem[] {
   const expectedDue = round2(
-    data.openingDue + data.stockTakenAmount - data.paymentReceivedAmount
+    data.openingDue +
+      data.stockTakenAmount -
+      data.paymentReceivedAmount +
+      (data.transfersOutAmount ?? 0) -
+      (data.transfersInAmount ?? 0)
   );
 
   if (round2(data.closingDue) !== expectedDue) {

@@ -167,6 +167,7 @@ export function computeDay(day: DailyLedgerInput, openingBalance: number, ownerO
     label: day.label,
     notes: day.notes,
     openingBalance,
+    ownerOpeningBalance,
     issueBalance,
     totalBalance,
     expenseTotal,
@@ -207,7 +208,9 @@ export function computeMonth(
       ...day,
       credits: applyCreditCarryForward(day.dayNo, day.credits, creditRunningBalances)
     };
-    const computed = computeDay(dayWithCarriedCredits, currentOpening, currentOwnerOpening);
+    const effectiveOpening = day.openingCash !== undefined ? day.openingCash : currentOpening;
+    const effectiveOwnerOpening = day.ownerOpeningBalance !== undefined ? day.ownerOpeningBalance : currentOwnerOpening;
+    const computed = computeDay(dayWithCarriedCredits, effectiveOpening, effectiveOwnerOpening);
     currentOpening = computed.returnBalance;
     currentOwnerOpening = computed.ownerBalanceTotal;
     for (const row of computed.creditRows) {

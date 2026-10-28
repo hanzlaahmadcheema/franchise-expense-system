@@ -35,7 +35,7 @@ describe("role permission helpers", () => {
     });
     expect(matrix.admin).toEqual({
       daily: true,
-      catalogs: false,
+      catalogs: true,
       users: false,
       ownerControls: false,
       importBackup: false,
@@ -53,13 +53,13 @@ describe("role permission helpers", () => {
     });
   });
 
-  it("keeps Jazz Load settings, backup, and month controls owner-only", () => {
+  it("allows Owner and Admin to manage Jazz Load settings while keeping backup and month controls owner-only", () => {
     expect(roleCanJazzLoad("owner", "settings")).toBe(true);
     expect(roleCanJazzLoad("owner", "backup")).toBe(true);
     expect(roleCanJazzLoad("owner", "monthControls")).toBe(true);
 
     expect(roleCanJazzLoad("admin", "daily")).toBe(true);
-    expect(roleCanJazzLoad("admin", "settings")).toBe(false);
+    expect(roleCanJazzLoad("admin", "settings")).toBe(true);
     expect(roleCanJazzLoad("admin", "backup")).toBe(false);
     expect(roleCanJazzLoad("admin", "monthControls")).toBe(false);
 
@@ -73,13 +73,13 @@ describe("role permission helpers", () => {
     expect(roleCanJazzLoad("viewer", MASTER_REFRESH_ACCESS)).toBe(false);
   });
 
-  it("keeps Stock settings, backup, and month controls owner-only", () => {
+  it("allows Owner and Admin to manage Stock settings while keeping backup and month controls owner-only", () => {
     expect(roleCanStock("owner", "settings")).toBe(true);
     expect(roleCanStock("owner", "backup")).toBe(true);
     expect(roleCanStock("owner", "monthControls")).toBe(true);
 
     expect(roleCanStock("admin", "daily")).toBe(true);
-    expect(roleCanStock("admin", "settings")).toBe(false);
+    expect(roleCanStock("admin", "settings")).toBe(true);
     expect(roleCanStock("admin", "backup")).toBe(false);
     expect(roleCanStock("admin", "monthControls")).toBe(false);
 

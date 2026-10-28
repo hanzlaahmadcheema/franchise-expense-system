@@ -98,6 +98,18 @@ async function setupCatalogTestData(): Promise<{ f1Id: string; f2Id: string }> {
 }
 
 async function cleanupCatalogTestData() {
+  await sql`
+    DELETE FROM expense_items WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-CAT-F1', 'TEST-CAT-F2')
+    );
+    DELETE FROM accounting_days WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-CAT-F1', 'TEST-CAT-F2')
+    );
+    DELETE FROM accounting_periods WHERE franchise_id IN (
+      SELECT id FROM franchises WHERE code IN ('TEST-CAT-F1', 'TEST-CAT-F2')
+    );
+  `.execute(db);
+
   // Delete catalog children first (franchise FK is RESTRICT not CASCADE for these tables)
   await sql`
     DELETE FROM expense_categories WHERE franchise_id IN (
@@ -527,6 +539,107 @@ async function runCatalogTests() {
 
       const r2 = await req(base, "PATCH", `/api/v1/catalogs/stock-products/${fakeId}`, "cat-owner", { name: "x" });
       assert(r2.status === 404, "Non-existent stock product PATCH returns 404", r2.status);
+    }
+
+    // =========================================================================
+    // Test Group 14: Category edit and deletion lifecycle (Phase 13 audit)
+    // =========================================================================
+    console.log("\nGroup 14: Category edit and deletion lifecycle");
+    {
+      // 1. Create a category
+      const createRes = await req(base, "POST", "/api/v1/catalogs/expense-categories", "cat-owner", {
+        slug: "audit-cat",
+        name: "Original Audit Category",
+        sort_order: 7
+      });
+      assert(createRes.status === 201, "Category created successfully", createRes.status);
+      const catId = createRes.body.data.id;
+      assert(typeof catId === "string" && catId.length > 0, "Category has valid UUID", catId);
+
+      // 2. Editing preserves UUID, preserves sort_order, and modifies existing row
+      const patchRes = await req(base, "PATCH", `/api/v1/catalogs/expense-categories/${catId}`, "cat-owner", {
+        name: "Updated Audit Category"
+      });
+      assert(patchRes.status === 200, "Category patched successfully", patchRes.status);
+      assert(patchRes.body.data.id === catId, "UUID is preserved on edit", patchRes.body.data.id);
+      assert(patchRes.body.data.sort_order === 7, "sort_order is preserved on edit", patchRes.body.data.sort_order);
+      assert(patchRes.body.data.name === "Updated Audit Category", "Name is updated", patchRes.body.data.name);
+
+      // Verify directly in DB that exactly one row exists and no duplicate row was created
+      const dbRows = await sql<{ id: string; name: string; sort_order: number }>`
+        SELECT id, name, sort_order FROM expense_categories WHERE franchise_id = ${f1Id} AND slug = 'audit-cat';
+      `.execute(db);
+      assert(dbRows.rows.length === 1, "Exactly 1 row exists in DB (no new row inserted on edit)", dbRows.rows.length);
+      assert(dbRows.rows[0]!.id === catId, "DB row ID matches original UUID", dbRows.rows[0]!.id);
+
+      // 3. Unauthorized deletion is blocked
+      const viewerDel = await req(base, "DELETE", `/api/v1/catalogs/expense-categories/${catId}`, "cat-viewer");
+      assert(viewerDel.status === 403, "Viewer deletion rejected with 403 Forbidden", viewerDel.status);
+
+      const anonDel = await req(base, "DELETE", `/api/v1/catalogs/expense-categories/${catId}`, null);
+      assert(anonDel.status === 401, "Unauthenticated deletion rejected with 401 Unauthorized", anonDel.status);
+
+      // 4. Cross-tenant deletion blocked
+      const f2Del = await req(base, "DELETE", `/api/v1/catalogs/expense-categories/${catId}`, "cat-f2owner");
+      assert(f2Del.status === 404, "Cross-tenant deletion returns 404", f2Del.status);
+
+      // 5. Authorized deletion of unreferenced category performs hard delete
+      const adminDel = await req(base, "DELETE", `/api/v1/catalogs/expense-categories/${catId}`, "cat-admin");
+      assert(adminDel.status === 200, "Admin deletion returns 200 OK", adminDel.status);
+      assert(adminDel.body.data.soft_deleted === false, "Unreferenced category is hard deleted", adminDel.body.data);
+
+      const dbCheck = await sql`
+        SELECT count(*) AS cnt FROM expense_categories WHERE franchise_id = ${f1Id} AND id = ${catId};
+      `.execute(db);
+      assert(Number((dbCheck.rows[0] as any)?.cnt ?? 0) === 0, "Category completely removed from DB", dbCheck.rows[0]);
+
+      // 6. Authorized deletion of category referenced by accounting transactions performs soft delete
+      const createCat2 = await req(base, "POST", "/api/v1/catalogs/expense-categories", "cat-owner", {
+        slug: "referenced-cat",
+        name: "Referenced Category",
+        sort_order: 3
+      });
+      assert(createCat2.status === 201, "Referenced category created", createCat2.status);
+      const cat2Id = createCat2.body.data.id;
+
+      // Set up temporary accounting period, day, and expense item for f1Id
+      const p = await sql<{ id: string }>`
+        INSERT INTO accounting_periods (franchise_id, period_key, year_num, month_num, label, status)
+        VALUES (${f1Id}, '2099-01', 2099, 1, 'Jan 2099', 'open')
+        RETURNING id;
+      `.execute(db);
+      const periodId = p.rows[0]!.id;
+
+      const d = await sql<{ id: string }>`
+        INSERT INTO accounting_days (franchise_id, period_id, day_no, calendar_date, label, status)
+        VALUES (${f1Id}, ${periodId}, 1, '2099-01-01', 'Day 1', 'open')
+        RETURNING id;
+      `.execute(db);
+      const dayId = d.rows[0]!.id;
+
+      await sql`
+        INSERT INTO expense_items (franchise_id, day_id, category_id, category_name_snapshot, item_name, amount)
+        VALUES (${f1Id}, ${dayId}, ${cat2Id}, 'Referenced Category', 'Office Paper', 50.00);
+      `.execute(db);
+
+      // Attempt deletion on referenced category
+      const delRefCat = await req(base, "DELETE", `/api/v1/catalogs/expense-categories/${cat2Id}`, "cat-owner");
+      assert(delRefCat.status === 200, "Referenced category delete returns 200 OK", delRefCat.status);
+      assert(delRefCat.body.data.soft_deleted === true, "Referenced category is soft deleted", delRefCat.body.data);
+      assert(delRefCat.body.data.is_active === false, "Referenced category is marked inactive", delRefCat.body.data.is_active);
+
+      // Verify row still exists in DB with is_active = false
+      const cat2Db = await sql<{ id: string; is_active: boolean }>`
+        SELECT id, is_active FROM expense_categories WHERE franchise_id = ${f1Id} AND id = ${cat2Id};
+      `.execute(db);
+      assert(cat2Db.rows.length === 1, "Category row still exists in DB", cat2Db.rows.length);
+      assert(cat2Db.rows[0]!.is_active === false, "Category row has is_active = false in DB", cat2Db.rows[0]!.is_active);
+
+      // Cleanup temporary transaction, day, period, and category
+      await sql`DELETE FROM expense_items WHERE franchise_id = ${f1Id} AND day_id = ${dayId};`.execute(db);
+      await sql`DELETE FROM accounting_days WHERE id = ${dayId};`.execute(db);
+      await sql`DELETE FROM accounting_periods WHERE id = ${periodId};`.execute(db);
+      await sql`DELETE FROM expense_categories WHERE id = ${cat2Id};`.execute(db);
     }
 
     // =========================================================================

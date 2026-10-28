@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCircle2, LoaderCircle, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -13,6 +13,9 @@ import {
 import { computeDay, parseLedgerNumber, resolveCreditClosingBalance } from "../lib/formulaEngine";
 import { resolveCreditDescriptions } from "../lib/creditDescriptions";
 import { useAutoSaveEntry } from "../shared/hooks/useAutoSaveEntry";
+import { SaveProgressDialog, type SaveProgressState } from "../shared/components/SaveProgressDialog";
+import { getAccountingPeriodWithDays, isPostgreSqlPeriod } from "../services/api/periodDayService";
+import { ledgerApiClient } from "../services/api/ledgerApiClient";
 
 type Props = {
   dayNo: number;
@@ -43,6 +46,8 @@ type Props = {
   onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
   onPendingStateChange?: (pending: boolean) => void;
   onManualSaveReady?: (save: (() => Promise<boolean>) | null) => void;
+  isOwner?: boolean;
+  monthId?: string;
 };
 
 const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -104,10 +109,10 @@ function InputText({
       onBlur={() => {
         if (localVal === "" || isNaN(Number(localVal))) {
           setLocalVal("");
-          onChange(0);
+          if (value !== 0) onChange(0);
         } else {
           setLocalVal(Number(localVal).toString());
-          onChange(Number(localVal));
+          if (Number(localVal) !== value) onChange(Number(localVal));
         }
       }}
     />
@@ -248,13 +253,23 @@ export function DailyEntryForm({
   locked,
   previousDay,
   onSave,
+  onSendEmail,
+  canSendEmail,
   canCreateCatalogs,
   onCreateCatalog,
   onPendingStateChange,
-  onManualSaveReady
+  onManualSaveReady,
+  isOwner,
+  monthId
 }: Props) {
-  const categoryOptions = activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
-  const commissionOptions = activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
+  const periodKey = monthId ?? `${entryYear ?? 2026}-${String(entryMonth ?? 8).padStart(2, "0")}`;
+  const isPg = isPostgreSqlPeriod(periodKey);
+  const categoryOptions = isPg
+    ? expenseCategories.filter((item) => item.active)
+    : activeOrFallback(expenseCategories, ["Salary", "Refreshment", "IMSI", "Utilities", "Rent", "General"]);
+  const commissionOptions = isPg
+    ? commissionCategories.filter((item) => item.active)
+    : activeOrFallback(commissionCategories, [...COMMISSION_CATEGORIES]);
   const partyOptions = creditParties.filter((item) => item.active);
   const [notes, setNotes] = useState(initial?.notes ?? "");
   const [expenses, setExpenses] = useState<ExpenseItem[]>(initial?.expenses ?? []);
@@ -295,29 +310,98 @@ export function DailyEntryForm({
     return mergeCommissionRows(rows, commissionOptions);
   });
   const [commissionDraft, setCommissionDraft] = useState<Pick<CommissionItem, "category" | "amount">>({
-    category: commissionOptions[0]?.name ?? COMMISSION_CATEGORIES[0],
+    category: commissionOptions[0]?.name ?? (isPg ? "" : COMMISSION_CATEGORIES[0]),
     amount: 0
   });
+
+  useEffect(() => {
+    if (categoryOptions.length > 0 && !expenseDraft.categoryId && !expenseDraft.name && expenseDraft.amount === 0) {
+      setExpenseDraft((d) => ({
+        ...d,
+        categoryId: categoryOptions[0]?.id,
+        category: categoryOptions[0]?.name ?? ""
+      }));
+    }
+  }, [categoryOptions]);
+
+  useEffect(() => {
+    if (commissionOptions.length > 0 && (!commissionDraft.category || commissionDraft.category === "") && commissionDraft.amount === 0) {
+      setCommissionDraft((d) => ({
+        ...d,
+        category: commissionOptions[0]?.name ?? ""
+      }));
+    }
+  }, [commissionOptions]);
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
   const [editingCommissionId, setEditingCommissionId] = useState<string | null>(null);
   const [editingOwnerId, setEditingOwnerId] = useState<string | null>(null);
   const [editingCreditId, setEditingCreditId] = useState<string | null>(null);
   const [commissionFilter, setCommissionFilter] = useState("all");
-  const [, setSaving] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [emailing, setEmailing] = useState(false);
+  const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const [creditVerifyMessage, setCreditVerifyMessage] = useState("");
   const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
   const [catalogName, setCatalogName] = useState("");
   const [catalogSaving, setCatalogSaving] = useState(false);
   const lastSavedRef = useRef("");
   const disabledRef = useRef(Boolean(disabled));
+  const draftDirtyRef = useRef(false);
   const [saveInFlight, setSaveInFlight] = useState(false);
   const [saveBaselineReady, setSaveBaselineReady] = useState(false);
+
+  function markDraftDirty() {
+    draftDirtyRef.current = true;
+  }
+
+  useEffect(() => {
+    draftDirtyRef.current = false;
+  }, [dayNo]);
 
   useEffect(() => {
     disabledRef.current = Boolean(disabled);
   }, [disabled]);
 
+  // Server hydration: synchronize local form state when authoritative initial changes
+  const prevInitialRef = useRef(initial);
+
+  useEffect(() => {
+    if (prevInitialRef.current === initial) {
+      return;
+    }
+    prevInitialRef.current = initial;
+
+    // Rule: ONLY hydrate when draftDirtyRef.current === false.
+    // Never overwrite active user edits!
+    if (draftDirtyRef.current) {
+      return;
+    }
+
+    if (!initial) return;
+
+    setExpenses(initial.expenses ?? []);
+
+    const commRows = (initial.commissions ?? []).map((item) => {
+      const category = normalizeCommissionCategory(item.category);
+      const catalog = commissionOptions.find((option) => option.name === category || option.id === item.categoryId);
+      return { ...item, category, categoryId: catalog?.id ?? item.categoryId };
+    });
+    setCommissions(mergeCommissionRows(commRows, commissionOptions));
+
+    setCredits(
+      mergeCreditRows(
+        initial.credits?.length
+          ? initial.credits
+          : carryCreditsFromPrevious(dayNo, previousDay)
+      )
+    );
+
+    setOwnerBalances(ownerRowsForEntry(initial.ownerBalances ?? []));
+    setNotes(initial.notes ?? "");
+  }, [initial, commissionOptions, dayNo, previousDay]);
+
   function previousCreditOpening(partyId: string, partyName: string) {
-    if (!previousDay) return 0;
+    if (!previousDay || dayNo === 32) return 0;
     const previousRow = previousDay.credits.find(
       (row) => row.partyId === partyId || normalizeKey(row.partyName) === normalizeKey(partyName)
     );
@@ -326,7 +410,20 @@ export function DailyEntryForm({
   }
 
   function currentCreditOpening(partyId: string, partyName: string, excludeId?: string | null) {
-    void excludeId;
+    if (isPg) {
+      const initialRow = initial?.credits?.find(
+        (row) => (partyId && row.partyId === partyId) || normalizeKey(row.partyName) === normalizeKey(partyName)
+      );
+      if (initialRow && initialRow.opening !== undefined) {
+        return parseLedgerNumber(initialRow.opening);
+      }
+      const existingRow = credits.find(
+        (row) => (!excludeId || row.id !== excludeId) && ((partyId && row.partyId === partyId) || normalizeKey(row.partyName) === normalizeKey(partyName))
+      );
+      if (existingRow && existingRow.opening !== undefined) {
+        return parseLedgerNumber(existingRow.opening);
+      }
+    }
     return previousCreditOpening(partyId, partyName);
   }
 
@@ -390,7 +487,7 @@ export function DailyEntryForm({
 
   const derivedOwnerBalances = useMemo(
     () => {
-      let runningOpening = previousOwnerClosingBalance;
+      let runningOpening = dayNo === 32 ? ownerOpeningBalance : previousOwnerClosingBalance;
       return ownerRowsForEntry(ownerBalances).map((row) => {
         const opening = runningOpening;
         const balance = opening + row.amount;
@@ -402,14 +499,22 @@ export function DailyEntryForm({
         };
       });
     },
-    [ownerBalances, previousOwnerClosingBalance]
+    [dayNo, ownerBalances, ownerOpeningBalance, previousOwnerClosingBalance]
   );
 
   const derivedCredits = useMemo(
     () =>
       mergeCreditRows(credits)
         .map((row) => {
-          const opening = previousCreditOpening(row.partyId ?? "", row.partyName);
+          let opening: number;
+          if (isPg) {
+            opening = row.opening !== undefined
+              ? parseLedgerNumber(row.opening)
+              : currentCreditOpening(row.partyId ?? "", row.partyName, row.id);
+          } else {
+            const prevOpening = previousCreditOpening(row.partyId ?? "", row.partyName);
+            opening = (previousDay && prevOpening !== 0) ? prevOpening : (row.opening !== undefined && row.opening !== 0 ? row.opening : prevOpening);
+          }
           const loan = parseLedgerNumber(row.loan ?? row.today);
           const receive = parseLedgerNumber(row.receive);
           return {
@@ -422,11 +527,11 @@ export function DailyEntryForm({
           };
         })
         .filter(isCreditMovementRow),
-    [credits, previousDay]
+    [credits, isPg, previousDay]
   );
 
   useEffect(() => {
-    if (!previousDay) return;
+    if (!previousDay || dayNo === 32) return;
     setCredits((rows) => {
       const existingKeys = new Set(rows.map((row) => row.partyId ?? normalizeKey(row.partyName)));
       const missingRows = previousDay.credits
@@ -494,20 +599,28 @@ export function DailyEntryForm({
     ]
   );
 
-  const { hasPendingAutoSave } = useAutoSaveEntry({
+  const inFlightSavePromiseRef = useRef<Promise<void> | null>(null);
+
+  const { autoSaveStatus, hasPendingAutoSave } = useAutoSaveEntry({
     data: payload,
-    enabled: true,
-    disabled,
+    enabled: !disabled && draftDirtyRef.current,
+    disabled: disabled || !draftDirtyRef.current,
     debounceMs: 900,
-    resetKey: `${dayNo}-${initial?.lockedAt ?? ""}-${initial?.updatedAt ?? ""}`,
+    resetKey: `${dayNo}-${initial?.lockedAt ?? ""}-${initial?.updatedAt ?? ""}-${previousDay?.dayNo ?? "init"}-${previousDay?.credits?.length ?? 0}`,
     save: async (nextPayload) => {
       setSaveInFlight(true);
-      try {
-        await onSave(nextPayload, { silent: true });
-        lastSavedRef.current = JSON.stringify(nextPayload);
-      } finally {
-        setSaveInFlight(false);
-      }
+      const promise = (async () => {
+        try {
+          await onSave(nextPayload, { silent: true });
+          lastSavedRef.current = JSON.stringify(nextPayload);
+          draftDirtyRef.current = false;
+        } finally {
+          setSaveInFlight(false);
+          inFlightSavePromiseRef.current = null;
+        }
+      })();
+      inFlightSavePromiseRef.current = promise;
+      await promise;
     }
   });
 
@@ -516,8 +629,8 @@ export function DailyEntryForm({
   const editingOwnerOpening = editingOwnerId
     ? derivedOwnerBalances.find((row) => row.id === editingOwnerId)?.opening
     : undefined;
-  const ownerOpeningPreview = editingOwnerOpening ?? derivedOwnerBalances[0]?.opening ?? previousOwnerClosingBalance;
-  const ownerClosingPreview = derivedOwnerBalances.at(-1)?.balance ?? previousOwnerClosingBalance;
+  const ownerOpeningPreview = editingOwnerOpening ?? derivedOwnerBalances[0]?.opening ?? (dayNo === 32 ? ownerOpeningBalance : previousOwnerClosingBalance);
+  const ownerClosingPreview = derivedOwnerBalances.at(-1)?.balance ?? (dayNo === 32 ? ownerOpeningBalance : previousOwnerClosingBalance);
 
   const creditOpeningPreview = creditDraft.partyId
     ? currentCreditOpening(creditDraft.partyId, creditDraft.partyName, editingCreditId)
@@ -529,7 +642,13 @@ export function DailyEntryForm({
     setSaveBaselineReady(true);
   }, [dayNo, initial?.lockedAt, initial?.updatedAt]);
 
-  const hasPendingChanges = saveBaselineReady && (
+  useEffect(() => {
+    if (!draftDirtyRef.current) {
+      lastSavedRef.current = JSON.stringify(payload);
+    }
+  }, [payload]);
+
+  const hasPendingChanges = saveBaselineReady && draftDirtyRef.current && (
     saveInFlight ||
     hasPendingAutoSave ||
     JSON.stringify(payload) !== lastSavedRef.current
@@ -537,6 +656,9 @@ export function DailyEntryForm({
 
   useEffect(() => {
     onPendingStateChange?.(hasPendingChanges);
+    return () => {
+      onPendingStateChange?.(false);
+    };
   }, [hasPendingChanges, onPendingStateChange]);
 
   useEffect(() => {
@@ -549,19 +671,81 @@ export function DailyEntryForm({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [hasPendingChanges]);
 
-  async function handleManualSave() {
+  async function handleManualSave(): Promise<boolean> {
     if (disabledRef.current) return false;
+    if (inFlightSavePromiseRef.current) {
+      try {
+        await inFlightSavePromiseRef.current;
+        if (!draftDirtyRef.current && JSON.stringify(payload) === lastSavedRef.current) {
+          return true;
+        }
+      } catch {
+        return false;
+      }
+    }
     setSaving(true);
     setSaveInFlight(true);
+    const savePromise = (async () => {
+      try {
+        await onSave(payload);
+        lastSavedRef.current = JSON.stringify(payload);
+        draftDirtyRef.current = false;
+        return true;
+      } catch {
+        return false;
+      } finally {
+        setSaveInFlight(false);
+        setSaving(false);
+        inFlightSavePromiseRef.current = null;
+      }
+    })();
+    inFlightSavePromiseRef.current = savePromise.then(() => {});
+    return savePromise;
+  }
+
+  async function handleVerifiedSave() {
+    if (disabledRef.current || saveInFlight) return;
+    setVerifiedSave({
+      status: "saving",
+      title: isPg ? "Saving Expense Day to PostgreSQL" : "Saving Expense Day",
+      message: isPg
+        ? "Writing day transactions to PostgreSQL ledger and waiting for confirmation..."
+        : "Writing the complete day snapshot to storage and waiting for confirmation..."
+    });
+    setSaveInFlight(true);
     try {
-      await onSave(payload);
+      await onSave(payload, { awaitRemote: true });
       lastSavedRef.current = JSON.stringify(payload);
-      return true;
-    } catch {
-      return false;
+      draftDirtyRef.current = false;
+      setVerifiedSave({
+        status: "success",
+        title: "Save Confirmed",
+        message: isPg
+          ? `Day ${dayNo} was saved successfully to PostgreSQL.`
+          : `Day ${dayNo} was saved successfully.`
+      });
+    } catch (error) {
+      setVerifiedSave({
+        status: "error",
+        title: "Save Failed",
+        message: error instanceof Error ? error.message : "Failed to save day."
+      });
     } finally {
       setSaveInFlight(false);
-      setSaving(false);
+    }
+  }
+
+  async function handleSendEmail() {
+    if (!onSendEmail) return;
+    setEmailing(true);
+    try {
+      if (hasPendingChanges) {
+        const saved = await handleManualSave();
+        if (!saved) return;
+      }
+      await onSendEmail(payload);
+    } finally {
+      setEmailing(false);
     }
   }
 
@@ -577,13 +761,19 @@ export function DailyEntryForm({
 
   function addExpense() {
     if (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0) return;
-    setExpenses((rows) => [
-      ...rows,
-      {
-        id: `${dayNo}-expense-${crypto.randomUUID()}`,
-        ...expenseDraft
-      }
-    ]);
+    if (isPg && categoryOptions.length === 0) return;
+    markDraftDirty();
+    setExpenses((rows) => {
+      const remainingRows = editingExpenseId ? rows.filter((row) => row.id !== editingExpenseId) : rows;
+      return [
+        ...remainingRows,
+        {
+          id: editingExpenseId ?? `${dayNo}-expense-${crypto.randomUUID()}`,
+          ...expenseDraft,
+          categoryId: isPg ? (expenseDraft.categoryId ?? categoryOptions[0]?.id) : expenseDraft.categoryId
+        }
+      ];
+    });
     setExpenseDraft({
       categoryId: categoryOptions[0]?.id,
       category: categoryOptions[0]?.name ?? "",
@@ -591,10 +781,13 @@ export function DailyEntryForm({
       description: "",
       amount: 0
     });
+    setEditingExpenseId(null);
   }
 
   function editExpense(item: ExpenseItem) {
-    if (!window.confirm(`Edit ${item.name || "unnamed"} expense entry? It will move back to the entry controls.`)) return;
+    if (!window.confirm(`Edit ${item.name || item.description || "unnamed"} expense entry? It will move back to the entry controls.`)) return;
+    markDraftDirty();
+    setEditingExpenseId(item.id);
     setExpenseDraft({
       categoryId: item.categoryId ?? categoryOptions[0]?.id,
       category: item.category ?? categoryOptions[0]?.name ?? "",
@@ -602,11 +795,21 @@ export function DailyEntryForm({
       description: item.description,
       amount: item.amount
     });
-    setExpenses((rows) => rows.filter((row) => row.id !== item.id));
   }
 
   function deleteExpense(item: ExpenseItem) {
-    if (!window.confirm(`Delete ${item.name || "unnamed"} expense of ${item.amount.toLocaleString()}?`)) return;
+    if (!window.confirm(`Delete ${item.name || item.description || "unnamed"} expense of ${item.amount.toLocaleString()}?`)) return;
+    markDraftDirty();
+    if (editingExpenseId === item.id) {
+      setEditingExpenseId(null);
+      setExpenseDraft({
+        categoryId: categoryOptions[0]?.id,
+        category: categoryOptions[0]?.name ?? "",
+        name: "",
+        description: "",
+        amount: 0
+      });
+    }
     setExpenses((rows) => rows.filter((row) => row.id !== item.id));
   }
 
@@ -616,6 +819,7 @@ export function DailyEntryForm({
     const amount = expense - received;
     if (!ownerDraft.description.trim() && expense === 0 && received === 0) return;
     const description = ownerDraft.description.trim();
+    markDraftDirty();
     setOwnerBalances((rows) => {
       if (editingOwnerId) {
         return rows.map((row) =>
@@ -654,6 +858,7 @@ export function DailyEntryForm({
 
   function editOwnerRow(row: OwnerBalanceRow) {
     if (!window.confirm(`Edit franchise owner entry?`)) return;
+    markDraftDirty();
     setOwnerDraft({
       description: row.description ?? row.label ?? "",
       expense: row.expense ?? Math.max(row.amount, 0),
@@ -664,12 +869,14 @@ export function DailyEntryForm({
 
   function deleteOwnerRow(row: OwnerBalanceRow) {
     if (!window.confirm(`Delete franchise owner entry for ${row.description || row.label || "this row"}?`)) return;
+    markDraftDirty();
     setOwnerBalances((rows) => rows.filter((r) => r.id !== row.id));
   }
 
   function addCredit() {
     if (!creditDraft.partyId) return;
     const opening = currentCreditOpening(creditDraft.partyId, creditDraft.partyName, editingCreditId);
+    markDraftDirty();
     setCredits((rows) => {
       const editingRow = editingCreditId ? rows.find((row) => row.id === editingCreditId) : undefined;
       const remainingRows = editingCreditId ? rows.filter((row) => row.id !== editingCreditId) : rows;
@@ -737,6 +944,7 @@ export function DailyEntryForm({
 
   function deleteCredit(row: CreditRow) {
     if (!window.confirm(`Delete credit entry for ${row.partyName}?`)) return;
+    markDraftDirty();
     setCredits((rows) => rows.filter((r) => r.id !== row.id));
   }
 
@@ -745,6 +953,7 @@ export function DailyEntryForm({
     field: "loanDescription" | "receiveDescription",
     value: string
   ) {
+    markDraftDirty();
     setCredits((rows) => rows.map((row) => row.id === rowId ? { ...row, [field]: value } : row));
   }
 
@@ -765,12 +974,16 @@ export function DailyEntryForm({
 
   function deleteCommission(item: CommissionItem) {
     if (!window.confirm(`Delete ${item.category} commission entry of ${item.amount.toLocaleString()}?`)) return;
+    markDraftDirty();
     setCommissions((rows) => rows.filter((row) => row.id !== item.id));
   }
 
   function addCommission() {
     if (commissionDraft.amount === 0) return;
+    if (isPg && commissionOptions.length === 0) return;
     const categoryId = commissionOptions.find((option) => option.name === commissionDraft.category)?.id;
+    if (isPg && !categoryId) return;
+    markDraftDirty();
     setCommissions((rows) => {
       const remainingRows = editingCommissionId ? rows.filter((row) => row.id !== editingCommissionId) : rows;
       const duplicateRow = remainingRows.find((row) => row.category === commissionDraft.category || row.categoryId === categoryId);
@@ -833,6 +1046,7 @@ export function DailyEntryForm({
 
   return (
     <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {catalogModal && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 text-slate-100 shadow-2xl shadow-black/40">
@@ -866,24 +1080,135 @@ export function DailyEntryForm({
         <section className="panel">
           <div className="panel-title">
             <div>
+              <h2>{dayNo === 32 ? "FINAL Month-End Entry" : `Day ${dayNo} Entry`}</h2>
+            </div>
+            <div className="hidden items-center gap-3 md:flex">
+              <span className={`text-xs font-semibold uppercase ${
+                disabled
+                  ? "text-slate-400"
+                  : (saveInFlight || autoSaveStatus === "saving")
+                  ? "text-amber-300"
+                  : autoSaveStatus === "error"
+                  ? "text-rose-300"
+                  : draftDirtyRef.current
+                  ? "text-amber-400"
+                  : "text-emerald-300"
+              }`}>
+                {disabled
+                  ? "Day closed"
+                  : (saveInFlight || autoSaveStatus === "saving")
+                  ? "Saving…"
+                  : autoSaveStatus === "error"
+                  ? "Save failed"
+                  : draftDirtyRef.current
+                  ? "Unsaved changes"
+                  : "Saved"}
+              </span>
+              <button
+                className="btn-primary"
+                disabled={disabled || saving || emailing || saveInFlight}
+                title={disabled ? "Reopen the day before saving." : isPg ? "Write now to PostgreSQL ledger and wait for confirmation" : "Write now and wait for confirmation"}
+                onClick={() => void handleVerifiedSave()}
+              >
+                <Save />
+                Save Now & Verify
+              </button>
+              {onSendEmail && (
+                <button
+                  className="btn-secondary"
+                  disabled={!canSendEmail || saving || emailing || saveInFlight}
+                  title={!canSendEmail ? "Email sending is disabled until Firebase Functions deployment is available." : "Send email report"}
+                  onClick={() => void handleSendEmail()}
+                >
+                  {emailing && <LoadingIcon label="Sending email" />}
+                  {emailing ? "Sending..." : "Send Email"}
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="grid two">
+            <label>
+              Opening Balance
+              <input value={preview.openingBalance.toLocaleString()} disabled readOnly />
+            </label>
+            <label>
+              Notes
+              <input value={notes} disabled={disabled} onChange={(event) => { markDraftDirty(); setNotes(event.target.value); }} />
+            </label>
+          </div>
+        </section>
+
+        <div className="mobile-entry-actions md:hidden">
+          <div className="flex flex-col gap-0.5">
+            <p className={`text-[11px] font-semibold uppercase ${
+              disabled
+                ? "text-slate-400"
+                : (saveInFlight || autoSaveStatus === "saving")
+                ? "text-amber-300"
+                : autoSaveStatus === "error"
+                ? "text-rose-300"
+                : draftDirtyRef.current
+                ? "text-amber-400"
+                : "text-emerald-300"
+            }`}>
+              {disabled
+                ? "Day closed"
+                : (saveInFlight || autoSaveStatus === "saving")
+                ? "Saving…"
+                : autoSaveStatus === "error"
+                ? "Save failed"
+                : draftDirtyRef.current
+                ? "Unsaved changes"
+                : "Saved"}
+            </p>
+            <p className="mt-0.5 text-xs text-slate-400">
+              {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
+            </p>
+          </div>
+          <button className="btn-primary" disabled={disabled || saving || saveInFlight} onClick={() => void handleVerifiedSave()}>
+            <Save />
+            Save & Verify
+          </button>
+        </div>
+
+        <section className="panel">
+          <div className="panel-title">
+            <div>
               <h3>Commission</h3>
             </div>
           </div>
+          {isPg && commissionOptions.length === 0 && (
+            <p className="warning mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+              No active commission categories configured in PostgreSQL catalog. Please configure commission categories before adding commissions.
+            </p>
+          )}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
             <label>
               Category
-              <select disabled={disabled} value={commissionDraft.category} onChange={(event) => setCommissionDraft((draft) => ({ ...draft, category: event.target.value }))}>
-                {commissionOptions.map((category) => (
-                  <option key={category.id} value={category.name}>{category.name}</option>
-                ))}
+              <select
+                disabled={disabled || (isPg && commissionOptions.length === 0)}
+                value={commissionDraft.category}
+                onChange={(event) => setCommissionDraft((draft) => ({ ...draft, category: event.target.value }))}
+              >
+                {commissionOptions.length === 0 ? (
+                  <option value="">No categories configured</option>
+                ) : (
+                  commissionOptions.map((category) => (
+                    <option key={category.id} value={category.name}>{category.name}</option>
+                  ))
+                )}
               </select>
             </label>
             <label>
               Amount
-              {inputText(commissionDraft.amount, (amount) => setCommissionDraft((draft) => ({ ...draft, amount })), disabled)}
+              {inputText(commissionDraft.amount, (amount) => setCommissionDraft((draft) => ({ ...draft, amount })), disabled || (isPg && commissionOptions.length === 0))}
             </label>
             <div className="flex items-end gap-2">
-              <button className="btn-primary" disabled={disabled || commissionDraft.amount === 0} onClick={addCommission}>
+              <button
+                className="btn-primary"
+                disabled={disabled || (isPg && commissionOptions.length === 0) || commissionDraft.amount === 0}
+                onClick={addCommission}
+              >
                 {editingCommissionId ? "Update Entry" : "Add Entry"}
               </button>
               <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add commission category" onClick={() => setCatalogModal("commission")}>
@@ -985,21 +1310,30 @@ export function DailyEntryForm({
               <h3>Expense</h3>
             </div>
           </div>
+          {isPg && categoryOptions.length === 0 && (
+            <p className="warning mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+              No active expense categories configured in PostgreSQL catalog. Please configure expense categories before adding expenses.
+            </p>
+          )}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr_1fr_auto]">
             <label>
               Category
               <select
-                disabled={disabled}
-                value={expenseDraft.categoryId}
+                disabled={disabled || (isPg && categoryOptions.length === 0)}
+                value={expenseDraft.categoryId ?? ""}
                 onChange={(event) => {
                   const catId = event.target.value;
                   const cat = categoryOptions.find((c) => c.id === catId);
                   setExpenseDraft((draft) => ({ ...draft, categoryId: catId, category: cat?.name ?? "" }));
                 }}
               >
-                {categoryOptions.map((category) => (
-                  <option key={category.id} value={category.id}>{category.name}</option>
-                ))}
+                {categoryOptions.length === 0 ? (
+                  <option value="">No categories configured</option>
+                ) : (
+                  categoryOptions.map((category) => (
+                    <option key={category.id} value={category.id}>{category.name}</option>
+                  ))
+                )}
               </select>
             </label>
             <label>
@@ -1007,7 +1341,7 @@ export function DailyEntryForm({
               <input
                 type="text"
                 value={expenseDraft.name}
-                disabled={disabled}
+                disabled={disabled || (isPg && categoryOptions.length === 0)}
                 onChange={(event) => setExpenseDraft((draft) => ({ ...draft, name: event.target.value }))}
               />
             </label>
@@ -1016,21 +1350,21 @@ export function DailyEntryForm({
               <input
                 type="text"
                 value={expenseDraft.description}
-                disabled={disabled}
+                disabled={disabled || (isPg && categoryOptions.length === 0)}
                 onChange={(event) => setExpenseDraft((draft) => ({ ...draft, description: event.target.value }))}
               />
             </label>
             <label>
               Amount
-              {inputText(expenseDraft.amount, (amount) => setExpenseDraft((draft) => ({ ...draft, amount })), disabled)}
+              {inputText(expenseDraft.amount, (amount) => setExpenseDraft((draft) => ({ ...draft, amount })), disabled || (isPg && categoryOptions.length === 0))}
             </label>
             <div className="flex items-end gap-2">
               <button
                 className="btn-primary"
-                disabled={disabled || (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0)}
+                disabled={disabled || (isPg && categoryOptions.length === 0) || (!expenseDraft.name && !expenseDraft.description && expenseDraft.amount === 0)}
                 onClick={addExpense}
               >
-                Add Entry
+                {editingExpenseId ? "Update Entry" : "Add Entry"}
               </button>
               <button className="btn-secondary !h-10 !w-10 !px-0" disabled={!canCreateCatalogs || !onCreateCatalog} title="Add expense category" onClick={() => setCatalogModal("expense")}>
                 <Plus />

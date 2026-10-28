@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:all": "./start.sh",
+    "dev:all:dev": "./start.sh --dev",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "auth:provision": "npm --prefix backend run auth:provision",
+    "import:august": "npm --prefix backend run import:august --",
+    "import:august-jazzload": "npm --prefix backend run import:august-jazzload --",
     "test:emulator:rules": "firebase emulators:exec --only firestore \"vitest run src/shared/ledger/firestoreRules.integration.test.ts\"",
     "test:emulator:callables": "npm --prefix functions run build && FUNCTIONS_EMULATOR_ORIGIN=http://127.0.0.1:5001 firebase emulators:exec --only firestore,functions,auth \"vitest run src/shared/ledger/callableRecalculation.integration.test.ts\"",
     "reconcile": "node scripts/reconcile.mjs",
@@ -28,9 +33,9 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
     "@testing-library/react": "^16.0.1",
     "@testing-library/user-event": "^14.5.2",
-    "@firebase/rules-unit-testing": "^4.0.1",
     "@types/node": "^22.7.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
@@ -38,7 +43,6 @@
     "jsdom": "^25.0.1",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
-    "vite-plugin-pwa": "^1.3.0",
     "vitest": "^2.1.3"
   }
 }

@@ -35,11 +35,10 @@ describe("DailyEntryForm close-day locking", () => {
     );
 
     expect((screen.getByLabelText("Notes") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText("Day closed")).toBeTruthy();
-    expect(screen.getAllByText("Autosave off").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Day closed").length).toBeGreaterThan(0);
   });
 
-  it("shows progress until a verified Firestore save completes", async () => {
+  it("shows progress until a verified save completes without mentioning Firestore", async () => {
     let confirmSave: (() => void) | undefined;
     const onSave = vi.fn(() => new Promise<void>((resolve) => {
       confirmSave = resolve;
@@ -69,7 +68,8 @@ describe("DailyEntryForm close-day locking", () => {
 
     confirmSave?.();
     expect(await screen.findByText("Save Confirmed")).toBeTruthy();
-    expect(screen.getByText(/Firestore confirmed the write/)).toBeTruthy();
+    expect(screen.getByText(/Day 7 was saved successfully/)).toBeTruthy();
+    expect(screen.queryByText(/Firestore confirmed the write/)).toBeNull();
   });
 
   it("includes separate credit party descriptions in the saved day payload", async () => {
@@ -120,5 +120,94 @@ describe("DailyEntryForm close-day locking", () => {
       }),
       { awaitRemote: true }
     );
+  });
+
+  it("does not report pending changes during passive seed/previousDay rehydration", () => {
+    const onPendingStateChange = vi.fn();
+    const { rerender } = render(
+      <DailyEntryForm
+        dayNo={1}
+        entryYear={2026}
+        entryMonth={8}
+        entryDay={1}
+        openingBalance={15000}
+        ownerOpeningBalance={6500}
+        previousOwnerClosingBalance={6500}
+        dateLabel="2026-08-01"
+        expenseCategories={[]}
+        commissionCategories={[]}
+        creditParties={[{ id: "p1", name: "Party 1", active: true, sortOrder: 1 }]}
+        initial={{ dayNo: 1, expenses: [], commissions: [], credits: [], ownerBalances: [] }}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        onCloseDay={vi.fn().mockResolvedValue(undefined)}
+        onPendingStateChange={onPendingStateChange}
+      />
+    );
+
+    expect(onPendingStateChange).toHaveBeenLastCalledWith(false);
+
+    rerender(
+      <DailyEntryForm
+        dayNo={1}
+        entryYear={2026}
+        entryMonth={8}
+        entryDay={1}
+        openingBalance={15000}
+        ownerOpeningBalance={6500}
+        previousOwnerClosingBalance={6500}
+        dateLabel="2026-08-01"
+        expenseCategories={[]}
+        commissionCategories={[]}
+        creditParties={[{ id: "p1", name: "Party 1", active: true, sortOrder: 1 }]}
+        previousDay={{
+          dayNo: 0,
+          date: "2026-07-31",
+          expenses: [],
+          commissions: [],
+          credits: [
+            { id: "c1", partyId: "p1", partyName: "Party 1", opening: 5000, loan: 0, receive: 0, balance: 5000 }
+          ],
+          ownerBalances: []
+        } as any}
+        initial={{ dayNo: 1, expenses: [], commissions: [], credits: [], ownerBalances: [] }}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        onCloseDay={vi.fn().mockResolvedValue(undefined)}
+        onPendingStateChange={onPendingStateChange}
+      />
+    );
+
+    expect(onPendingStateChange).toHaveBeenLastCalledWith(false);
+    expect(onPendingStateChange).not.toHaveBeenCalledWith(true);
+  });
+
+  it("reports pending changes when user modifies an input, and clears on unmount", async () => {
+    const onPendingStateChange = vi.fn();
+    const { unmount } = render(
+      <DailyEntryForm
+        dayNo={1}
+        entryYear={2026}
+        entryMonth={8}
+        entryDay={1}
+        openingBalance={15000}
+        ownerOpeningBalance={6500}
+        previousOwnerClosingBalance={6500}
+        dateLabel="2026-08-01"
+        expenseCategories={[]}
+        commissionCategories={[]}
+        creditParties={[]}
+        initial={{ dayNo: 1, expenses: [], commissions: [], credits: [], ownerBalances: [] }}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+        onCloseDay={vi.fn().mockResolvedValue(undefined)}
+        onPendingStateChange={onPendingStateChange}
+      />
+    );
+
+    expect(onPendingStateChange).toHaveBeenLastCalledWith(false);
+
+    await userEvent.type(screen.getByLabelText("Notes"), "Test daily note");
+    expect(onPendingStateChange).toHaveBeenCalledWith(true);
+
+    unmount();
+    expect(onPendingStateChange).toHaveBeenLastCalledWith(false);
   });
 });

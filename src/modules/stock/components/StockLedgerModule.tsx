@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
-import type { User } from "firebase/auth";
-import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box } from "lucide-react";
+export interface LedgerUser { uid: string; email?: string | null; displayName?: string | null; }
+import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History } from "lucide-react";
 import type { UserRole, SystemAuditLog } from "../../../types/ledger";
 import { subscribeAuditLogs } from "../../../lib/auditLogService";
 import type { SyncState } from "../../../lib/syncStatus";
@@ -41,7 +41,6 @@ import {
   updateStockProductSortOrder,
   subscribeStockOpeningBalances,
   subscribeStockSettingsConfig,
-  saveStockSettingsConfig,
   type FirestoreSnapshotMeta
 } from "../services/stockFirestore";
 import { exportStockDayXlsx, exportStockMonthlyXlsx, exportStockPrintable } from "../services/stockReports";
@@ -50,13 +49,15 @@ import type {
   StockAccountType,
   StockDailyAccountDraft,
   StockDayRecord,
+  StockDayStatus,
   StockMonth,
   StockMonthlySummary,
   StockProduct,
   StockProductLine,
   StockInRecord,
   StockOpeningBalances,
-  StockSettingsConfig
+  StockSettingsConfig,
+  StockAccountMonthlyTotal
 } from "../types/stock.types";
 import {
   compareMonthIds,
@@ -82,15 +83,35 @@ import { runMasterRecalculation } from "../../../shared/services/masterRecalcula
 import { resolveLedgerUiReadDecision } from "../../../shared/ledger/ledgerReadMode";
 import type { LedgerReadModeConfig } from "../../../shared/ledger/ledgerTypes";
 import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
-import { applySortOrder, reorderItems } from "../../../shared/services/orderUtils";
+import { applySortOrder, changedSortOrderPatches, reorderItems } from "../../../shared/services/orderUtils";
 import { createStockRecalculationAdapter } from "../adapters/stockRecalculationAdapter";
 import { SaveProgressDialog, type SaveProgressState } from "../../../shared/components/SaveProgressDialog";
+import { isPostgreSqlPeriod, resolveAccountingDayId, getAccountingPeriodWithDays } from "../../../services/api/periodDayService";
+import { saveStockDayPostgres, loadStockDayPostgres, loadStockMonthPostgres, deleteStockInPostgres } from "../../../services/api/stockTransactionService";
+import { recordJazzCompanyPaymentPostgres } from "../../../services/api/jazzLoadTransactionService";
+import { ledgerApiClient } from "../../../services/api/ledgerApiClient";
+import { closeOperationalDayUnified, reopenOperationalDayUnified, subscribeDayStatus } from "../../../services/api/dayLifecycleService";
+import { TransferBalanceModal } from "./TransferBalanceModal";
+
+export function isServerLoadedStockDay(day?: StockDayRecord | null): boolean {
+  if (!day) return false;
+  if (
+    (day.entries && day.entries.length > 0) ||
+    (day.stockIn && day.stockIn.length > 0) ||
+    (day.stockProductProjections && day.stockProductProjections.length > 0) ||
+    (day.stockAccountProjections && day.stockAccountProjections.length > 0) ||
+    Boolean(day.notes)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 type StockSection = "dashboard" | "stockIn" | "daily" | "records" | "balances" | "jazzPayable" | "dues" | "products" | "accounts" | "settings" | "backup" | "reportsHub";
 type StockSectionGroup = "entries" | "reports";
 
 type Props = {
-  user: User;
+  user: LedgerUser;
   role: UserRole | null;
   monthId: string;
   syncState: SyncState;
@@ -102,6 +123,7 @@ type Props = {
   onTriggerMasterRefresh?: (adapter: MasterRecalculationAdapter, title: string) => Promise<void>;
   ledgerReadModeConfig: LedgerReadModeConfig;
   loading?: boolean;
+  onPendingStateChange?: (pending: boolean) => void;
 };
 
 function isFutureDay(monthId: string, dayNo: number, now = new Date()) {
@@ -137,6 +159,7 @@ function getStockDayStatus(
   if (!day) return "Open";
   if (monthStatus === "closed") return "Closed";
   if (day.status === "reopen" || isReopenActive(day, now)) return "Reopen";
+  if (day.status === "open") return "Open";
   if (day?.status === "closed" || day?.lockedAt != null || day?.closedAt != null) return "Closed";
   return "Open";
 }
@@ -320,7 +343,8 @@ function stockCarryForwardWarnings(
   for (const [productId, expected] of Object.entries(previousClosingStock)) {
     const actual = openingStock[productId];
     if (actual !== undefined && actual !== expected) {
-      warnings.push(`${productId} opening stock ${formatMoney(actual)} should equal previous month closing stock ${formatMoney(expected)}`);
+      const formatVal = (v: number | null | undefined) => (v == null ? "Skipped" : formatMoney(v));
+      warnings.push(`${productId} opening stock ${formatVal(actual)} should equal previous month closing stock ${formatVal(expected)}`);
     }
   }
   if (summary?.openingJazzPayable !== undefined && prevSummary.closingJazzPayable !== undefined && summary.openingJazzPayable !== prevSummary.closingJazzPayable) {
@@ -342,7 +366,7 @@ function SettingsTable({
   kind: "product" | "account";
   canEdit: boolean;
   rows: Array<StockProduct | StockAccountProfile>;
-  onSave: (row: any) => void;
+  onSave: (row: any) => void | Promise<any>;
   onDelete: (id: string) => void;
   onReorder: (before: Array<StockProduct | StockAccountProfile>, after: Array<StockProduct | StockAccountProfile>) => void;
 }) {
@@ -423,7 +447,7 @@ function SettingsTable({
           <button
             className="btn-primary"
             disabled={!draft.name.trim()}
-            onClick={() => {
+            onClick={async () => {
               const id = slug(draft.name);
               const nextOrder = displayRows.length + 1;
               const base = {
@@ -436,16 +460,18 @@ function SettingsTable({
                 createdAt: Date.now(),
                 updatedAt: Date.now()
               };
-              if (kind === "product") {
-                onSave({
-                  ...base,
-                  rate: draft.rate,
-                  paymentTrackingEnabled: draft.paymentTracking
-                } as StockProduct);
-              } else {
-                onSave({ ...base, type: draft.type, openingBalance: 0 } as StockAccountProfile);
-              }
-              setDraft({ name: "", rate: 0, type: "CCR", order: nextOrder + 1, paymentTracking: true });
+              try {
+                if (kind === "product") {
+                  await onSave({
+                    ...base,
+                    rate: draft.rate,
+                    paymentTrackingEnabled: draft.paymentTracking
+                  } as StockProduct);
+                } else {
+                  await onSave({ ...base, type: draft.type, openingBalance: 0 } as StockAccountProfile);
+                }
+                setDraft({ name: "", rate: 0, type: "CCR", order: nextOrder + 1, paymentTracking: true });
+              } catch {}
             }}
           >
             Add
@@ -543,7 +569,7 @@ function SettingsTable({
                     {row.sortOrder ?? row.displayOrder}
                   </td>
                   <td>
-                    <button className={row.active ? "btn-chip btn-chip-active" : "btn-chip"} disabled={!canEdit} onClick={() => onSave({ ...row, active: !row.active })}>
+                    <button className={row.active ? "btn-chip btn-chip-active" : "btn-chip"} disabled={!canEdit} onClick={() => void onSave({ ...row, active: !row.active })}>
                       {row.active ? "Active" : "Inactive"}
                     </button>
                   </td>
@@ -555,7 +581,7 @@ function SettingsTable({
                             <button
                               className="btn-primary !h-8 !w-8 !px-0 flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white"
                               title="Save changes"
-                              onClick={() => {
+                              onClick={async () => {
                                 if (!editDraft || !editDraft.name.trim()) return;
                                 const updated = {
                                   ...row,
@@ -570,9 +596,11 @@ function SettingsTable({
                                 } else if (kind === "account") {
                                   (updated as StockAccountProfile).type = editDraft.type;
                                 }
-                                onSave(updated);
-                                setEditingId(null);
-                                setEditDraft(null);
+                                try {
+                                  await onSave(updated);
+                                  setEditingId(null);
+                                  setEditDraft(null);
+                                } catch {}
                               }}
                             >
                               <Check className="h-4 w-4" />
@@ -651,7 +679,8 @@ export function StockLedgerModule({
   onStatus,
   onTriggerMasterRefresh,
   ledgerReadModeConfig,
-  loading
+  loading,
+  onPendingStateChange
 }: Props) {
   const { selectedDay, setSelectedDay } = useSelectedDate();
   const [section, setSection] = useState<StockSection>("daily");
@@ -692,6 +721,9 @@ export function StockLedgerModule({
   const [now, setNow] = useState(() => new Date());
   const [monthBootstrapPending, setMonthBootstrapPending] = useState(false);
   const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferModalTab, setTransferModalTab] = useState<"new" | "history">("new");
+  const [currentDayId, setCurrentDayId] = useState<string>("");
   const monthBootstrapPendingRef = useRef(false);
   const openingSeedAttemptedRef = useRef(false);
   const [openingBalances, setOpeningBalances] = useState<StockOpeningBalances>({ openingStock: {}, jazzOpeningPayable: 0 });
@@ -702,6 +734,8 @@ export function StockLedgerModule({
   );
   const stockDraftRef = useRef(draft);
   const stockDraftDirtyRef = useRef(false);
+  const saveInFlightRef = useRef(false);
+  const inFlightSavePromiseRef = useRef<Promise<void> | null>(null);
   const stockDraftHydrationKeyRef = useRef("");
   const focusedStockDraftFieldsRef = useRef(new Set<string>());
 
@@ -774,8 +808,80 @@ export function StockLedgerModule({
   const activeProducts = useMemo(() => sortedProducts.filter((product) => product.active), [sortedProducts]);
   const sortedAccounts = useMemo(() => accountsSorted(accounts), [accounts]);
   const activeAccounts = useMemo(() => {
-    return sortedAccounts.filter((account) => account.active || selectedDayRecord?.entries.some((entry) => entry.accountId === account.id));
-  }, [sortedAccounts, selectedDayRecord]);
+    return sortedAccounts.filter((account) =>
+      account.active ||
+      days.some((day) => day.entries.some((entry) => entry.accountId === account.id && (entry.totalQty > 0 || entry.totalPaymentReceived > 0)))
+    );
+  }, [sortedAccounts, days]);
+
+  const currentAccountBalances = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (selectedDayRecord?.entries) {
+      for (const entry of selectedDayRecord.entries) {
+        map[entry.accountId] = Number(entry.dueBalance ?? 0);
+      }
+    }
+    if (selectedDayRecord?.stockAccountProjections) {
+      for (const proj of selectedDayRecord.stockAccountProjections) {
+        if (proj.account_id && proj.closing_due !== undefined) {
+          map[proj.account_id] = Number(proj.closing_due);
+        }
+      }
+    }
+    for (const acc of activeAccounts) {
+      if (map[acc.id] === undefined) {
+        map[acc.id] = Number(openingBalances.stockAccountOpening?.[acc.id] ?? acc.openingBalance ?? 0);
+      }
+    }
+    return map;
+  }, [selectedDayRecord?.entries, selectedDayRecord?.stockAccountProjections, activeAccounts, openingBalances.stockAccountOpening]);
+
+  const handleOpenTransferModal = async (tab: "new" | "history" = "new") => {
+    try {
+      const dayId = await resolveAccountingDayId(monthId, selectedDay);
+      if (!dayId) {
+        onStatus(`Cannot find accounting day ${selectedDay} for period ${monthId}.`);
+        return;
+      }
+      setCurrentDayId(dayId);
+      setTransferModalTab(tab);
+      setIsTransferModalOpen(true);
+    } catch (err) {
+      console.error("[StockLedgerModule] Failed to resolve day ID:", err);
+      onStatus("Failed to resolve active accounting day.");
+    }
+  };
+
+  const handleTransferSuccess = async (result: any) => {
+    if (result?.reversal) {
+      onStatus(`Reversal of balance transfer completed successfully via compensating record.`);
+    } else if (result?.transfer) {
+      onStatus(`Balance transfer of Rs. ${formatMoney(Number(result.transfer.amount))} completed.`);
+    } else {
+      onStatus(`Stock balance transfer operation completed.`);
+    }
+    try {
+      const loadedDay = await loadStockDayPostgres(monthId, selectedDay, products, accounts);
+      if (loadedDay) {
+        setDays((current) => {
+          const exists = current.some((d) => d.dayNo === loadedDay.dayNo);
+          if (exists) {
+            return current.map((d) => (d.dayNo === loadedDay.dayNo ? loadedDay : d));
+          }
+          return [...current, loadedDay].sort((a, b) => a.dayNo - b.dayNo);
+        });
+      }
+      if (isPostgreSqlPeriod(monthId)) {
+        const monthDays = await loadStockMonthPostgres(monthId, products, accounts);
+        if (monthDays && monthDays.length > 0) {
+          setDays(monthDays);
+        }
+      }
+    } catch (err) {
+      console.warn("[StockLedgerModule] Failed to reload stock after transfer:", err);
+    }
+  };
+
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId);
   const selectedEntry = selectedDayRecord?.entries.find((entry) => entry.accountId === selectedAccountId);
   const previousMonthDueBalance = useMemo(() => {
@@ -783,20 +889,20 @@ export function StockLedgerModule({
     return prevSummary.accountTotals.find((item) => item.accountId === selectedAccountId)?.dueBalance;
   }, [selectedAccountId, prevSummary]);
   const previousEntry = selectedAccountId ? findPreviousEntry(days, selectedDay, selectedAccountId) : undefined;
+  const selectedPgAccountProj = isPostgreSqlPeriod(monthId) && selectedAccountId
+    ? (selectedDayRecord?.stockAccountProjections?.find((p) => p.account_id === selectedAccountId) ??
+       selectedDayRecord?.entries?.find((e) => e.accountId === selectedAccountId))
+    : undefined;
   const selectedCarryForwardBalance = selectedAccount
-    ? resolveStockCarryForwardBalance({
-      previousEntryDueBalance: previousEntry?.dueBalance,
-      previousMonthDueBalance,
-      accountOpeningBalance: selectedAccount.openingBalance
-    })
+    ? (selectedPgAccountProj
+      ? Number((selectedPgAccountProj as any).opening_due ?? (selectedPgAccountProj as any).carryForwardBalance ?? 0)
+      : resolveStockCarryForwardBalance({
+        previousEntryDueBalance: previousEntry?.dueBalance,
+        previousMonthDueBalance,
+        accountOpeningBalance: openingBalances.stockAccountOpening?.[selectedAccount.id] ?? selectedAccount.openingBalance
+      }))
     : 0;
-  const allowManualCarryForwardInput = stockSettingsConfig.allowManualCarryForwardInput === true;
-  function carryForwardForDraft(nextDraft: StockDailyAccountDraft) {
-    return allowManualCarryForwardInput
-      ? roundMoney(nextDraft.carryForwardBalance ?? selectedCarryForwardBalance)
-      : selectedCarryForwardBalance;
-  }
-  const effectiveCarryForwardBalance = carryForwardForDraft(draft);
+  const effectiveCarryForwardBalance = selectedCarryForwardBalance;
 
   const allStockInRecords = useMemo(() => {
     return days.flatMap((day) => day.stockIn ?? []);
@@ -807,16 +913,35 @@ export function StockLedgerModule({
   const monthOpeningJazzPayable = prevSummary?.closingJazzPayable ?? openingBalances.jazzOpeningPayable;
 
   const currentStockBalances = useMemo(() => {
+    if (isPostgreSqlPeriod(monthId) && selectedDayRecord?.stockProductProjections && selectedDayRecord.stockProductProjections.length > 0) {
+      const projMap = new Map(selectedDayRecord.stockProductProjections.map((p) => [p.product_id, p]));
+      return products.map((product) => {
+        const proj = projMap.get(product.id);
+        const opening = proj ? Number(proj.opening_qty) : (openingBalances.openingStock[product.id] ?? 0);
+        const stockIn = proj ? Number(proj.stock_in_qty ?? proj.received_qty ?? 0) : 0;
+        const stockOut = proj ? Number(proj.stock_out_qty ?? proj.sold_qty ?? 0) : 0;
+        const current = proj ? Number(proj.closing_qty) : opening;
+        return {
+          productId: product.id,
+          productName: product.name,
+          openingStock: opening,
+          totalStockIn: stockIn,
+          totalStockOut: stockOut,
+          currentStock: current,
+          updatedAt: Date.now()
+        };
+      });
+    }
     return calculateCurrentStock(products, monthOpeningStock, allStockInRecords, days);
-  }, [products, monthOpeningStock, allStockInRecords, days]);
+  }, [allStockInRecords, days, isPostgreSqlPeriod, monthId, monthOpeningStock, openingBalances.openingStock, products, selectedDayRecord?.stockProductProjections]);
   const productRateById = useMemo(() => {
     return Object.fromEntries(products.map((product) => [product.id, product.rate]));
   }, [products]);
   const currentInventoryQty = useMemo(() => {
-    return roundMoney(currentStockBalances.reduce((total, row) => total + row.currentStock, 0));
+    return roundMoney(currentStockBalances.reduce((total, row) => total + (row.currentStock ?? 0), 0));
   }, [currentStockBalances]);
   const currentInventoryAmount = useMemo(() => {
-    return roundMoney(currentStockBalances.reduce((total, row) => total + (row.currentStock * (productRateById[row.productId] ?? 0)), 0));
+    return roundMoney(currentStockBalances.reduce((total, row) => total + ((row.currentStock ?? 0) * (productRateById[row.productId] ?? 0)), 0));
   }, [currentStockBalances, productRateById]);
   const selectedAccountDayRows = useMemo(() => {
     if (!selectedAccountId) return [];
@@ -870,7 +995,16 @@ export function StockLedgerModule({
       }
     }
 
-    const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(selectedAccount, prevSummary);
+    const day1Record = days.find((d) => d.dayNo === 1);
+    const day1Proj = isPostgreSqlPeriod(monthId)
+      ? (day1Record?.stockAccountProjections?.find((p) => p.account_id === selectedAccount.id) ??
+         day1Record?.entries?.find((e) => e.accountId === selectedAccount.id))
+      : undefined;
+    const opening = openingBalances.stockAccountOpening?.[selectedAccount.id]
+      ?? (day1Proj ? Number((day1Proj as any).opening_due ?? (day1Proj as any).carryForwardBalance ?? 0) : undefined)
+      ?? selectedAccount.openingBalance
+      ?? (firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(selectedAccount, prevSummary))
+      ?? 0;
     const totalQty = entriesPeriod.reduce((sum, entry) => sum + entry.totalQty, 0);
     const totalAmount = entriesPeriod.reduce((sum, entry) => sum + entry.totalAmount, 0);
     const totalPayments = entriesPeriod.reduce((sum, entry) => sum + entry.totalPaymentReceived, 0);
@@ -886,7 +1020,7 @@ export function StockLedgerModule({
       closing,
       productTotals: activeProductTotals
     };
-  }, [activeProducts, days, monthId, prevSummary, selectedAccount, selectedAccountId]);
+  }, [activeProducts, days, monthId, openingBalances.stockAccountOpening, prevSummary, selectedAccount, selectedAccountId]);
   const selectedDealerMasterDayRows = useMemo(() => {
     if (!selectedAccountId || !selectedAccount) return [];
     return [...days]
@@ -928,7 +1062,8 @@ export function StockLedgerModule({
       ...activeProducts.map((product) => row.productTotals[product.id]),
       row.totalQty,
       row.totalAmount,
-      row.totalPaymentReceived
+      row.totalPaymentReceived,
+      row.opening !== row.closing ? 1 : 0
     ]));
   }, [activeProducts, selectedDealerMasterDayRows]);
   const selectedDealerMasterDayTotals = useMemo(() => {
@@ -969,6 +1104,7 @@ export function StockLedgerModule({
   const selectedDayIsCanonicalClosed = selectedDayRecord?.status === "closed";
   const selectedDayIsLegacyLocked =
     !selectedDayIsCanonicalReopen &&
+    selectedDayRecord?.status !== "open" &&
     (
       selectedDayRecord?.closedAt != null ||
       selectedDayRecord?.lockedAt != null ||
@@ -984,8 +1120,8 @@ export function StockLedgerModule({
     month?.status !== "closed" &&
     canReopenDay(role);
   const carryForwardWarnings = useMemo(
-    () => stockCarryForwardWarnings(days, summary, prevSummary),
-    [days, prevSummary, summary]
+    () => (isPostgreSqlPeriod(monthId) ? [] : stockCarryForwardWarnings(days, summary, prevSummary)),
+    [days, monthId, prevSummary, summary]
   );
   const stockCalendarDays = useMemo<UniversalDaySnapshot[]>(() => {
     return Array.from({ length: daysInMonth(monthId) }, (_, index) => {
@@ -1021,7 +1157,194 @@ export function StockLedgerModule({
   }, []);
 
   useEffect(() => {
-    if (!user || !role) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!user || !role) return;
+      let cancelled = false;
+
+      void (async () => {
+        try {
+          const [productsRes, accountsRes, periodsRes, periodData] = await Promise.all([
+            ledgerApiClient.catalogs.getStockProducts().catch(() => ({ data: [] })),
+            ledgerApiClient.catalogs.getStockAccounts().catch(() => ({ data: [] })),
+            ledgerApiClient.periods.list().catch(() => ({ periods: [] })),
+            getAccountingPeriodWithDays(monthId).catch(() => null)
+          ]);
+          if (cancelled) return;
+
+          const openingStock: Record<string, number | null> = {};
+          const stockAccountOpening: Record<string, number> = {};
+          let jazzOpeningPayable = 0;
+
+          if (periodData) {
+            try {
+              const seedsRes = await ledgerApiClient.periods.getSeeds(periodData.period.id);
+              if (!cancelled && seedsRes?.seeds) {
+                for (const sp of (seedsRes.seeds.stockProducts || seedsRes.seeds.stock_products || [])) {
+                  if (sp.status === "skipped") {
+                    openingStock[sp.product_id] = null;
+                  } else {
+                    openingStock[sp.product_id] = Number(sp.opening_quantity ?? 0);
+                  }
+                }
+                for (const sa of (seedsRes.seeds.stockAccounts || seedsRes.seeds.stock_accounts || [])) {
+                  stockAccountOpening[sa.account_id] = Number(sa.opening_receivable ?? 0);
+                }
+                jazzOpeningPayable = Number(seedsRes.seeds.financial?.opening_jazz_payable ?? 0);
+              }
+            } catch (err) {
+              console.warn("[StockLedger] Could not load PostgreSQL seeds:", err);
+            }
+          }
+
+          if (cancelled) return;
+
+          const mappedProducts: StockProduct[] = (productsRes.data || []).map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            rate: Number(p.rate ?? 0),
+            active: p.is_active,
+            displayOrder: Number(p.sort_order ?? 0),
+            sortOrder: p.sort_order,
+            category: "sim",
+            paymentTrackingEnabled: true,
+            createdBy: "system",
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          }));
+          setProducts(mappedProducts);
+          markStockSettingInitialized("products");
+
+          const mappedAccounts: StockAccountProfile[] = (accountsRes.data || []).map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            slug: a.slug,
+            type: a.type as StockAccountType,
+            openingBalance: Number(stockAccountOpening[a.id] ?? a.opening_balance ?? 0),
+            active: a.is_active,
+            displayOrder: Number(a.sort_order ?? 0),
+            sortOrder: a.sort_order,
+            createdBy: "system",
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          }));
+          setAccounts(mappedAccounts);
+          markStockSettingInitialized("accounts");
+          markStockSettingInitialized("config");
+
+          const pgStockMonths: StockMonth[] = (periodsRes.periods || []).map((p) => ({
+            id: p.period_key,
+            label: p.label || p.period_key,
+            status: p.status as "open" | "closed",
+            createdBy: "system",
+            createdAt: p.created_at ? new Date(p.created_at).getTime() : Date.now(),
+            updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : Date.now()
+          }));
+          setMonths(pgStockMonths);
+          markStockSettingInitialized("months");
+
+          setOpeningBalances({
+            openingStock,
+            jazzOpeningPayable,
+            stockAccountOpening
+          });
+          markStockSettingInitialized("openingBalances");
+
+          if (periodData) {
+            const pgStockDays: StockDayRecord[] = [];
+            const dayCount = periodData.days.size || 31;
+            for (let d = 1; d <= dayCount; d++) {
+              const dayRec = periodData.days.get(d);
+              const status = (dayRec?.status ?? "closed") as StockDayStatus;
+              pgStockDays.push({
+                id: String(d),
+                monthId,
+                dayNo: d,
+                date: `${monthId}-${String(d).padStart(2, "0")}`,
+                status,
+                entries: [],
+                stockOut: [],
+                stockIn: [],
+                summary: {
+                  accountCount: 0,
+                  totalQty: 0,
+                  totalAmount: 0,
+                  totalPaymentReceived: 0,
+                  totalDueBalance: 0
+                },
+                createdBy: "system",
+                createdAt: 0,
+                updatedAt: 0,
+                closedAt: status === "closed" && dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : undefined,
+                lockedAt: status === "closed" ? (dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : Date.now()) : undefined,
+                reopenedAt: dayRec?.reopened_at ? new Date(dayRec.reopened_at).getTime() : undefined
+              });
+            }
+            setDays((currentDays) => {
+              if (!currentDays || currentDays.length === 0) {
+                return pgStockDays;
+              }
+              const currentDaysMap = new Map(currentDays.map((d) => [d.dayNo, d]));
+              return pgStockDays.map((newDay) => {
+                const existing = currentDaysMap.get(newDay.dayNo);
+                if (existing && isServerLoadedStockDay(existing)) {
+                  return {
+                    ...existing,
+                    status: newDay.status,
+                    closedAt: newDay.closedAt,
+                    lockedAt: newDay.lockedAt,
+                    reopenedAt: newDay.reopenedAt
+                  };
+                }
+                return newDay;
+              });
+            });
+
+            void loadStockMonthPostgres(monthId, mappedProducts, mappedAccounts)
+              .then((monthDays) => {
+                if (cancelled) return;
+                if (monthDays && monthDays.length > 0) {
+                  setDays((current) => {
+                    if (!current || current.length === 0) {
+                      return monthDays;
+                    }
+                    const monthDaysMap = new Map(monthDays.map((d) => [d.dayNo, d]));
+                    const updated = current.map((existingDay) => {
+                      const loaded = monthDaysMap.get(existingDay.dayNo);
+                      if (!loaded) return existingDay;
+                      if (!isServerLoadedStockDay(existingDay)) {
+                        return loaded;
+                      }
+                      if (existingDay.updatedAt && loaded.updatedAt && existingDay.updatedAt > loaded.updatedAt) {
+                        return existingDay;
+                      }
+                      return loaded;
+                    });
+                    for (const loaded of monthDays) {
+                      if (!updated.some((d) => d.dayNo === loaded.dayNo)) {
+                        updated.push(loaded);
+                      }
+                    }
+                    return updated.sort((a, b) => a.dayNo - b.dayNo);
+                  });
+                  setSummary(calculateMonthlySummary(monthId, monthDays));
+                  setStockDaysInitialized(true);
+                }
+              })
+              .catch((err) => {
+                console.warn("[StockLedger] Failed to load month stock days from PostgreSQL:", err);
+              });
+          }
+        } catch (err) {
+          console.error("[StockLedger] Failed to initialize PostgreSQL stock data:", err);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const unsubscribers = [
       subscribeStockProducts((rows, metadata) => {
         setProducts(rows);
@@ -1056,23 +1379,49 @@ export function StockLedgerModule({
       })
     ];
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [role, user]);
+  }, [monthId, role, user]);
 
   useEffect(() => {
-    if (!user || !roleCanStock(role, "settings") || products.length === 0 || openingSeedAttemptedRef.current) return;
+    if (!user || !roleCanStock(role, "settings") || products.length === 0 || openingSeedAttemptedRef.current || isPostgreSqlPeriod(monthId)) return;
     openingSeedAttemptedRef.current = true;
     const seedPromise = ensureStockOpeningSeed(products, user, role).then((seeded) => {
       if (seeded) callbacksRef.current.onStatus("Seeded one-time Stock opening quantities.");
       return seeded;
     });
     callbacksRef.current.onQueueWrite(seedPromise, "Could not seed one-time Stock opening quantities.");
-  }, [products, role, user]);
+  }, [monthId, products, role, user]);
 
   useEffect(() => {
     setStockDaysInitialized(false);
   }, [monthId]);
 
   useEffect(() => {
+    if (!user || !isPostgreSqlPeriod(monthId) || products.length === 0) return;
+    let cancelled = false;
+    void loadStockDayPostgres(monthId, selectedDay, products, accounts).then((loadedDay) => {
+      if (!cancelled && loadedDay) {
+        setDays((current) => {
+          const exists = current.some((d) => d.dayNo === loadedDay.dayNo);
+          if (exists) {
+            return current.map((d) => (d.dayNo === loadedDay.dayNo ? loadedDay : d));
+          }
+          return [...current, loadedDay].sort((a, b) => a.dayNo - b.dayNo);
+        });
+      }
+    }).catch((err) => {
+      console.warn("[StockLedgerModule] Failed to load day transactions from PostgreSQL:", err);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [accounts, monthId, products, selectedDay, user]);
+
+  useEffect(() => {
+    if (isPostgreSqlPeriod(monthId)) {
+      setStockDaysInitialized(true);
+      setStockPreviousSummaryInitialized(true);
+      return;
+    }
     if (!user || !role) return;
     if (!month && roleCanStock(role, "daily") && !monthBootstrapPendingRef.current) {
       const createMonthPromise = ensureStockMonth(monthId, user, role);
@@ -1097,7 +1446,7 @@ export function StockLedgerModule({
   }, [ledgerReadDecision, month, monthBootstrapPending, monthId, role, user]);
 
   useEffect(() => {
-    if (!user || !role) return;
+    if (!user || !role || isPostgreSqlPeriod(monthId)) return;
     const prevId = previousMonthId(monthId);
     setStockPreviousSummaryInitialized(false);
     return subscribeStockMonthlySummary(
@@ -1135,13 +1484,11 @@ export function StockLedgerModule({
         nextEntry?.products.find((item) => item.productId === product.id)?.quantity ?? 0
       ])),
       paymentReceived: nextEntry?.totalPaymentReceived ?? 0,
-      carryForwardBalance: allowManualCarryForwardInput
-        ? nextEntry?.carryForwardBalance ?? selectedCarryForwardBalance
-        : selectedCarryForwardBalance,
+      carryForwardBalance: selectedCarryForwardBalance,
       notes: nextEntry?.notes ?? ""
     };
     applyRemoteStockDraft(`${monthId}-${selectedDay}-${selectedAccountId}`, nextDraft);
-  }, [activeProducts, allowManualCarryForwardInput, monthId, selectedAccountId, selectedCarryForwardBalance, selectedDay, selectedDayRecord, stockDailyReady]);
+  }, [activeProducts, monthId, selectedAccountId, selectedCarryForwardBalance, selectedDay, selectedDayRecord, stockDailyReady]);
 
   const previewEntry = selectedAccount ? buildStockEntry({
     id: selectedAccount.id,
@@ -1182,7 +1529,7 @@ export function StockLedgerModule({
       draft: nextDraft,
       products,
       previous: selectedEntry,
-      carryForwardBalance: carryForwardForDraft(nextDraft),
+      carryForwardBalance: selectedCarryForwardBalance,
       createdBy: user.uid
     });
     if (!computedPreviewEntry) {
@@ -1214,7 +1561,25 @@ export function StockLedgerModule({
       const previousQuantity = roundMoney(selectedEntry?.products.find((item) => item.productId === product.id)?.quantity ?? 0);
       return nextQuantity !== previousQuantity;
     });
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await saveStockDayPostgres(monthId, selectedDay, nextDraft, products);
+        setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+        if (currentStockDraftSignature() === savedDraftSignature) {
+          stockDraftDirtyRef.current = false;
+        }
+        onStatus(`Saved stock record for ${selectedAccount.name} to PostgreSQL.`);
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "PostgreSQL did not confirm the stock save.";
+        onStatus(message);
+        if (options.throwOnError) throw new Error(message);
+        return false;
+      }
+    }
+
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+
     const write = saveStockDay(workingMonth, nextDay, days, user, role, "save-day", {
       openingBalances,
       previousSummary: prevSummary,
@@ -1243,12 +1608,33 @@ export function StockLedgerModule({
   }
 
   async function handleVerifiedSave() {
-    setVerifiedSave({ status: "saving", title: "Saving Stock Day", message: "Writing the selected account entry to Firestore and waiting for confirmation..." });
+    if (!canEdit || saveInFlightRef.current) return;
+    const isPg = isPostgreSqlPeriod(monthId);
+    setVerifiedSave({
+      status: "saving",
+      title: isPg ? "Saving Stock Day to PostgreSQL" : "Saving Stock Day",
+      message: isPg
+        ? "Writing day transactions to PostgreSQL ledger and waiting for confirmation..."
+        : "Writing the selected account entry to storage and waiting for confirmation..."
+    });
+    saveInFlightRef.current = true;
     try {
       await saveEntry(draft, { throwOnError: true });
-      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Stock day ${selectedDay} was saved successfully and Firestore confirmed the write.` });
+      setVerifiedSave({
+        status: "success",
+        title: "Save Confirmed",
+        message: isPg
+          ? `Stock day ${selectedDay} was saved successfully to PostgreSQL.`
+          : `Stock day ${selectedDay} was saved successfully.`
+      });
     } catch (error) {
-      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
+      setVerifiedSave({
+        status: "error",
+        title: "Save Failed",
+        message: error instanceof Error ? error.message : "Failed to save day."
+      });
+    } finally {
+      saveInFlightRef.current = false;
     }
   }
 
@@ -1376,6 +1762,47 @@ export function StockLedgerModule({
       createdBy: user.uid
     });
     setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        const dayId = await resolveAccountingDayId(monthId, selectedDay);
+        if (dayId) {
+          const orderLines = Object.entries(stockInQuantities)
+            .filter(([_, q]) => Number(q) > 0)
+            .map(([pId, q]) => ({
+              product_id: pId,
+              quantity: Math.round(Number(q)),
+              unit_rate: products.find((p) => p.id === pId)?.rate ?? 0
+            }));
+          if (orderLines.length > 0) {
+            await ledgerApiClient.stockOrders.create({
+              day_id: dayId,
+              direction: "inbound",
+              supplier_name: "Jazz Company",
+              notes: stockInNotes || null,
+              lines: orderLines
+            });
+          }
+          if (previewStockInRecord && previewStockInRecord.paidAmount > 0) {
+            await recordJazzCompanyPaymentPostgres(monthId, selectedDay, {
+              amount: previewStockInRecord.paidAmount,
+              paymentReference: stockInNotes || null,
+              notes: stockInNotes ? `Stock In payment: ${stockInNotes}` : "Stock In payment to Jazz Company"
+            });
+          }
+        }
+        onStatus(`Saved Stock In from Jazz Company to PostgreSQL.`);
+      } catch (error) {
+        onStatus(error instanceof Error ? error.message : "Failed to save Stock In to PostgreSQL.");
+      }
+      setStockInQuantities({});
+      setStockInMode("cash");
+      setStockInPaidAmount(0);
+      setStockInNotes("");
+      setEditingStockInId(null);
+      return;
+    }
+
     onQueueWrite(saveStockDay(workingMonth, nextDay, days, user, role, "save-day", {
       skipLedgerV2RawEntryWrites: !shouldMirrorStockLedgerV2RawEntries,
       skipProductBalanceWrites: !shouldWriteCurrentStockDerivedBalances,
@@ -1406,6 +1833,32 @@ export function StockLedgerModule({
     }
     if (!window.confirm(`Close Stock Ledger day ${selectedDay}? Inputs and saves will be locked until an explicit reopen.`)) {
       return;
+    }
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await closeOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          flushDraft: async () => {
+            if (inFlightSavePromiseRef.current) {
+              await inFlightSavePromiseRef.current;
+            }
+            if (hasPendingStockChanges || stockDraftDirtyRef.current) {
+              await saveEntry(draft, { throwOnError: true });
+            }
+            return true;
+          }
+        });
+        closedDayKeysRef.current.add(`${monthId}/${selectedDay}`);
+        setDays((current) => current.map((day) => day.dayNo === selectedDay ? { ...day, status: "closed", closedAt: Date.now(), lockedAt: Date.now() } : day));
+        onStatus(`Closed Stock day ${selectedDay} in PostgreSQL authoritative ledger.`);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to close Stock day in PostgreSQL.";
+        onStatus(message);
+        return;
+      }
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
@@ -1459,6 +1912,27 @@ export function StockLedgerModule({
     if (!canReopenSelectedDay) {
       onStatus("Only owner can reopen Stock Ledger days.");
       return;
+    }
+    if (!window.confirm(`Reopen Stock Ledger day ${selectedDay}?`)) {
+      return;
+    }
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await reopenOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          reason: "Reopened by owner"
+        });
+        closedDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
+        setDays((current) => current.map((day) => day.dayNo === selectedDay ? { ...day, status: "reopen", reopenedAt: Date.now() } : day));
+        onStatus(`Reopened Stock day ${selectedDay} in PostgreSQL authoritative ledger.`);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to reopen Stock day in PostgreSQL.";
+        onStatus(message);
+        return;
+      }
     }
     const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
     const timestamp = Date.now();
@@ -1629,6 +2103,250 @@ export function StockLedgerModule({
     }
   }
 
+  async function handleSaveStockProduct(row: StockProduct) {
+    if (!canManageSettings) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        const isExisting = Boolean(row.id && products.some((p) => p.id === row.id));
+        if (isExisting) {
+          const res = await ledgerApiClient.catalogs.updateStockProduct(row.id, {
+            name: row.name.trim(),
+            rate: Number(row.rate ?? 0),
+            payment_tracking_enabled: row.paymentTrackingEnabled !== false,
+            is_active: row.active ?? true,
+            sort_order: row.sortOrder ?? row.displayOrder
+          });
+          const updated = res.data;
+          setProducts((prev) =>
+            prev.map((p) =>
+              p.id === updated.id
+                ? {
+                    ...p,
+                    name: updated.name,
+                    rate: Number(updated.rate ?? 0),
+                    active: updated.is_active,
+                    sortOrder: updated.sort_order,
+                    displayOrder: Number(updated.sort_order ?? p.displayOrder),
+                    paymentTrackingEnabled: updated.payment_tracking_enabled
+                  }
+                : p
+            )
+          );
+          onStatus(`${row.name} updated in PostgreSQL catalog.`);
+          return;
+        }
+
+        const productSlug = (slug(row.name) || "product").replace(/[^a-z0-9_-]/g, "-");
+        const res = await ledgerApiClient.catalogs.createStockProduct({
+          slug: productSlug,
+          name: row.name.trim(),
+          rate: Number(row.rate ?? 0),
+          payment_tracking_enabled: row.paymentTrackingEnabled !== false,
+          is_active: row.active ?? true,
+          sort_order: row.sortOrder ?? row.displayOrder ?? (products.length + 1)
+        });
+        const created = res.data;
+        const newProduct: StockProduct = {
+          id: created.id,
+          name: created.name,
+          rate: Number(created.rate ?? 0),
+          active: created.is_active,
+          displayOrder: Number(created.sort_order ?? 0),
+          sortOrder: created.sort_order,
+          category: "sim",
+          paymentTrackingEnabled: created.payment_tracking_enabled,
+          createdBy: "system",
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        setProducts((prev) => [...prev.filter((p) => p.id !== newProduct.id), newProduct]);
+        onStatus(`${row.name} created in PostgreSQL catalog.`);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to save stock product to PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(
+      upsertStockProduct(
+        {
+          ...row,
+          paymentTrackingEnabled: row.paymentTrackingEnabled !== false
+        },
+        user,
+        role
+      ),
+      "Could not save stock product."
+    );
+  }
+
+  async function handleDeleteStockProduct(id: string) {
+    if (!canManageSettings) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateStockProduct(id, { is_active: false });
+        setProducts((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, active: false } : p))
+        );
+        onStatus("Stock product deactivated in PostgreSQL catalog.");
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to delete stock product in PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(deleteStockProduct(id, user, role), "Could not delete stock product.");
+  }
+
+  async function handleReorderStockProducts(before: Array<StockProduct | StockAccountProfile>, after: Array<StockProduct | StockAccountProfile>) {
+    if (!canManageSettings) return;
+    const typedBefore = before as StockProduct[];
+    const typedAfter = after as StockProduct[];
+    if (isPostgreSqlPeriod(monthId)) {
+      const patches = changedSortOrderPatches(typedBefore, typedAfter);
+      if (patches.length === 0) return;
+      try {
+        await Promise.all(
+          patches.map((p) =>
+            ledgerApiClient.catalogs.updateStockProduct(p.id, { sort_order: p.sortOrder })
+          )
+        );
+        const orderMap = new Map(patches.map((p) => [p.id, p.sortOrder]));
+        setProducts((prev) =>
+          prev.map((p) =>
+            orderMap.has(p.id)
+              ? { ...p, sortOrder: orderMap.get(p.id)!, displayOrder: orderMap.get(p.id)! }
+              : p
+          )
+        );
+        onStatus("Stock products reordered in PostgreSQL.");
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to reorder stock products in PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(updateStockProductSortOrder(typedBefore, typedAfter), "Could not reorder stock products.");
+  }
+
+  async function handleSaveStockAccount(row: StockAccountProfile) {
+    if (!canManageSettings) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        const isExisting = Boolean(row.id && accounts.some((a) => a.id === row.id));
+        if (isExisting) {
+          const res = await ledgerApiClient.catalogs.updateStockAccount(row.id, {
+            name: row.name.trim(),
+            type: row.type,
+            is_active: row.active ?? true,
+            sort_order: row.sortOrder ?? row.displayOrder
+          });
+          const updated = res.data;
+          setAccounts((prev) =>
+            prev.map((a) =>
+              a.id === updated.id
+                ? {
+                    ...a,
+                    name: updated.name,
+                    type: updated.type as StockAccountType,
+                    active: updated.is_active,
+                    sortOrder: updated.sort_order,
+                    displayOrder: Number(updated.sort_order ?? a.displayOrder)
+                  }
+                : a
+            )
+          );
+          onStatus(`${row.name} updated in PostgreSQL catalog.`);
+          return;
+        }
+
+        const accountSlug = (slug(row.name) || "account").replace(/[^a-z0-9_-]/g, "-");
+        const res = await ledgerApiClient.catalogs.createStockAccount({
+          slug: accountSlug,
+          name: row.name.trim(),
+          type: row.type,
+          is_active: row.active ?? true,
+          sort_order: row.sortOrder ?? row.displayOrder ?? (accounts.length + 1)
+        });
+        const created = res.data;
+        const newAccount: StockAccountProfile = {
+          id: created.id,
+          name: created.name,
+          type: created.type as StockAccountType,
+          openingBalance: 0,
+          active: created.is_active,
+          displayOrder: Number(created.sort_order ?? 0),
+          sortOrder: created.sort_order,
+          createdBy: "system",
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        setAccounts((prev) => [...prev.filter((a) => a.id !== newAccount.id), newAccount]);
+        onStatus(`${row.name} created in PostgreSQL catalog.`);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to save stock account to PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(upsertStockAccount(row, user, role), "Could not save stock account.");
+  }
+
+  async function handleDeleteStockAccount(id: string) {
+    if (!canManageSettings) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateStockAccount(id, { is_active: false });
+        setAccounts((prev) =>
+          prev.map((a) => (a.id === id ? { ...a, active: false } : a))
+        );
+        onStatus("Stock account deactivated in PostgreSQL catalog.");
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to delete stock account in PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(deleteStockAccount(id, user, role), "Could not delete stock account.");
+  }
+
+  async function handleReorderStockAccounts(before: Array<StockProduct | StockAccountProfile>, after: Array<StockProduct | StockAccountProfile>) {
+    if (!canManageSettings) return;
+    const typedBefore = before as StockAccountProfile[];
+    const typedAfter = after as StockAccountProfile[];
+    if (isPostgreSqlPeriod(monthId)) {
+      const patches = changedSortOrderPatches(typedBefore, typedAfter);
+      if (patches.length === 0) return;
+      try {
+        await Promise.all(
+          patches.map((p) =>
+            ledgerApiClient.catalogs.updateStockAccount(p.id, { sort_order: p.sortOrder })
+          )
+        );
+        const orderMap = new Map(patches.map((p) => [p.id, p.sortOrder]));
+        setAccounts((prev) =>
+          prev.map((a) =>
+            orderMap.has(a.id)
+              ? { ...a, sortOrder: orderMap.get(a.id)!, displayOrder: orderMap.get(a.id)! }
+              : a
+          )
+        );
+        onStatus("Stock accounts reordered in PostgreSQL.");
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to reorder stock accounts in PostgreSQL.";
+        onStatus(msg);
+        throw err;
+      }
+    }
+    return onQueueWrite(updateStockAccountSortOrder(typedBefore, typedAfter), "Could not reorder stock accounts.");
+  }
+
   const stockAutosaveData = useMemo(
     () => ({
       monthId,
@@ -1641,8 +2359,8 @@ export function StockLedgerModule({
 
   const stockEntryAutoSave = useAutoSaveEntry({
     data: stockAutosaveData,
-    enabled: true,
-    disabled: !stockDailyReady || !canEdit || !selectedAccount || !previewEntry || monthBootstrapPending || section !== "daily",
+    enabled: stockDraftDirtyRef.current && Boolean(stockDailyReady && canEdit && selectedAccount && previewEntry && !monthBootstrapPending && section === "daily"),
+    disabled: !stockDailyReady || !canEdit || !selectedAccount || !previewEntry || monthBootstrapPending || section !== "daily" || !stockDraftDirtyRef.current,
     debounceMs: 900,
     resetKey: `${monthId}-${selectedDay}-${selectedAccountId}`,
     validate: (snapshot) => {
@@ -1657,9 +2375,41 @@ export function StockLedgerModule({
       return validateStockDraft(snapshotDraft, products, selectedAccount).errors;
     },
     save: async (snapshot) => {
-      await saveEntry(snapshot.draft, { throwOnError: true });
+      const p = saveEntry(snapshot.draft, { throwOnError: true });
+      inFlightSavePromiseRef.current = p.then(() => {});
+      try {
+        await p;
+      } finally {
+        inFlightSavePromiseRef.current = null;
+      }
     }
   });
+
+  const hasPendingStockChanges = stockDraftDirtyRef.current && (
+    stockEntryAutoSave.autoSaveStatus === "typing" ||
+    stockEntryAutoSave.autoSaveStatus === "saving" ||
+    stockEntryAutoSave.autoSaveStatus === "unsaved"
+  );
+
+  useEffect(() => {
+    onPendingStateChange?.(hasPendingStockChanges);
+    return () => {
+      onPendingStateChange?.(false);
+    };
+  }, [hasPendingStockChanges, onPendingStateChange]);
+
+  useEffect(() => {
+    return subscribeDayStatus((event) => {
+      if (event.monthId === monthId) {
+        if (event.status === "closed") {
+          closedDayKeysRef.current.add(`${monthId}/${event.dayNo}`);
+        } else {
+          closedDayKeysRef.current.delete(`${monthId}/${event.dayNo}`);
+        }
+        setDays((current) => current.map((day) => day.dayNo === event.dayNo ? { ...day, status: event.status } : day));
+      }
+    });
+  }, [monthId]);
 
   const sidebarDayControls = useMemo(() => (
     <>
@@ -1785,18 +2535,40 @@ export function StockLedgerModule({
   }, [canManageSettings, canUseStockBackup, onStatus, section]);
 
   function metricSummary() {
-    return summary ?? {
+    if (summary) return summary;
+    const accountTotals: StockAccountMonthlyTotal[] = accounts.map((account) => {
+      const entries = days.flatMap((d) => d.entries.filter((e) => e.accountId === account.id));
+      const firstEntry = days.flatMap((d) => d.entries.filter((e) => e.accountId === account.id)).at(0);
+      const opening = firstEntry ? firstEntry.carryForwardBalance : (openingBalances.stockAccountOpening?.[account.id] ?? account.openingBalance ?? 0);
+      const totalQty = entries.reduce((s, e) => s + e.totalQty, 0);
+      const totalAmount = entries.reduce((s, e) => s + e.totalAmount, 0);
+      const totalPaymentReceived = entries.reduce((s, e) => s + e.totalPaymentReceived, 0);
+      const dueBalance = roundMoney(opening + totalAmount - totalPaymentReceived);
+      const activeDays = new Set(days.filter((d) => d.entries.some((e) => e.accountId === account.id)).map((d) => d.dayNo)).size;
+      return {
+        accountId: account.id,
+        accountName: account.name,
+        accountType: account.type,
+        totalQty,
+        totalAmount,
+        totalPaymentReceived,
+        dueBalance,
+        activeDays
+      };
+    });
+    const totalDueBalance = roundMoney(accountTotals.reduce((sum, a) => sum + a.dueBalance, 0));
+    return {
       monthId,
       totalQty: 0,
       totalAmount: 0,
       totalPaymentReceived: 0,
-      totalDueBalance: 0,
+      totalDueBalance,
       productTotals: [],
-      accountTotals: [],
+      accountTotals,
       paymentTotals: [],
       dayRows: [],
       missingDays: [],
-      updatedAt: 0
+      updatedAt: Date.now()
     };
   }
 
@@ -2200,17 +2972,51 @@ export function StockLedgerModule({
                     placeholder="Optional note"
                   />
                 </div>
-                <span className="inline-flex whitespace-nowrap rounded-md border border-slate-800 bg-slate-950/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                <span className={`inline-flex whitespace-nowrap rounded-md border border-slate-800 bg-slate-950/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                  !canEdit
+                    ? "text-slate-400"
+                    : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
+                    ? "text-amber-300"
+                    : stockEntryAutoSave.autoSaveStatus === "error"
+                    ? "text-rose-300"
+                    : stockDraftDirtyRef.current
+                    ? "text-amber-400"
+                    : "text-emerald-300"
+                }`}>
                   {!stockDailyReady
                     ? "Loading..."
                     : !canEdit
-                    ? "Autosave off"
-                    : stockEntryAutoSave.autoSaveStatus === "saving"
-                    ? "Autosaving..."
+                    ? "Day closed"
+                    : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
+                    ? "Saving…"
                     : stockEntryAutoSave.autoSaveStatus === "error"
-                      ? "Autosave failed"
-                      : "Autosave on"}
+                    ? "Save failed"
+                    : stockDraftDirtyRef.current
+                    ? "Unsaved changes"
+                    : "Saved"}
                 </span>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-3 text-xs flex items-center gap-1.5 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 shrink-0 font-medium"
+                  disabled={!stockDailyReady || !canEdit || activeAccounts.length < 2 || monthBootstrapPending}
+                  onClick={() => void handleOpenTransferModal("new")}
+                  title="Transfer financial balance between people without stock or cash movements"
+                  data-testid="btn-transfer-balance"
+                >
+                  <ArrowRightLeft className="h-3.5 w-3.5" />
+                  <span>Transfer Balance</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-2.5 text-xs flex items-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0 font-medium"
+                  disabled={!stockDailyReady || monthBootstrapPending}
+                  onClick={() => void handleOpenTransferModal("history")}
+                  title="View balance transfer history and reversals"
+                  data-testid="btn-transfer-history"
+                >
+                  <History className="h-3.5 w-3.5 text-slate-400" />
+                  <span>History</span>
+                </button>
                 <CalendarDays className="text-emerald-500 h-5 w-5" />
               </div>
             </div>
@@ -2424,6 +3230,7 @@ export function StockLedgerModule({
               accounts={accounts}
               days={days}
               prevSummary={prevSummary}
+              stockAccountOpening={openingBalances.stockAccountOpening}
               filterStartDate={1}
               filterEndDate={daysInMonth(monthId)}
               filterProductId=""
@@ -2450,14 +3257,15 @@ export function StockLedgerModule({
         );
 
         const closingStockValToday = currentStockBalances.reduce((sum, row) => {
+          if (row.currentStock == null) return sum;
           const rate = productRateById[row.productId] ?? 0;
           return sum + (row.currentStock * rate);
         }, 0);
 
-        const totalPhysicalUnits = currentStockBalances.reduce((sum, row) => sum + row.currentStock, 0);
+        const totalPhysicalUnits = currentStockBalances.reduce((sum, row) => sum + (row.currentStock ?? 0), 0);
 
         // Filter out low stock products
-        const lowStockItems = currentStockBalances.filter((row) => row.currentStock <= 20);
+        const lowStockItems = currentStockBalances.filter((row) => row.currentStock != null && row.currentStock <= 20);
 
         // Sort Top Debtors
         const topDebtors = [...metrics.accountTotals]
@@ -2863,7 +3671,13 @@ export function StockLedgerModule({
 
                         const sortedDaysWithEntries = [...days].sort((x, y) => x.dayNo - y.dayNo);
                         const firstEntry = sortedDaysWithEntries.flatMap((d) => d.entries.filter((e) => e.accountId === a.id)).at(0);
-                        const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(a, prevSummary);
+                        const pgAccountProj = isPostgreSqlPeriod(monthId)
+                          ? (selectedDayRecord?.stockAccountProjections?.find((p) => p.account_id === a.id) ??
+                             selectedDayRecord?.entries?.find((e) => e.accountId === a.id))
+                          : undefined;
+                        const opening = pgAccountProj
+                          ? Number((pgAccountProj as any).opening_due ?? (pgAccountProj as any).carryForwardBalance ?? 0)
+                          : (firstEntry ? firstEntry.carryForwardBalance : (openingBalances.stockAccountOpening?.[a.id] ?? resolveStockAccountOpeningDue(a, prevSummary)));
                         const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
                         const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                         const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
@@ -3104,6 +3918,41 @@ export function StockLedgerModule({
                               disabled={!canEdit || monthBootstrapPending}
                               onClick={async () => {
                                 if (window.confirm("Are you sure you want to delete this Jazz stock-in record? This will reduce the product stock balance and update the payable ledger.")) {
+                                  if (isPostgreSqlPeriod(monthId)) {
+                                    try {
+                                      await deleteStockInPostgres(monthId, selectedDay, record.id, record.paidAmount, record.notes);
+                                      const nextStockIn = selectedDayRecord.stockIn?.filter((r) => r.id !== record.id) ?? [];
+                                      const workingMonth = month ?? ({
+                                        id: monthId,
+                                        label: monthId,
+                                        status: "open",
+                                        createdBy: "system",
+                                        createdAt: Date.now(),
+                                        updatedAt: Date.now()
+                                      } as StockMonth);
+                                      const nextDay = buildStockDayRecord({
+                                        month: workingMonth,
+                                        dayNo: selectedDay,
+                                        date: dayDate(monthId, selectedDay),
+                                        entries: selectedDayRecord.entries ?? [],
+                                        stockIn: nextStockIn,
+                                        previous: selectedDayRecord,
+                                        createdBy: user.uid
+                                      });
+                                      setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+                                      if (editingStockInId === record.id) {
+                                        setStockInQuantities({});
+                                        setStockInMode("cash");
+                                        setStockInPaidAmount(0);
+                                        setStockInNotes("");
+                                        setEditingStockInId(null);
+                                      }
+                                      onStatus("Deleted Jazz stock-in record successfully.");
+                                    } catch (error) {
+                                      onStatus(error instanceof Error ? error.message : "Failed to delete Stock In record.");
+                                    }
+                                    return;
+                                  }
                                   const nextStockIn = selectedDayRecord.stockIn?.filter((r) => r.id !== record.id) ?? [];
                                   const workingMonth = month ?? (await ensureStockMonth(monthId, user, role));
                                   const nextDay = buildStockDayRecord({
@@ -3384,6 +4233,7 @@ export function StockLedgerModule({
                   accounts={accounts}
                   days={days}
                   prevSummary={prevSummary}
+                  stockAccountOpening={openingBalances.stockAccountOpening}
                   filterStartDate={filterStartDate}
                   filterEndDate={filterEndDate}
                   filterProductId={filterProductId}
@@ -3403,6 +4253,7 @@ export function StockLedgerModule({
                 const totalPayments = filteredDaysList.reduce((sum, d) => sum + d.entries.filter(e => (!filterAccountId || e.accountId === filterAccountId) && (!filterAccountType || e.accountType === filterAccountType)).reduce((s, e) => s + e.totalPaymentReceived, 0), 0);
                 const outstandingDues = roundMoney(totalStockOutVal - totalPayments);
                 const closingStockValToday = currentStockBalances.reduce((sum, row) => {
+                  if (row.currentStock == null) return sum;
                   const rate = productRateById[row.productId] ?? 0;
                   return sum + (row.currentStock * rate);
                 }, 0);
@@ -3488,14 +4339,22 @@ export function StockLedgerModule({
                               .filter((d) => d.dayNo >= filterStartDate && d.dayNo <= filterEndDate)
                               .flatMap((d) => d.entries.filter((e) => e.accountId === a.id));
 
-                            if (entriesPeriod.length === 0 && filterDueStatus === "due") return [];
-
                             const totalQty = entriesPeriod.reduce((sum, e) => sum + e.totalQty, 0);
                             const totalAmount = entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0);
                             const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
                             const latestEntry = entriesPeriod.at(-1);
                             const firstEntry = entriesPeriod.at(0);
-                            const carry = firstEntry?.carryForwardBalance ?? resolveStockAccountOpeningDue(a, prevSummary);
+                            const day1Record = days.find((d) => d.dayNo === 1);
+                            const day1Proj = isPostgreSqlPeriod(monthId)
+                              ? (day1Record?.stockAccountProjections?.find((p) => p.account_id === a.id) ??
+                                 day1Record?.entries?.find((e) => e.accountId === a.id))
+                              : undefined;
+                            const carry = openingBalances.stockAccountOpening?.[a.id]
+                              ?? (day1Proj ? Number((day1Proj as any).opening_due ?? (day1Proj as any).carryForwardBalance ?? 0) : undefined)
+                              ?? firstEntry?.carryForwardBalance
+                              ?? a.openingBalance
+                              ?? resolveStockAccountOpeningDue(a, prevSummary)
+                              ?? 0;
                             const currentDue = latestEntry?.dueBalance ?? carry;
 
                             if (filterDueStatus === "due" && currentDue === 0) return [];
@@ -3718,7 +4577,12 @@ export function StockLedgerModule({
                               type: a.type,
                               totalAmount: entriesPeriod.reduce((sum, e) => sum + e.totalAmount, 0),
                               totalPayments: entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0),
-                              currentDue: entriesPeriod.at(-1)?.dueBalance ?? resolveStockAccountOpeningDue(a, prevSummary)
+                              currentDue: entriesPeriod.at(-1)?.dueBalance ?? (
+                                openingBalances.stockAccountOpening?.[a.id]
+                                  ?? (days.find((d) => d.dayNo === 1)?.stockAccountProjections?.find((p) => p.account_id === a.id)?.opening_due !== undefined
+                                      ? Number(days.find((d) => d.dayNo === 1)!.stockAccountProjections!.find((p) => p.account_id === a.id)!.opening_due)
+                                      : (a.openingBalance ?? resolveStockAccountOpeningDue(a, prevSummary)))
+                              )
                             };
                           });
                         const totals = rows.reduce((acc, row) => ({
@@ -3781,7 +4645,17 @@ export function StockLedgerModule({
                             const totalPayments = entriesPeriod.reduce((sum, e) => sum + e.totalPaymentReceived, 0);
                             const latestEntry = entriesPeriod.at(-1);
                             const firstEntry = entriesPeriod.at(0);
-                            const prevDue = firstEntry?.carryForwardBalance ?? resolveStockAccountOpeningDue(a, prevSummary);
+                            const day1Record = days.find((d) => d.dayNo === 1);
+                            const day1Proj = isPostgreSqlPeriod(monthId)
+                              ? (day1Record?.stockAccountProjections?.find((p) => p.account_id === a.id) ??
+                                 day1Record?.entries?.find((e) => e.accountId === a.id))
+                              : undefined;
+                            const prevDue = openingBalances.stockAccountOpening?.[a.id]
+                              ?? (day1Proj ? Number((day1Proj as any).opening_due ?? (day1Proj as any).carryForwardBalance ?? 0) : undefined)
+                              ?? firstEntry?.carryForwardBalance
+                              ?? a.openingBalance
+                              ?? resolveStockAccountOpeningDue(a, prevSummary)
+                              ?? 0;
                             const currentDue = latestEntry?.dueBalance ?? prevDue;
 
                             if (filterDueStatus === "due" && currentDue === 0) return [];
@@ -3853,36 +4727,39 @@ export function StockLedgerModule({
                       {(() => {
                         const rows = currentStockBalances.filter((row) => !filterProductId || row.productId === filterProductId);
                         const totals = rows.reduce((acc, row) => ({
-                          openingStock: acc.openingStock + row.openingStock,
+                          openingStock: acc.openingStock + (row.openingStock ?? 0),
                           totalStockIn: acc.totalStockIn + row.totalStockIn,
                           totalStockOut: acc.totalStockOut + row.totalStockOut,
-                          currentStock: acc.currentStock + row.currentStock,
-                          balanceValue: acc.balanceValue + (row.currentStock * (productRateById[row.productId] ?? 0))
+                          currentStock: acc.currentStock + (row.currentStock ?? 0),
+                          balanceValue: acc.balanceValue + ((row.currentStock ?? 0) * (productRateById[row.productId] ?? 0))
                         }), { openingStock: 0, totalStockIn: 0, totalStockOut: 0, currentStock: 0, balanceValue: 0 });
                         return (
                           <>
                             {rows.map((row) => {
-                              const isLow = row.currentStock <= 5;
+                              const isSkipped = row.openingStock === null;
+                              const isLow = !isSkipped && (row.currentStock ?? 0) <= 5;
                               const rate = productRateById[row.productId] ?? 0;
-                              const balanceValue = roundMoney(row.currentStock * rate);
+                              const balanceValue = isSkipped ? 0 : roundMoney((row.currentStock ?? 0) * rate);
                               return (
                                 <tr key={row.productId}>
                                   <td className="font-semibold text-slate-200">{row.productName}</td>
                                   <td className="font-mono">{formatMoney(rate)}</td>
-                                  <td>{formatMoney(row.openingStock)}</td>
-                                  <td className="text-emerald-400">+{formatMoney(row.totalStockIn)}</td>
-                                  <td className="text-rose-400">-{formatMoney(row.totalStockOut)}</td>
-                                  <td className="font-bold text-slate-100">{formatMoney(row.currentStock)}</td>
-                                  <td className="font-mono font-semibold text-emerald-400">{formatMoney(balanceValue)}</td>
+                                  <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(row.openingStock ?? 0)}</td>
+                                  <td className="text-emerald-400">{isSkipped ? "—" : `+${formatMoney(row.totalStockIn)}`}</td>
+                                  <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(row.totalStockOut)}`}</td>
+                                  <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(row.currentStock ?? 0)}</td>
+                                  <td className="font-mono font-semibold text-emerald-400">{isSkipped ? "—" : formatMoney(balanceValue)}</td>
                                   <td>
                                     <span className={`px-2 py-0.5 rounded text-xs font-semibold uppercase ${
-                                      row.currentStock < 0 
-                                        ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                                        : isLow
-                                          ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                                          : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                                      isSkipped
+                                        ? "bg-slate-800 text-slate-400 border border-slate-700"
+                                        : (row.currentStock ?? 0) < 0 
+                                          ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                                          : isLow
+                                            ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                                            : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
                                     }`}>
-                                      {row.currentStock < 0 ? "Negative Stock" : isLow ? "Low Stock" : "In Stock"}
+                                      {isSkipped ? "Skipped" : (row.currentStock ?? 0) < 0 ? "Negative Stock" : isLow ? "Low Stock" : "In Stock"}
                                     </span>
                                   </td>
                                 </tr>
@@ -3970,59 +4847,23 @@ export function StockLedgerModule({
       {activeSectionVisible && section === "settings" && (
         canManageSettings ? (
           <>
-            <section className="panel">
-              <div className="panel-title">
-                <div>
-                  <h2>Stock Settings</h2>
-                  <p>Owner-controlled behavior for Stock Ledger entry screens.</p>
-                </div>
-                <Settings />
-              </div>
-              <label className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={allowManualCarryForwardInput}
-                  onChange={(event) => {
-                    const nextAllowManualCarryForwardInput = event.target.checked;
-                    setStockSettingsConfig((current) => ({
-                      ...current,
-                      allowManualCarryForwardInput: nextAllowManualCarryForwardInput
-                    }));
-                    onQueueWrite(
-                      saveStockSettingsConfig({ ...stockSettingsConfig, allowManualCarryForwardInput: nextAllowManualCarryForwardInput }, user, role),
-                      "Could not update Stock Settings."
-                    );
-                  }}
-                />
-                <span>
-                  <span className="block text-sm font-semibold text-slate-100">Enable Carry Forward Input</span>
-                  <span className="mt-1 block text-xs text-slate-400">
-                    When enabled, the Stock Ledger daily entry form allows manual carry-forward input. When disabled, carry-forward stays calculated/read-only.
-                  </span>
-                </span>
-              </label>
-            </section>
             <SettingsTable
               title="Products"
               kind="product"
               canEdit={canManageSettings}
               rows={sortedProducts}
-              onSave={(row) => onQueueWrite(upsertStockProduct({
-                ...(row as StockProduct),
-                paymentTrackingEnabled: (row as StockProduct).paymentTrackingEnabled !== false
-              }, user, role), "Could not save stock product.")}
-              onDelete={(id) => onQueueWrite(deleteStockProduct(id, user, role), "Could not delete stock product.")}
-              onReorder={(before, after) => onQueueWrite(updateStockProductSortOrder(before as StockProduct[], after as StockProduct[]), "Could not reorder stock products.")}
+              onSave={handleSaveStockProduct}
+              onDelete={handleDeleteStockProduct}
+              onReorder={handleReorderStockProducts}
             />
             <SettingsTable
               title="CCR/DO Accounts"
               kind="account"
               canEdit={canManageSettings}
               rows={sortedAccounts}
-              onSave={(row) => onQueueWrite(upsertStockAccount(row as StockAccountProfile, user, role), "Could not save stock account.")}
-              onDelete={(id) => onQueueWrite(deleteStockAccount(id, user, role), "Could not delete stock account.")}
-              onReorder={(before, after) => onQueueWrite(updateStockAccountSortOrder(before as StockAccountProfile[], after as StockAccountProfile[]), "Could not reorder stock accounts.")}
+              onSave={handleSaveStockAccount}
+              onDelete={handleDeleteStockAccount}
+              onReorder={handleReorderStockAccounts}
             />
           </>
         ) : (
@@ -4058,6 +4899,17 @@ export function StockLedgerModule({
           </section>
         )
       )}
+      <TransferBalanceModal
+        isOpen={isTransferModalOpen}
+        onClose={() => setIsTransferModalOpen(false)}
+        dayId={currentDayId}
+        accounts={activeAccounts}
+        accountBalances={currentAccountBalances}
+        onSuccess={handleTransferSuccess}
+        disabled={!canEdit}
+        canReverse={role === "owner" || role === "admin"}
+        initialTab={transferModalTab}
+      />
     </section>
   );
 }

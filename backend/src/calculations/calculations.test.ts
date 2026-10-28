@@ -47,6 +47,19 @@ interface SetupData {
 
 async function cleanupTestData() {
   await sql`
+    ALTER TABLE expense_items DISABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items DISABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions DISABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions DISABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records DISABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries DISABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders DISABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines DISABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments DISABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments DISABLE TRIGGER trg_jazz_payable_payments_immutability;
+  `.execute(db);
+
+  await sql`
     DELETE FROM calculation_runs WHERE franchise_id IN (
       SELECT id FROM franchises WHERE code IN ('TEST-CALC-F1', 'TEST-CALC-F2')
     );
@@ -107,6 +120,19 @@ async function cleanupTestData() {
     DELETE FROM accounting_periods WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-CALC-F1', 'TEST-CALC-F2'));
     DELETE FROM franchises WHERE code IN ('TEST-CALC-F1', 'TEST-CALC-F2');
     DELETE FROM users WHERE firebase_uid LIKE 'test-calc-%';
+  `.execute(db);
+
+  await sql`
+    ALTER TABLE expense_items ENABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items ENABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions ENABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions ENABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records ENABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries ENABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders ENABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines ENABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments ENABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments ENABLE TRIGGER trg_jazz_payable_payments_immutability;
   `.execute(db);
 }
 
@@ -182,14 +208,14 @@ async function setupTestData(): Promise<SetupData> {
 
   const d2 = await sql<{ id: string }>`
     INSERT INTO accounting_days (franchise_id, period_id, day_no, calendar_date, label, status)
-    VALUES (${f1Id}, ${periodId}, 2, '2026-09-02', 'Day 2', 'open')
+    VALUES (${f1Id}, ${periodId}, 2, '2026-09-02', 'Day 2', 'closed')
     RETURNING id;
   `.execute(db);
   const day2Id = d2.rows[0].id;
 
   const d3 = await sql<{ id: string }>`
     INSERT INTO accounting_days (franchise_id, period_id, day_no, calendar_date, label, status)
-    VALUES (${f1Id}, ${periodId}, 3, '2026-09-03', 'Day 3', 'open')
+    VALUES (${f1Id}, ${periodId}, 3, '2026-09-03', 'Day 3', 'closed')
     RETURNING id;
   `.execute(db);
   const day3Id = d3.rows[0].id;
@@ -577,6 +603,10 @@ async function runCalculationTests() {
     // -------------------------------------------------------------------------
     console.log("\nGroup 4: Non-Blocking Invariant Warnings (Negative Tolerance)");
 
+    // Close Day 1 and open Day 2 so Day 2 mutations are permitted under single-open-day rule
+    await sql`UPDATE accounting_days SET status = 'closed' WHERE id = ${data.day1Id}`.execute(db);
+    await sql`UPDATE accounting_days SET status = 'open' WHERE id = ${data.day2Id}`.execute(db);
+
     // Sale of 100 SIMs on Day 2 (when opening inventory is only 60) -> closing = -40
     const negStockRes = await req(base, "POST", "/api/v1/transactions/stock/orders", "calc-admin", {
       day_id: data.day2Id,
@@ -621,6 +651,10 @@ async function runCalculationTests() {
     // 5. Historical Correction & Forward Cascade
     // -------------------------------------------------------------------------
     console.log("\nGroup 5: Historical Correction & Forward Cascade");
+
+    // Close Day 2 and reopen Day 1 for historical correction
+    await sql`UPDATE accounting_days SET status = 'closed' WHERE id = ${data.day2Id}`.execute(db);
+    await sql`UPDATE accounting_days SET status = 'reopen' WHERE id = ${data.day1Id}`.execute(db);
 
     // On Day 1, update the original expense from 800.00 to 1800.00 (+1000 expense)
     const expPatchRes = await req(base, "PATCH", `/api/v1/transactions/expenses/${expRes.body.data.id}`, "calc-admin", {

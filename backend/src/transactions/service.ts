@@ -14,13 +14,17 @@ import { db } from "../config/database.js";
 import type { Database, Timestamp } from "../db/types.js";
 import { assertAccountingDayActive } from "./dayLock.js";
 import { recordAuditLog } from "./audit.js";
-import { saveIdempotencyRecord } from "./idempotency.js";
-import { recalculateFromDayInternal } from "../calculations/engine.js";
+import { saveIdempotencyRecord, checkIdempotency, computePayloadHash } from "./idempotency.js";
+import { recalculateFromDayInternal, calculateDayInternal } from "../calculations/engine.js";
+import { round2 } from "../calculations/evaluators.js";
 import {
   NotFoundError,
   InvalidReferenceError,
   RevisionConflictError,
-  ValidationError
+  ValidationError,
+  DayClosedError,
+  DuplicateSettlementError,
+  ConflictError
 } from "./errors.js";
 import type {
   TransactionFilter,
@@ -41,7 +45,11 @@ import type {
   StockAccountPaymentCreate,
   StockAccountPaymentUpdate,
   JazzPayablePaymentCreate,
-  JazzPayablePaymentUpdate
+  JazzPayablePaymentUpdate,
+  CommissionSettlementReceiptCreate,
+  CommissionSettlementReceiptUpdate,
+  StockBalanceTransferCreate,
+  StockBalanceTransferReverse
 } from "./schemas.js";
 
 export interface MutationContext {
@@ -148,7 +156,7 @@ export async function createExpense(ctx: MutationContext, data: ExpenseItemCreat
         day_id: data.day_id,
         category_id: data.category_id ?? null,
         category_name_snapshot: categoryNameSnapshot,
-        item_name: data.item_name,
+        item_name: data.item_name ?? "",
         description: data.description ?? null,
         amount: data.amount,
         created_by_user_id: ctx.userId
@@ -225,7 +233,7 @@ export async function updateExpense(ctx: MutationContext, id: string, data: Expe
       .set({
         category_id: data.category_id !== undefined ? data.category_id : item.category_id,
         category_name_snapshot: categoryNameSnapshot,
-        item_name: data.item_name !== undefined ? data.item_name : item.item_name,
+        item_name: data.item_name !== undefined ? (data.item_name ?? "") : item.item_name,
         description: data.description !== undefined ? data.description : item.description,
         amount: data.amount !== undefined ? data.amount : item.amount,
         revision: (item.revision || 1) + 1
@@ -1922,4 +1930,599 @@ export async function deleteJazzPayablePayment(ctx: MutationContext, id: string)
 
     return { success: true, id };
   });
+}
+
+// ===========================================================================
+// 11. COMMISSION SETTLEMENT RECEIPTS
+// ===========================================================================
+
+export async function listCommissionSettlementReceipts(
+  franchiseId: string,
+  filter: TransactionFilter & { source_period_key?: string }
+) {
+  let q = db
+    .selectFrom("commission_settlement_receipts")
+    .selectAll()
+    .where("franchise_id", "=", franchiseId)
+    .orderBy("created_at", "desc")
+    .limit(filter.limit)
+    .offset(filter.offset);
+
+  if (filter.day_id) {
+    q = q.where("day_id", "=", filter.day_id);
+  }
+
+  if (filter.source_period_key) {
+    q = q.where("source_period_key", "=", filter.source_period_key);
+  }
+
+  return q.execute();
+}
+
+export async function getCommissionSettlementReceipt(franchiseId: string, id: string) {
+  return db
+    .selectFrom("commission_settlement_receipts")
+    .selectAll()
+    .where("franchise_id", "=", franchiseId)
+    .where("id", "=", id)
+    .executeTakeFirst();
+}
+
+export async function createCommissionSettlementReceipt(
+  ctx: MutationContext,
+  data: CommissionSettlementReceiptCreate
+) {
+  const dayId = data.day_id ?? data.dayId!;
+  const sourcePeriodKey = data.source_period_key ?? data.sourcePeriodKey!;
+  const payloadHash = computePayloadHash({ ...data, dayId, sourcePeriodKey });
+
+  if (ctx.clientMutationId) {
+    const idemp = await checkIdempotency(db, ctx.franchiseId, ctx.clientMutationId, payloadHash);
+    if (idemp.isDuplicate) {
+      return idemp.body as any;
+    }
+  }
+
+  return db.transaction().execute(async (trx) => {
+    // 1. Validate Day and Period state
+    const day = await trx
+      .selectFrom("accounting_days")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", dayId)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!day) {
+      throw new NotFoundError("Accounting day not found or does not belong to your franchise.");
+    }
+
+    const period = await trx
+      .selectFrom("accounting_periods")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", day.period_id)
+      .executeTakeFirst();
+
+    if (period?.status === "closed") {
+      throw new DayClosedError(`Cannot record settlement receipt: Accounting period '${period.period_key}' is CLOSED.`);
+    }
+
+    // Day must be open/reopen OR day 1 of a staged (not yet activated) period
+    if (day.status === "closed") {
+      const isStagedDayOne = day.day_no === 1;
+      if (!isStagedDayOne) {
+        throw new DayClosedError(`Accounting day ${day.day_no} is CLOSED. Mutations are prohibited.`);
+      }
+    }
+
+    // 2. Prevent over-settlement (duplicate settlement protection)
+    const commEarnedAgg = await sql<{ total: string }>`
+      SELECT COALESCE(SUM(ci.amount), 0) as total
+      FROM commission_items ci
+      JOIN accounting_days ad ON ad.id = ci.day_id
+      JOIN accounting_periods ap ON ap.id = ad.period_id
+      WHERE ci.franchise_id = ${ctx.franchiseId} AND ap.period_key = ${sourcePeriodKey};
+    `.execute(trx);
+    const totalEarned = Number(commEarnedAgg.rows[0]?.total ?? 0);
+
+    const commSettledAgg = await sql<{ total: string }>`
+      SELECT COALESCE(SUM(csr.amount), 0) as total
+      FROM commission_settlement_receipts csr
+      WHERE csr.franchise_id = ${ctx.franchiseId} AND csr.source_period_key = ${sourcePeriodKey};
+    `.execute(trx);
+    const totalAlreadySettled = Number(commSettledAgg.rows[0]?.total ?? 0);
+
+    const remainingReceivable = round2(totalEarned - totalAlreadySettled);
+    if (data.amount > remainingReceivable + 0.0001) {
+      throw new DuplicateSettlementError(
+        `Duplicate settlement protection: Receipt amount ${data.amount} exceeds remaining receivable ${remainingReceivable} for period '${sourcePeriodKey}'.`
+      );
+    }
+
+    // 3. Category snapshot
+    let categoryNameSnapshot = data.category_name_snapshot ?? data.categoryNameSnapshot ?? "Commission Settlement";
+    const categoryId = data.category_id ?? data.categoryId ?? null;
+    if (categoryId) {
+      const cat = await trx
+        .selectFrom("expense_categories")
+        .select(["name"])
+        .where("id", "=", categoryId)
+        .where("franchise_id", "=", ctx.franchiseId)
+        .executeTakeFirst();
+      if (cat) {
+        categoryNameSnapshot = cat.name;
+      }
+    }
+
+    // 4. Insert settlement receipt
+    const created = await trx
+      .insertInto("commission_settlement_receipts")
+      .values({
+        franchise_id: ctx.franchiseId,
+        day_id: dayId,
+        source_period_key: sourcePeriodKey,
+        amount: data.amount,
+        category_id: categoryId,
+        category_name_snapshot: categoryNameSnapshot,
+        notes: data.notes ?? null,
+        created_by_user_id: ctx.userId
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    // 5. Trigger calculation for target day (and cascade)
+    //
+    // Exception — staged unactivated Day 1:
+    // A settlement receipt may legitimately be recorded against the next period's
+    // Day 1 while that period is still staged (seeds exist but are unverified) and
+    // the source period is still PENDING_SETTLEMENT.  calculateDayInternal() requires
+    // verified seeds to produce a valid projection; calling it now would either throw
+    // SeedsNotVerifiedError or materialise an incorrect projection built on null/zero
+    // opening balances.
+    //
+    // Skip the calculation ONLY when ALL three conditions hold:
+    //   1. This is Day 1 of the target period.
+    //   2. The target period is not yet formally closed (i.e. it is in a staged state).
+    //   3. The financial seed for the target period is not yet verified.
+    //
+    // When activatePeriod() is eventually called it performs calculateDayInternal()
+    // with allowClosedDays:true at step 5, at which point seeds are guaranteed verified
+    // and all previously recorded settlement receipts are automatically included.
+    //
+    // This guard is intentionally narrow: it never suppresses calculation for
+    // Day 2–30, and never suppresses when seeds are already verified.
+    const shouldSkipCalcForStagedDay1 = await (async () => {
+      if (day.day_no !== 1) return false;
+      if (period?.status === "closed") return false;
+      const seed = await trx
+        .selectFrom("period_financial_seeds")
+        .select(["is_verified"])
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("period_id", "=", day.period_id)
+        .executeTakeFirst();
+      return seed !== undefined && !seed.is_verified;
+    })();
+
+    if (!shouldSkipCalcForStagedDay1) {
+      await calculateDayInternal(trx, ctx.franchiseId, day.id, null, {
+        triggerSource: "commission_settlement",
+        allowClosedDays: true,
+        userId: ctx.userId
+      });
+    }
+    // else: receipt persisted as authoritative fact; calculation deferred to activatePeriod().
+
+    // 6. Record Audit Log
+    await recordAuditLog(trx, {
+      franchiseId: ctx.franchiseId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      action: "CREATE",
+      entityType: "commission_settlement_receipt",
+      entityId: created.id,
+      afterState: created
+    });
+
+    if (ctx.clientMutationId) {
+      await saveIdempotencyRecord(trx, {
+        franchiseId: ctx.franchiseId,
+        clientMutationId: ctx.clientMutationId,
+        userId: ctx.userId,
+        endpoint: "POST /api/v1/transactions/commission-settlements",
+        payloadHash,
+        responseStatus: 201,
+        responseBody: created
+      });
+    }
+
+    return created;
+  });
+}
+
+export async function deleteCommissionSettlementReceipt(
+  ctx: MutationContext,
+  id: string
+) {
+  return db.transaction().execute(async (trx) => {
+    const existing = await trx
+      .selectFrom("commission_settlement_receipts")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", id)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!existing) {
+      throw new NotFoundError("Commission settlement receipt not found.");
+    }
+
+    const day = await trx
+      .selectFrom("accounting_days")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", existing.day_id)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!day) {
+      throw new NotFoundError("Associated accounting day not found.");
+    }
+
+    const period = await trx
+      .selectFrom("accounting_periods")
+      .selectAll()
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", day.period_id)
+      .executeTakeFirst();
+
+    if (period?.status === "closed") {
+      throw new DayClosedError(`Cannot delete settlement receipt: Accounting period '${period.period_key}' is CLOSED.`);
+    }
+
+    if (day.status === "closed") {
+      const isStagedDayOne = day.day_no === 1;
+      if (!isStagedDayOne) {
+        throw new DayClosedError(`Accounting day ${day.day_no} is CLOSED. Deletion prohibited.`);
+      }
+    }
+
+    await trx
+      .deleteFrom("commission_settlement_receipts")
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("id", "=", id)
+      .execute();
+
+    // Same narrow staged-Day-1 guard as createCommissionSettlementReceipt:
+    // skip recalculation if this is an unverified-seed Day 1 in a non-closed period.
+    const shouldSkipCalcForStagedDay1Delete = await (async () => {
+      if (day.day_no !== 1) return false;
+      if (period?.status === "closed") return false;
+      const seed = await trx
+        .selectFrom("period_financial_seeds")
+        .select(["is_verified"])
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("period_id", "=", day.period_id)
+        .executeTakeFirst();
+      return seed !== undefined && !seed.is_verified;
+    })();
+
+    if (!shouldSkipCalcForStagedDay1Delete) {
+      await calculateDayInternal(trx, ctx.franchiseId, day.id, null, {
+        triggerSource: "commission_settlement_deletion",
+        allowClosedDays: true,
+        userId: ctx.userId
+      });
+    }
+
+    await recordAuditLog(trx, {
+      franchiseId: ctx.franchiseId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      action: "DELETE",
+      entityType: "commission_settlement_receipt",
+      entityId: id,
+      beforeState: existing
+    });
+
+    return {
+      deleted: true,
+      id
+    };
+  });
+}
+
+// ===========================================================================
+// 12. STOCK BALANCE TRANSFERS
+// ===========================================================================
+
+export interface StockBalanceTransferResult {
+  transfer: any;
+  sourceAccountProjection: any;
+  destinationAccountProjection: any;
+}
+
+export async function createStockBalanceTransfer(
+  ctx: MutationContext,
+  data: StockBalanceTransferCreate
+): Promise<StockBalanceTransferResult> {
+  if (data.source_account_id === data.destination_account_id) {
+    throw new ValidationError("Source and destination accounts must be distinct.");
+  }
+  if (!Number.isFinite(data.amount) || data.amount <= 0) {
+    throw new ValidationError("Transfer amount must be greater than zero.");
+  }
+
+  return db.transaction().execute(async (trx) => {
+    // 1. Idempotency check
+    if (data.idempotency_key) {
+      const existing = await trx
+        .selectFrom("stock_balance_transfers")
+        .selectAll()
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("idempotency_key", "=", data.idempotency_key)
+        .executeTakeFirst();
+      if (existing) {
+        const [sourceProj, destProj] = await Promise.all([
+          trx.selectFrom("stock_account_day_projections")
+            .selectAll()
+            .where("franchise_id", "=", ctx.franchiseId)
+            .where("day_id", "=", existing.day_id)
+            .where("account_id", "=", existing.source_account_id)
+            .executeTakeFirst(),
+          trx.selectFrom("stock_account_day_projections")
+            .selectAll()
+            .where("franchise_id", "=", ctx.franchiseId)
+            .where("day_id", "=", existing.day_id)
+            .where("account_id", "=", existing.destination_account_id)
+            .executeTakeFirst()
+        ]);
+        return {
+          transfer: existing,
+          sourceAccountProjection: sourceProj ?? null,
+          destinationAccountProjection: destProj ?? null
+        };
+      }
+    }
+
+    // 2. Lock accounting day and ensure active
+    await assertAccountingDayActive(trx, ctx.franchiseId, data.day_id);
+
+    // 3. Verify accounts exist and are active
+    const [sourceAccount, destinationAccount] = await Promise.all([
+      trx.selectFrom("stock_accounts")
+        .select(["id", "name", "is_active"])
+        .where("id", "=", data.source_account_id)
+        .where("franchise_id", "=", ctx.franchiseId)
+        .executeTakeFirst(),
+      trx.selectFrom("stock_accounts")
+        .select(["id", "name", "is_active"])
+        .where("id", "=", data.destination_account_id)
+        .where("franchise_id", "=", ctx.franchiseId)
+        .executeTakeFirst()
+    ]);
+
+    if (!sourceAccount) {
+      throw new InvalidReferenceError(`Source stock account (${data.source_account_id}) does not exist.`);
+    }
+    if (!destinationAccount) {
+      throw new InvalidReferenceError(`Destination stock account (${data.destination_account_id}) does not exist.`);
+    }
+    if (!sourceAccount.is_active) {
+      throw new ValidationError(`Source stock account "${sourceAccount.name}" is deactivated.`);
+    }
+    if (!destinationAccount.is_active) {
+      throw new ValidationError(`Destination stock account "${destinationAccount.name}" is deactivated.`);
+    }
+
+    // 4. Validate source transferable balance
+    let sourceProj = await trx
+      .selectFrom("stock_account_day_projections")
+      .select(["closing_due", "opening_due"])
+      .where("franchise_id", "=", ctx.franchiseId)
+      .where("day_id", "=", data.day_id)
+      .where("account_id", "=", data.source_account_id)
+      .executeTakeFirst();
+
+    if (!sourceProj) {
+      await recalculateDayProjections(trx, ctx, data.day_id);
+      sourceProj = await trx
+        .selectFrom("stock_account_day_projections")
+        .select(["closing_due", "opening_due"])
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("day_id", "=", data.day_id)
+        .where("account_id", "=", data.source_account_id)
+        .executeTakeFirst();
+    }
+
+    const currentDue = sourceProj ? Number(sourceProj.closing_due) : 0;
+    const transferType = data.transfer_type ?? "credit";
+
+    if (transferType === "credit") {
+      const availableCredit = currentDue < 0 ? -currentDue : 0;
+      if (availableCredit <= 0) {
+        throw new ValidationError(`Source account "${sourceAccount.name}" has no available credit balance to transfer (current due: ${currentDue}).`);
+      }
+      if (round2(data.amount) > round2(availableCredit)) {
+        throw new ValidationError(
+          `Transfer amount (${data.amount}) exceeds source account "${sourceAccount.name}" available credit balance (${availableCredit}).`
+        );
+      }
+    } else {
+      const availableDebt = currentDue > 0 ? currentDue : 0;
+      if (availableDebt <= 0) {
+        throw new ValidationError(`Source account "${sourceAccount.name}" has no outstanding debt to transfer (current due: ${currentDue}).`);
+      }
+      if (round2(data.amount) > round2(availableDebt)) {
+        throw new ValidationError(
+          `Transfer amount (${data.amount}) exceeds source account "${sourceAccount.name}" outstanding debt (${availableDebt}).`
+        );
+      }
+    }
+
+    // 5. Insert transfer record
+    const createdTransfer = await trx
+      .insertInto("stock_balance_transfers")
+      .values({
+        franchise_id: ctx.franchiseId,
+        day_id: data.day_id,
+        source_account_id: data.source_account_id,
+        destination_account_id: data.destination_account_id,
+        amount: data.amount,
+        transfer_type: transferType,
+        reason: data.reason.trim(),
+        status: "completed",
+        created_by_user_id: ctx.userId ?? null,
+        idempotency_key: data.idempotency_key ?? null
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    // 6. Audit log
+    await recordAuditLog(trx, {
+      franchiseId: ctx.franchiseId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      action: "CREATE",
+      entityType: "stock_balance_transfer",
+      entityId: createdTransfer.id,
+      afterState: createdTransfer,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent
+    });
+
+    // 7. Recalculate projections forward
+    await recalculateDayProjections(trx, ctx, data.day_id);
+
+    // 8. Fetch updated projections for both accounts
+    const [updatedSourceProj, updatedDestProj] = await Promise.all([
+      trx.selectFrom("stock_account_day_projections")
+        .selectAll()
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("day_id", "=", data.day_id)
+        .where("account_id", "=", data.source_account_id)
+        .executeTakeFirst(),
+      trx.selectFrom("stock_account_day_projections")
+        .selectAll()
+        .where("franchise_id", "=", ctx.franchiseId)
+        .where("day_id", "=", data.day_id)
+        .where("account_id", "=", data.destination_account_id)
+        .executeTakeFirst()
+    ]);
+
+    const result = {
+      transfer: createdTransfer,
+      sourceAccountProjection: updatedSourceProj ?? null,
+      destinationAccountProjection: updatedDestProj ?? null
+    };
+
+    // 9. Save idempotency with identical response format
+    await maybeSaveIdempotency(trx, ctx, { data: result });
+
+    return result;
+  });
+}
+
+export async function reverseStockBalanceTransfer(
+  ctx: MutationContext,
+  id: string,
+  reason: string,
+  targetDayId?: string
+) {
+  return db.transaction().execute(async (trx) => {
+    const existing = await sql<any>`
+      SELECT * FROM stock_balance_transfers
+      WHERE id = ${id} AND franchise_id = ${ctx.franchiseId}
+      FOR UPDATE;
+    `.execute(trx);
+
+    if (existing.rows.length === 0) {
+      throw new NotFoundError("Stock balance transfer not found.");
+    }
+    const original = existing.rows[0];
+    if (original.status === "reversed") {
+      throw new ConflictError("Stock balance transfer is already reversed.");
+    }
+    if (original.reversal_of_id) {
+      throw new ConflictError("Cannot reverse a compensating reversal entry.");
+    }
+
+    const dayId = targetDayId ?? original.day_id;
+    await assertAccountingDayActive(trx, ctx.franchiseId, dayId);
+
+    // Create compensating transfer
+    const compensating = await trx
+      .insertInto("stock_balance_transfers")
+      .values({
+        franchise_id: ctx.franchiseId,
+        day_id: dayId,
+        source_account_id: original.destination_account_id,
+        destination_account_id: original.source_account_id,
+        amount: Number(original.amount),
+        transfer_type: original.transfer_type,
+        reason: `Reversal of transfer ${id}: ${reason.trim()}`,
+        status: "completed",
+        reversal_of_id: id,
+        created_by_user_id: ctx.userId ?? null
+      })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    // Mark original as reversed
+    await trx
+      .updateTable("stock_balance_transfers")
+      .set({
+        status: "reversed",
+        reversed_at: sql`clock_timestamp()`,
+        reversed_by_user_id: ctx.userId ?? null,
+        updated_at: sql`clock_timestamp()`
+      })
+      .where("id", "=", id)
+      .where("franchise_id", "=", ctx.franchiseId)
+      .execute();
+
+    await recordAuditLog(trx, {
+      franchiseId: ctx.franchiseId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      action: "REVERSE",
+      entityType: "stock_balance_transfer",
+      entityId: id,
+      beforeState: original,
+      afterState: { ...original, status: "reversed", reversal_id: compensating.id },
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent
+    });
+
+    await recalculateDayProjections(trx, ctx, dayId);
+
+    return {
+      original: { ...original, status: "reversed" },
+      reversal: compensating
+    };
+  });
+}
+
+export async function listStockBalanceTransfers(
+  franchiseId: string,
+  params: { day_id?: string; account_id?: string }
+) {
+  let q = db
+    .selectFrom("stock_balance_transfers")
+    .selectAll()
+    .where("franchise_id", "=", franchiseId);
+
+  if (params.day_id) {
+    q = q.where("day_id", "=", params.day_id);
+  }
+  if (params.account_id) {
+    q = q.where((eb) =>
+      eb.or([
+        eb("source_account_id", "=", params.account_id!),
+        eb("destination_account_id", "=", params.account_id!)
+      ])
+    );
+  }
+
+  return q.orderBy("created_at", "desc").execute();
 }

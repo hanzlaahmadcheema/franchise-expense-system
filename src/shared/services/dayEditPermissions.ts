@@ -40,7 +40,7 @@ export function canEditOperationalDailyEntry(input: {
   const dayClosed = input.dayClosed || isOperationalDayClosed(input.day, input.nowMs);
   if (dayClosed && !activeReopen) return false;
   if (input.role === "owner") return input.isLiveDay || !dayClosed || activeReopen;
-  if (input.role === "admin") return input.isLiveDay || isAdminEditableReopenedDay(input.day, input.nowMs);
+  if (input.role === "admin") return input.isLiveDay || !dayClosed || isAdminEditableReopenedDay(input.day, input.nowMs);
   return false;
 }
 

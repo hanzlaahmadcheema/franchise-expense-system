@@ -14,7 +14,6 @@ import {
   type FirestoreError,
   type SnapshotMetadata
 } from "firebase/firestore";
-import type { User } from "firebase/auth";
 import { auth, db } from "../../../lib/firebase";
 import { buildAuditLogDocument, writeAuditLog } from "../../../lib/auditLogService";
 import { LEDGER_CALC_VERSION } from "../../../shared/ledger/ledgerTypes";
@@ -23,7 +22,9 @@ import { ChunkedFirestoreBatch, type FirestoreBatchWriter } from "../../../share
 import { assertMasterRefreshAccess, canRunMasterRefresh, MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
 import { canReopenDay } from "../../../shared/services/dayEditPermissions";
 import { changedSortOrderPatches, orderedBySortOrder } from "../../../shared/services/orderUtils";
-import type { UserRole } from "../../../types/ledger";
+import type { LedgerUser, UserRole } from "../../../types/ledger";
+
+type User = LedgerUser;
 import {
   calculateChainedDailySummary,
   calculateDailyLifting,
@@ -83,7 +84,7 @@ function cleanForFirestore<T>(value: T): T {
 }
 
 function activeUser(user?: User | null) {
-  const current = user ?? auth?.currentUser;
+  const current = user ?? (auth?.currentUser as unknown as LedgerUser | null);
   if (!current) throw new Error("Sign in is required.");
   return current;
 }
@@ -401,7 +402,7 @@ export function roleCanJazzLoad(
   if (permission === "read") return true;
   if (permission === MASTER_REFRESH_ACCESS) return canRunMasterRefresh(role);
   if (role === "owner") return true;
-  if (role === "admin") return permission === "daily";
+  if (role === "admin") return permission === "daily" || permission === "settings";
   return false;
 }
 

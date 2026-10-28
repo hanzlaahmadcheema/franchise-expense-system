@@ -21,11 +21,13 @@ import {
   recalculateFromDay,
   rebuildPeriod,
   getDayProjections,
+  getPeriodFinalProjections,
+  getPeriodCommissionSummary,
   getPeriodInvariants,
   listCalculationRuns
 } from "./service.js";
 
-export const calculationRouter = Router();
+export const calculationRouter: Router = Router();
 
 // Apply auth and tenant middleware to all calculation routes
 calculationRouter.use(requireAuth);
@@ -181,6 +183,62 @@ calculationRouter.get(
       res.status(200).json({ data: projections });
     } catch (err) {
       handleCalculationError(res, "GET /projections/day/:dayId", err);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/calculations/projections/period/:periodId/final
+ * Get authoritative month-end FINAL closing state and rolled-forward seed bundle.
+ */
+calculationRouter.get(
+  "/projections/period/:periodId/final",
+  requireRole("viewer"),
+  async (req: Request, res: Response) => {
+    try {
+      const franchiseId = getFranchiseId(req);
+      const periodId = UuidParam.parse(req.params.periodId);
+
+      const finalProjections = await getPeriodFinalProjections(franchiseId, periodId);
+      if (!finalProjections) {
+        res.status(404).json({
+          error: "NOT_FOUND",
+          message: "Period final closing projections not found or not yet calculated."
+        });
+        return;
+      }
+
+      res.status(200).json({ data: finalProjections });
+    } catch (err) {
+      handleCalculationError(res, "GET /projections/period/:periodId/final", err);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/calculations/projections/period/:periodId/commission-summary
+ * Get period commission summary report distinguishing earned vs settled vs prior received vs cash.
+ */
+calculationRouter.get(
+  "/projections/period/:periodId/commission-summary",
+  requireRole("viewer"),
+  async (req: Request, res: Response) => {
+    try {
+      const franchiseId = getFranchiseId(req);
+      const periodId = UuidParam.parse(req.params.periodId);
+
+      const summary = await getPeriodCommissionSummary(franchiseId, periodId);
+      if (!summary) {
+        res.status(404).json({
+          error: "NOT_FOUND",
+          message: "Accounting period not found."
+        });
+        return;
+      }
+
+      res.status(200).json({ data: summary });
+    } catch (err) {
+      handleCalculationError(res, "GET /projections/period/:periodId/commission-summary", err);
     }
   }
 );

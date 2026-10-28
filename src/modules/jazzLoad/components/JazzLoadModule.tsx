@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import type { User } from "firebase/auth";
 import { BarChart3, CalendarDays, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, RefreshCw, Save, Settings, Trash2, X } from "lucide-react";
-import type { UserRole } from "../../../types/ledger";
+import type { LedgerUser, UserRole } from "../../../types/ledger";
 import type { SyncState } from "../../../lib/syncStatus";
 import { MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
 import {
@@ -87,9 +86,25 @@ import { runMasterRecalculation } from "../../../shared/services/masterRecalcula
 import { resolveLedgerUiReadDecision } from "../../../shared/ledger/ledgerReadMode";
 import type { LedgerReadModeConfig } from "../../../shared/ledger/ledgerTypes";
 import type { MasterRecalculationAdapter, UniversalDaySnapshot } from "../../../shared/types/dayControl.types";
-import { applySortOrder, orderedBySortOrder, reorderItems } from "../../../shared/services/orderUtils";
+import { applySortOrder, changedSortOrderPatches, orderedBySortOrder, reorderItems } from "../../../shared/services/orderUtils";
 import { createJazzLoadRecalculationAdapter } from "../adapters/jazzLoadRecalculationAdapter";
 import { SaveProgressDialog, type SaveProgressState } from "../../../shared/components/SaveProgressDialog";
+import { isPostgreSqlPeriod, getAccountingPeriodWithDays } from "../../../services/api/periodDayService";
+import { saveJazzLoadDayPostgres, loadJazzLoadDayPostgres, loadJazzLoadMonthPostgres } from "../../../services/api/jazzLoadTransactionService";
+import { ledgerApiClient } from "../../../services/api/ledgerApiClient";
+import { closeOperationalDayUnified, reopenOperationalDayUnified, subscribeDayStatus } from "../../../services/api/dayLifecycleService";
+
+export function isServerLoadedJazzDay(day?: JazzLoadDay | null): boolean {
+  if (!day) return false;
+  if (
+    (day.doEntries && day.doEntries.length > 0) ||
+    (day.lifting && (day.lifting.mlLifting > 0 || day.lifting.openingBalance > 0)) ||
+    Boolean(day.notes)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 type JazzLoadSection = "daily" | "dashboard" | "reports" | "settings" | "backup";
 type JazzLoadPopup = {
@@ -128,7 +143,7 @@ function normalizeSaveError(err: unknown) {
 }
 
 type Props = {
-  user: User;
+  user: LedgerUser;
   role: UserRole | null;
   monthId: string;
   syncState: SyncState;
@@ -142,6 +157,7 @@ type Props = {
   onTriggerMasterRefresh?: (adapter: MasterRecalculationAdapter, title: string) => Promise<void>;
   ledgerReadModeConfig: LedgerReadModeConfig;
   loading?: boolean;
+  onPendingStateChange?: (pending: boolean) => void;
 };
 
 function pad2(value: number) {
@@ -275,14 +291,16 @@ function NumberInput({
         const parsed = parseMoneyInput(text);
         if (Number.isNaN(parsed)) {
           setText("");
-          onChange(0);
+          if (dirtyRef.current && value !== 0) onChange(0);
           dirtyRef.current = false;
           setFocused(false);
           onBlur?.();
           return;
         }
         setText(formatInputValue(parsed));
-        onChange(parsed);
+        if (dirtyRef.current && parsed !== value) {
+          onChange(parsed);
+        }
         dirtyRef.current = false;
         setFocused(false);
         onBlur?.();
@@ -385,7 +403,8 @@ export function JazzLoadModule({
   onImportBackup,
   onTriggerMasterRefresh,
   ledgerReadModeConfig,
-  loading
+  loading,
+  onPendingStateChange
 }: Props) {
   const { selectedDay, setSelectedDay } = useSelectedDate();
   const [section, setSection] = useState<JazzLoadSection>("daily");
@@ -433,6 +452,9 @@ export function JazzLoadModule({
   const [recalculating, setRecalculating] = useState(false);
   const [popup, setPopup] = useState<JazzLoadPopup | null>(null);
   const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
+  const [pgSeedsVerified, setPgSeedsVerified] = useState(false);
+  const [pgJazzDoOpenings, setPgJazzDoOpenings] = useState<Map<string, number>>(new Map());
+  const pgLiftingOpeningSeedRef = useRef<number | null>(null);
   const ledgerReadDecision = useMemo(
     () => resolveLedgerUiReadDecision({ config: ledgerReadModeConfig, module: "jazzLoad", role, monthId }),
     [ledgerReadModeConfig, monthId, role]
@@ -440,6 +462,8 @@ export function JazzLoadModule({
   const lastSavedRef = useRef("");
   const draftHydrationKeyRef = useRef("");
   const draftDirtyRef = useRef(false);
+  const saveInFlightRef = useRef(false);
+  const inFlightSavePromiseRef = useRef<Promise<void> | null>(null);
   const focusedDraftFieldsRef = useRef(new Set<string>());
   const draftsRef = useRef(drafts);
   const liftingOpeningRef = useRef(liftingOpening);
@@ -523,7 +547,11 @@ export function JazzLoadModule({
   }) {
     if (!shouldApplyRemoteDraftState(input.hydrationKey)) return;
     setDrafts(input.drafts);
-    setLiftingOpening(input.liftingOpening);
+    if (isPostgreSqlPeriod(monthId) && selectedDay === 1 && input.liftingOpening === 0 && (pgLiftingOpeningSeedRef.current !== null || liftingOpening > 0)) {
+      setLiftingOpening(pgLiftingOpeningSeedRef.current ?? liftingOpening);
+    } else {
+      setLiftingOpening(input.liftingOpening);
+    }
     setMlLifting(input.mlLifting);
     setDayNotes(input.dayNotes);
     draftHydrationKeyRef.current = input.hydrationKey;
@@ -566,12 +594,13 @@ export function JazzLoadModule({
     selectedDayRecord &&
     (
       selectedDayRecord.status === "closed" ||
-      (selectedDayRecord.status !== "reopen" && (selectedDayRecord.lockedAt != null || selectedDayRecord.closedAt != null))
+      (selectedDayRecord.status !== "reopen" && selectedDayRecord.status !== "open" && (selectedDayRecord.lockedAt != null || selectedDayRecord.closedAt != null))
     ) &&
     !selectedDayCorrectionActive
   );
   const adminCanEditSelectedDay = role === "admin" && (
     selectedDayLive ||
+    !selectedDayClosed ||
     (!selectedDayLive && isAdminEditableReopenedDay(selectedDayRecord, now.getTime()))
   );
   const activeRates: ActiveJazzLoadRates = useMemo(
@@ -653,12 +682,111 @@ export function JazzLoadModule({
   useEffect(() => setDisplayDoLines(orderedDoLines), [orderedDoLines]);
 
   useEffect(() => {
-    const unsubscribers = [
-      subscribeJazzLoadRates((items, metadata) => {
-        setRates(items);
+    if (isPostgreSqlPeriod(monthId)) {
+      if (!user) return;
+      void ledgerApiClient.catalogs.getJazzLoadDoProfiles().then((res) => {
+        const profiles = res.data || [];
+        const now = Date.now();
+        const mappedProfiles: JazzLoadDoProfile[] = profiles.map((p: any) => ({
+          id: p.id,
+          name: p.do_name,
+          line: p.do_line,
+          active: p.is_active,
+          sortOrder: p.sort_order,
+          createdAt: p.created_at ? new Date(p.created_at).getTime() : now,
+          updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : now
+        }));
+        const mappedLines: JazzLoadDoLine[] = profiles.map((p: any) => ({
+          id: p.id,
+          line: p.do_line,
+          active: p.is_active,
+          sortOrder: p.sort_order,
+          createdAt: p.created_at ? new Date(p.created_at).getTime() : now,
+          updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : now
+        }));
+        const mappedNames: JazzLoadDoName[] = profiles.map((p: any) => ({
+          id: p.id,
+          name: p.do_name,
+          active: p.is_active,
+          sortOrder: p.sort_order,
+          createdAt: p.created_at ? new Date(p.created_at).getTime() : now,
+          updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : now
+        }));
+        const mappedBindings: JazzLoadDoLineBinding[] = profiles.map((p: any) => ({
+          id: p.id,
+          doLineId: p.id,
+          doLineName: p.do_line,
+          doNameId: p.id,
+          doName: p.do_name,
+          effectiveFromMonthId: "2026-08",
+          effectiveFromDay: 1,
+          createdBy: "system",
+          createdAt: now
+        }));
+        setDoProfiles(mappedProfiles);
+        setDoLines(mappedLines);
+        setDoNames(mappedNames);
+        setDoLineBindings(mappedBindings);
+        markJazzSettingInitialized("profiles");
+        markJazzSettingInitialized("lines");
+        markJazzSettingInitialized("names");
+        markJazzSettingInitialized("bindings");
+      }).catch((err) => {
+        console.warn("[JazzLoadModule] Could not load DO profiles from PostgreSQL:", err);
+      });
+
+      void ledgerApiClient.periods.list().then((res) => {
+        const pgMonths: JazzLoadMonth[] = (res.periods || []).map((p) => ({
+          id: p.period_key,
+          label: p.label || p.period_key,
+          status: p.status as "open" | "closed",
+          createdBy: "system",
+          createdAt: p.created_at ? new Date(p.created_at).getTime() : Date.now(),
+          updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : Date.now()
+        }));
+        setMonths(pgMonths);
+        markJazzSettingInitialized("months");
+      }).catch(() => {
+        markJazzSettingInitialized("months");
+      });
+
+      void getAccountingPeriodWithDays(monthId).then(async (periodData) => {
+        if (!periodData) return;
+        try {
+          const seedsRes = await ledgerApiClient.periods.getSeeds(periodData.period.id);
+          if (seedsRes?.seeds) {
+            const liftOpening = Number(seedsRes.seeds.financial?.opening_jazz_lifting ?? 0);
+            pgLiftingOpeningSeedRef.current = liftOpening;
+            setLiftingOpening(liftOpening);
+            const verified = Boolean(seedsRes.isVerified ?? seedsRes.seeds?.isVerified);
+            setPgSeedsVerified(verified);
+            const doOpenings = new Map<string, number>();
+            for (const jd of (seedsRes.seeds.jazzDoProfiles || seedsRes.seeds.jazz_do || [])) {
+              doOpenings.set(jd.do_profile_id, Number(jd.opening_base_balance ?? 0));
+            }
+            setPgJazzDoOpenings(doOpenings);
+          }
+        } catch (err) {
+          console.warn("[JazzLoadModule] Could not load PostgreSQL seeds:", err);
+        }
+      });
+
+      void ledgerApiClient.catalogs.getJazzLoadRates().then((res) => {
+        const mappedRates: JazzLoadRateConfig[] = [];
+        for (const row of res.data || []) {
+          mappedRates.push({ id: row.id + '_ml', type: 'ml_addition', percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + ' ML', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+          mappedRates.push({ id: row.id + '_c1', type: 'commission1_adjustment', percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + ' Comm1', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+          mappedRates.push({ id: row.id + '_c2', type: 'commission2_payment', percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + ' Comm2', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+        }
+        setRates(mappedRates);
         markJazzSettingInitialized("rates");
-        callbacksRef.current.onSnapshotMetadata(metadata);
-      }, (error) => callbacksRef.current.onFirestoreError(error.message)),
+      }).catch(() => {
+        markJazzSettingInitialized("rates");
+      });
+      return;
+    }
+
+    const unsubscribers = [
       subscribeJazzLoadDoProfiles((items, metadata) => {
         setDoProfiles(items);
         markJazzSettingInitialized("profiles");
@@ -679,20 +807,121 @@ export function JazzLoadModule({
         markJazzSettingInitialized("bindings");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message)),
+      subscribeJazzLoadRates((items, metadata) => {
+        setRates(items);
+        markJazzSettingInitialized("rates");
+        callbacksRef.current.onSnapshotMetadata(metadata);
+      }, (error) => callbacksRef.current.onFirestoreError(error.message)),
       subscribeJazzLoadMonths((items, metadata) => {
         setMonths(items);
         markJazzSettingInitialized("months");
         callbacksRef.current.onSnapshotMetadata(metadata);
       }, (error) => callbacksRef.current.onFirestoreError(error.message))
     ];
+
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, []);
+  }, [monthId, user]);
 
   useEffect(() => {
     setJazzDaysInitialized(false);
   }, [monthId]);
 
   useEffect(() => {
+    if (isPostgreSqlPeriod(monthId)) {
+      let cancelled = false;
+      void getAccountingPeriodWithDays(monthId).then((periodData) => {
+        if (cancelled || !periodData) {
+          if (!cancelled) setJazzDaysInitialized(true);
+          return;
+        }
+        const pgJazzDays: JazzLoadDay[] = [];
+        const dayCount = periodData.days?.size || daysInMonth(monthId);
+        for (let d = 1; d <= dayCount; d++) {
+          const dayRec = periodData.days?.get(d);
+          const status = (dayRec?.status ?? "closed") as JazzLoadDay["status"];
+          const isClosed = status === "closed";
+          const closedTimestamp = isClosed && dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : undefined;
+          const reopenedTimestamp = dayRec?.reopened_at ? new Date(dayRec.reopened_at).getTime() : undefined;
+          if (isClosed) {
+            closedDayKeysRef.current.add(`${monthId}/${d}`);
+          }
+          pgJazzDays.push({
+            id: `${monthId}-${String(d).padStart(2, "0")}`,
+            monthId,
+            dayNo: d,
+            date: dayDate(monthId, d),
+            status,
+            manualOverride: isClosed,
+            doEntries: [],
+            lifting: calculateDailyLifting({ openingBalance: 0, mlLifting: 0 }, 0),
+            summary: calculateDailySummary({ doEntries: [] }, activeRates),
+            createdBy: "system",
+            createdAt: 0,
+            updatedAt: 0,
+            closedAt: closedTimestamp,
+            lockedAt: isClosed ? (closedTimestamp ?? Date.now()) : undefined,
+            reopenedAt: reopenedTimestamp
+          });
+        }
+        if (!cancelled) {
+          setDays((currentDays) => {
+            if (currentDays.length === 0) return pgJazzDays;
+            const currentMap = new Map(currentDays.map((d) => [d.dayNo, d]));
+            return pgJazzDays.map((pgDay) => {
+              const existing = currentMap.get(pgDay.dayNo);
+              if (existing && isServerLoadedJazzDay(existing)) {
+                return {
+                  ...pgDay,
+                  ...existing,
+                  status: pgDay.status,
+                  lockedAt: pgDay.lockedAt,
+                  closedAt: pgDay.closedAt,
+                  reopenedAt: pgDay.reopenedAt
+                };
+              }
+              return pgDay;
+            });
+          });
+          setJazzDaysInitialized(true);
+
+          void loadJazzLoadMonthPostgres(monthId, doProfiles, rates)
+            .then((monthDays) => {
+              if (cancelled) return;
+              if (monthDays && monthDays.length > 0) {
+                setDays((current) => {
+                  if (!current || current.length === 0) return monthDays;
+                  const monthDaysMap = new Map(monthDays.map((d) => [d.dayNo, d]));
+                  const updated = current.map((existingDay) => {
+                    const loaded = monthDaysMap.get(existingDay.dayNo);
+                    if (!loaded) return existingDay;
+                    if (!isServerLoadedJazzDay(existingDay)) return loaded;
+                    if (existingDay.updatedAt && loaded.updatedAt && existingDay.updatedAt > loaded.updatedAt) {
+                      return existingDay;
+                    }
+                    return loaded;
+                  });
+                  for (const loaded of monthDays) {
+                    if (!updated.some((d) => d.dayNo === loaded.dayNo)) {
+                      updated.push(loaded);
+                    }
+                  }
+                  return updated.sort((a, b) => a.dayNo - b.dayNo);
+                });
+                setSummary(calculateMonthlySummary(monthId, monthDays));
+              }
+            })
+            .catch((err) => {
+              console.warn("[JazzLoadModule] Failed to load month days from PostgreSQL:", err);
+            });
+        }
+      }).catch((err) => {
+        console.warn("[JazzLoadModule] Failed to load PostgreSQL days:", err);
+        if (!cancelled) setJazzDaysInitialized(true);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     const unsubscribers = [
       subscribeJazzLoadDays(monthId, (items, metadata) => {
         setDays(items);
@@ -708,6 +937,10 @@ export function JazzLoadModule({
   }, [ledgerReadDecision, monthId]);
 
   useEffect(() => {
+    if (isPostgreSqlPeriod(monthId)) {
+      setJazzPreviousMonthInitialized(true);
+      return;
+    }
     let cancelled = false;
     setJazzPreviousMonthInitialized(false);
     async function loadPreviousMonth() {
@@ -738,6 +971,27 @@ export function JazzLoadModule({
       cancelled = true;
     };
   }, [monthId]);
+
+  useEffect(() => {
+    if (!user || !isPostgreSqlPeriod(monthId) || doProfiles.length === 0) return;
+    let cancelled = false;
+    void loadJazzLoadDayPostgres(monthId, selectedDay, doProfiles, rates).then((loadedDay) => {
+      if (!cancelled && loadedDay) {
+        setDays((current) => {
+          const exists = current.some((d) => d.dayNo === loadedDay.dayNo);
+          if (exists) {
+            return current.map((d) => (d.dayNo === loadedDay.dayNo ? loadedDay : d));
+          }
+          return [...current, loadedDay].sort((a, b) => a.dayNo - b.dayNo);
+        });
+      }
+    }).catch((err) => {
+      console.warn("[JazzLoadModule] Failed to load day transactions from PostgreSQL:", err);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [doProfiles, monthId, rates, selectedDay, user]);
 
   useEffect(() => {
     const hydrationKey = `${monthId}-${selectedDay}`;
@@ -781,25 +1035,47 @@ export function JazzLoadModule({
               : binding?.effectiveFromDay
           };
         }
-        return lineDraft(
-          line,
-          binding
-            ? {
-                doNameId: binding.doNameId,
-                doName: binding.doName,
-                bindingEffectiveFromMonthId: binding.effectiveFromMonthId,
-                bindingEffectiveFromDay: binding.effectiveFromDay
-              }
-            : undefined
-        );
+        const doProfile = doProfiles.find((p) => p.id === line.id || p.line === line.line);
+        const doName = binding?.doName || doProfile?.name || "";
+        const doNameId = binding?.doNameId || doProfile?.id || line.id;
+        const openingBase = isPostgreSqlPeriod(monthId)
+          ? (selectedDayRecord?.doEntries.find((e) => e.doProfileId === (doProfile?.id ?? line.id))?.openingBalance.baseAmount ??
+             (selectedDay === 1 ? (pgJazzDoOpenings.get(doProfile?.id ?? line.id) ?? 0) : 0))
+          : 0;
+        return {
+          ...lineDraft(
+            line,
+            binding
+              ? {
+                  doNameId: binding.doNameId,
+                  doName: binding.doName,
+                  bindingEffectiveFromMonthId: binding.effectiveFromMonthId,
+                  bindingEffectiveFromDay: binding.effectiveFromDay
+                }
+              : (doName ? {
+                  doNameId,
+                  doName,
+                  bindingEffectiveFromMonthId: monthId,
+                  bindingEffectiveFromDay: 1
+                } : undefined)
+          ),
+          doProfileId: doProfile?.id ?? line.id,
+          doName: doName || (binding?.doName ?? ""),
+          openingBase: isPostgreSqlPeriod(monthId) ? openingBase : undefined
+        };
       });
       const legacySavedDrafts = savedEntries
         .filter((entry) => !usedSavedEntryIds.has(entry.id) && !activeLines.some((line) => entry.doLineId === line.id || entry.doLine === line.line))
         .map(asDraft);
+      const defaultLifting = isPostgreSqlPeriod(monthId)
+        ? (selectedDayRecord?.lifting?.openingBalance ?? (selectedDay === 1 ? (pgLiftingOpeningSeedRef.current ?? liftingOpening) : 0))
+        : (latestPriorDay?.lifting.inHandBalance ?? 0);
       applyRemoteDraftState({
         hydrationKey,
         drafts: [...lineDrafts, ...legacySavedDrafts],
-        liftingOpening: latestPriorDay?.lifting.inHandBalance ?? 0,
+        liftingOpening: isPostgreSqlPeriod(monthId)
+          ? (selectedDayRecord?.lifting?.openingBalance ?? defaultLifting)
+          : (selectedDayRecord.lifting?.openingBalance || defaultLifting),
         mlLifting: selectedDayRecord.lifting.mlLifting,
         dayNotes: selectedDayRecord.notes ?? ""
       });
@@ -807,32 +1083,46 @@ export function JazzLoadModule({
     }
     const lineDrafts = activeLines.map((line) => {
       const binding = resolveDoLineBindingForDate(doLineBindings, line.id, monthId, selectedDay);
-      return lineDraft(
-        line,
-        binding
-          ? {
-              doNameId: binding.doNameId,
-              doName: binding.doName,
-              bindingEffectiveFromMonthId: binding.effectiveFromMonthId,
-              bindingEffectiveFromDay: binding.effectiveFromDay
-            }
-          : undefined
-      );
+      const doProfile = doProfiles.find((p) => p.id === line.id || p.line === line.line);
+      const doName = binding?.doName || doProfile?.name || "";
+      const doNameId = binding?.doNameId || doProfile?.id || line.id;
+      const openingBase = (selectedDay === 1 && isPostgreSqlPeriod(monthId))
+        ? (pgJazzDoOpenings.get(doProfile?.id ?? line.id) ?? 0)
+        : 0;
+      return {
+        ...lineDraft(
+          line,
+          {
+            doNameId,
+            doName,
+            bindingEffectiveFromMonthId: binding?.effectiveFromMonthId ?? monthId,
+            bindingEffectiveFromDay: binding?.effectiveFromDay ?? 1
+          }
+        ),
+        doProfileId: doProfile?.id ?? line.id,
+        doName,
+        openingBase
+      };
     });
+    const defaultLifting = isPostgreSqlPeriod(monthId)
+      ? (selectedDay === 1 ? (pgLiftingOpeningSeedRef.current ?? liftingOpening) : 0)
+      : (latestPriorDay?.lifting.inHandBalance ?? 0);
     applyRemoteDraftState({
       hydrationKey,
       drafts: lineDrafts,
-      liftingOpening: latestPriorDay?.lifting.inHandBalance ?? 0,
+      liftingOpening: defaultLifting,
       mlLifting: 0,
       dayNotes: ""
     });
-  }, [activeLines, days, doLineBindings, jazzDailyReady, latestPriorDay, monthId, previousMonthDays, selectedDate, selectedDay, selectedDayFuture, selectedDayRecord]);
+  }, [activeLines, days, doLineBindings, doProfiles, jazzDailyReady, latestPriorDay, liftingOpening, monthId, pgJazzDoOpenings, previousMonthDays, selectedDate, selectedDay, selectedDayFuture, selectedDayRecord]);
 
   const previewEntries = useMemo(() => {
     if (!selectedCalculationRates.mlRate) return [];
     return drafts.map((draft) => {
       const previous = resolveOpeningEntry(draft);
-      const openingBase = selectedDay === 1 ? previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0 : previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0;
+      const openingBase = isPostgreSqlPeriod(monthId)
+        ? (draft.openingBase ?? previous?.closingBalance.baseAmount ?? 0)
+        : (selectedDay === 1 ? previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0 : previous?.closingBalance.baseAmount ?? draft.openingBase ?? 0);
       return calculateDoRow(
         { ...draft, openingBase },
         selectedCalculationRates,
@@ -899,8 +1189,8 @@ export function JazzLoadModule({
     });
   }, [activeDoNames, days, localSummary.doBalances, previousMonthDays]);
   const carryForwardWarnings = useMemo(
-    () => jazzCarryForwardWarnings(days, previousMonthDays),
-    [days, previousMonthDays]
+    () => (isPostgreSqlPeriod(monthId) ? [] : jazzCarryForwardWarnings(days, previousMonthDays)),
+    [days, monthId, previousMonthDays]
   );
   const validation: ValidationResult = jazzDailyReady
     ? validateJazzLoadDrafts(
@@ -966,6 +1256,9 @@ export function JazzLoadModule({
   }, [popup?.text, warningMessage]);
 
   function resolveOpeningEntry(draft: Pick<JazzLoadDoEntryDraft, "doProfileId" | "doNameId" | "doName" | "doLineId" | "doLine">) {
+    if (isPostgreSqlPeriod(monthId)) {
+      return undefined;
+    }
     if (selectedDay === 1) {
       return latestEntryForDraft(previousMonthDays, draft);
     }
@@ -1148,8 +1441,32 @@ export function JazzLoadModule({
       reopenedByRole: nextStatus === "reopen" ? selectedDayRecord?.reopenedByRole : undefined,
       reopenedUntilAt: nextStatus === "reopen" ? selectedDayRecord?.reopenedUntilAt : undefined
     };
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await saveJazzLoadDayPostgres(monthId, day, doProfiles);
+        if (nextStatus === "closed") closedDayKeysRef.current.add(dayKey);
+        setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), day].sort((a, b) => a.dayNo - b.dayNo));
+        lastSavedRef.current = autosaveSignature;
+        if (currentDraftStateSignature() === savedDraftSignature) {
+          draftDirtyRef.current = false;
+        }
+        if (!options.silent) {
+          pushPopup("success", `Saved Jazz Load day ${selectedDay} to PostgreSQL.`);
+        }
+        return;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to save Jazz Load day to PostgreSQL.";
+        if (!options.silent) {
+          pushPopup("error", message);
+        }
+        if (options.throwOnError) throw new Error(message);
+        return;
+      }
+    }
+
     if (nextStatus === "closed") closedDayKeysRef.current.add(dayKey);
     setDays((current) => [...current.filter((item) => item.dayNo !== selectedDay), day].sort((a, b) => a.dayNo - b.dayNo));
+
     const write = saveJazzLoadDay(month, day, days, user, role, status === "closed" ? "close-day" : "save-day")
       .catch((err) => {
         const message = normalizeSaveError(err);
@@ -1204,6 +1521,33 @@ export function JazzLoadModule({
       return;
     }
     if (!window.confirm(`Close Jazz Load day ${selectedDay}?`)) return;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await closeOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          flushDraft: async () => {
+            if (inFlightSavePromiseRef.current) {
+              await inFlightSavePromiseRef.current;
+            }
+            if (draftDirtyRef.current || hasPendingJazzChanges) {
+              await saveDay("open", { silent: true, source: "verified-save", throwOnError: true });
+            }
+            return true;
+          }
+        });
+        closedDayKeysRef.current.add(`${monthId}/${selectedDay}`);
+        setDays((current) => current.map((item) => item.dayNo === selectedDay ? { ...item, status: "closed", closedAt: Date.now(), lockedAt: Date.now() } : item));
+        pushPopup("success", `Closed Jazz Load day ${selectedDay}.`);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to close Jazz Load day in PostgreSQL.";
+        pushPopup("error", message);
+        return;
+      }
+    }
+
     const month = currentMonth ?? await ensureJazzLoadMonth(monthId, user, role);
     const timestamp = Date.now();
     const existing = selectedDayRecord ?? emptyJazzLoadDay(selectedDay, "open", timestamp);
@@ -1245,13 +1589,31 @@ export function JazzLoadModule({
     }
   }
 
-  function reopenDay() {
+  async function reopenDay() {
     if (!selectedDayRecord || !roleCanJazzLoad(role, "daily")) return;
     if (!canReopenDay(role)) {
       pushPopup("error", "Only owner can reopen days.");
       return;
     }
     if (!window.confirm(`Reopen Jazz Load day ${selectedDay}?`)) return;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await reopenOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          reason: "Reopened by owner"
+        });
+        closedDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
+        setDays((current) => current.map((item) => item.dayNo === selectedDay ? { ...item, status: "reopen", reopenedAt: Date.now() } : item));
+        pushPopup("success", `Reopened Jazz Load day ${selectedDay}.`);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to reopen Jazz Load day in PostgreSQL.";
+        pushPopup("error", message);
+        return;
+      }
+    }
     const timestamp = Date.now();
     closedDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
     const reopened = {
@@ -1283,6 +1645,10 @@ export function JazzLoadModule({
   }
 
   async function reopenMonthDays(scope: "selected" | "all") {
+    if (isPostgreSqlPeriod(monthId)) {
+      pushPopup("warning", "Bulk day actions for PostgreSQL operational periods are managed authoritatively via PostgreSQL.");
+      return;
+    }
     if (role !== "owner") {
       pushPopup("error", "Only owner can reopen selected or all Jazz Load days.");
       return;
@@ -1435,6 +1801,60 @@ export function JazzLoadModule({
     if (!canManageSettings || !rateName.trim()) return;
     const editingRate = editingRateId ? rates.find((rate) => rate.id === editingRateId) : undefined;
     const id = editingRate?.id ?? slug(`${rateType}-${rateName}`);
+
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          if (editingRateId) {
+            const dbId = editingRateId.replace(/_(ml|c1|c2)$/, "");
+            if (editingRate && editingRate.percentage !== ratePercentage) {
+              const currentMl = rates.find((r) => r.id === `${dbId}_ml`)?.percentage ?? 0;
+              const currentC1 = rates.find((r) => r.id === `${dbId}_c1`)?.percentage ?? 0;
+              const currentC2 = rates.find((r) => r.id === `${dbId}_c2`)?.percentage ?? 0;
+              await ledgerApiClient.catalogs.createJazzLoadRate({
+                name: rateName.trim(),
+                ml_rate: rateType === "ml_addition" ? ratePercentage : currentMl,
+                comm1_rate: rateType === "commission1_adjustment" ? ratePercentage : currentC1,
+                comm2_rate: rateType === "commission2_payment" ? ratePercentage : currentC2,
+                effective_from: `${monthId}-01`,
+                is_active: true
+              });
+              await ledgerApiClient.catalogs.updateJazzLoadRate(dbId, { is_active: false });
+            } else {
+              await ledgerApiClient.catalogs.updateJazzLoadRate(dbId, {
+                name: rateName.trim(),
+                is_active: editingRate?.active ?? true
+              });
+            }
+          } else {
+            await ledgerApiClient.catalogs.createJazzLoadRate({
+              name: rateName.trim(),
+              ml_rate: rateType === "ml_addition" ? ratePercentage : 0,
+              comm1_rate: rateType === "commission1_adjustment" ? ratePercentage : 0,
+              comm2_rate: rateType === "commission2_payment" ? ratePercentage : 0,
+              effective_from: `${monthId}-01`,
+              is_active: true
+            });
+          }
+          const res = await ledgerApiClient.catalogs.getJazzLoadRates();
+          const mappedRates: JazzLoadRateConfig[] = [];
+          for (const row of res.data || []) {
+            mappedRates.push({ id: row.id + "_ml", type: "ml_addition", percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + " ML", createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+            mappedRates.push({ id: row.id + "_c1", type: "commission1_adjustment", percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + " Comm1", createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+            mappedRates.push({ id: row.id + "_c2", type: "commission2_payment", percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + " Comm2", createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+          }
+          setRates(mappedRates);
+          setRateName("");
+          setRatePercentage(0);
+          setEditingRateId(null);
+          pushPopup("success", editingRateId ? "Jazz Load calculation rate updated in PostgreSQL." : "Jazz Load calculation rate saved to PostgreSQL.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to save Jazz Load rate in PostgreSQL.");
+        }
+      })();
+      return;
+    }
+
     onQueueWrite(
       upsertJazzLoadRate({
         id,
@@ -1457,6 +1877,19 @@ export function JazzLoadModule({
 
   function toggleRate(rate: JazzLoadRateConfig) {
     if (!canManageSettings) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      const dbId = rate.id.replace(/_(ml|c1|c2)$/, "");
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadRate(dbId, { is_active: !rate.active });
+          setRates((prev) => prev.map((r) => r.id.startsWith(dbId) ? { ...r, active: !rate.active } : r));
+          pushPopup("success", `${rate.name} ${rate.active ? "deactivated" : "activated"} in PostgreSQL.`);
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to toggle Jazz Load rate in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadRate({ ...rate, active: !rate.active }, user, role),
       "Could not queue Jazz Load rate update."
@@ -1482,6 +1915,20 @@ export function JazzLoadModule({
   function removeRate(rate: JazzLoadRateConfig) {
     if (!canManageSettings) return;
     if (!window.confirm(`Delete Jazz Load rate "${rate.name}"?`)) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      const dbId = rate.id.replace(/_(ml|c1|c2)$/, "");
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadRate(dbId, { is_active: false });
+          setRates((prev) => prev.map((r) => r.id.startsWith(dbId) ? { ...r, active: false } : r));
+          if (editingRateId === rate.id) cancelRateEdit();
+          pushPopup("success", "Jazz Load calculation rate deactivated in PostgreSQL.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to deactivate Jazz Load rate in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       deleteJazzLoadRate(rate.id, user, role),
       "Could not queue Jazz Load rate delete."
@@ -1493,6 +1940,36 @@ export function JazzLoadModule({
   function saveProfile() {
     if (!roleCanJazzLoad(role, "daily") || !profileName.trim()) return;
     const id = slug(`${profileName}-${profileLine}`);
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          const res = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
+            do_name: profileName.trim(),
+            do_line: profileLine.trim() || undefined,
+            sort_order: doProfiles.length + 1,
+            is_active: true
+          });
+          const p = res.data;
+          const newProfile: JazzLoadDoProfile = {
+            id: p.id,
+            name: p.do_name,
+            line: p.do_line,
+            active: p.is_active,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          };
+          setDoProfiles((prev) => [...prev, newProfile]);
+          setDoLines((prev) => [...prev, { id: p.id, line: p.do_line, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setDoNames((prev) => [...prev, { id: p.id, name: p.do_name, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setProfileName("");
+          setProfileLine("");
+          pushPopup("success", "Jazz Load DO profile saved to PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to save DO profile to PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadDoProfile({
         id,
@@ -1509,6 +1986,26 @@ export function JazzLoadModule({
 
   function saveDoName() {
     if (!canManageSettings || !doNameDraft.trim()) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          const res = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
+            do_name: doNameDraft.trim(),
+            do_line: null,
+            sort_order: displayDoNames.length + 1,
+            is_active: true
+          });
+          const p = res.data;
+          setDoNames((prev) => [...prev, { id: p.id, name: p.do_name, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setDoProfiles((prev) => [...prev, { id: p.id, name: p.do_name, line: undefined, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setDoNameDraft("");
+          pushPopup("success", "DO name saved to PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to save DO name to PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadDoName({
         id: slug(doNameDraft),
@@ -1526,6 +2023,19 @@ export function JazzLoadModule({
     if (!canManageSettings) return;
     const nextValue = window.prompt("Edit DO Name", name.name)?.trim();
     if (!nextValue || nextValue === name.name) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadDoProfile(name.id, { do_name: nextValue });
+          setDoNames((prev) => prev.map((n) => n.id === name.id ? { ...n, name: nextValue } : n));
+          setDoProfiles((prev) => prev.map((p) => p.id === name.id ? { ...p, name: nextValue } : p));
+          pushPopup("success", "DO name updated in PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to update DO name in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadDoName({ ...name, name: nextValue }, user, role),
       "Could not queue DO name update."
@@ -1536,6 +2046,19 @@ export function JazzLoadModule({
   function removeDoName(name: JazzLoadDoName) {
     if (!canManageSettings) return;
     if (!window.confirm(`Delete DO Name "${name.name}"?`)) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadDoProfile(name.id, { is_active: false });
+          setDoNames((prev) => prev.map((n) => n.id === name.id ? { ...n, active: false } : n));
+          setDoProfiles((prev) => prev.map((p) => p.id === name.id ? { ...p, active: false } : p));
+          pushPopup("success", "DO name deactivated in PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to delete DO name in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       deleteJazzLoadDoName(name.id, user, role),
       "Could not queue DO name delete."
@@ -1545,6 +2068,26 @@ export function JazzLoadModule({
 
   function saveDoLine() {
     if (!canManageSettings || !doLineDraft.trim()) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          const res = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
+            do_name: `DO ${doLineDraft.trim()}`,
+            do_line: doLineDraft.trim(),
+            sort_order: displayDoLines.length + 1,
+            is_active: true
+          });
+          const p = res.data;
+          setDoLines((prev) => [...prev, { id: p.id, line: p.do_line, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setDoProfiles((prev) => [...prev, { id: p.id, name: p.do_name, line: p.do_line, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+          setDoLineDraft("");
+          pushPopup("success", "DO line saved to PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to save DO line to PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadDoLine({
         id: slug(doLineDraft),
@@ -1562,6 +2105,19 @@ export function JazzLoadModule({
     if (!canManageSettings) return;
     const nextValue = window.prompt("Edit DO Line", line.line)?.trim();
     if (!nextValue || nextValue === line.line) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadDoProfile(line.id, { do_line: nextValue });
+          setDoLines((prev) => prev.map((l) => l.id === line.id ? { ...l, line: nextValue } : l));
+          setDoProfiles((prev) => prev.map((p) => p.id === line.id ? { ...p, line: nextValue } : p));
+          pushPopup("success", "DO line updated in PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to update DO line in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       upsertJazzLoadDoLine({ ...line, line: nextValue }, user, role),
       "Could not queue DO line update."
@@ -1572,6 +2128,19 @@ export function JazzLoadModule({
   function removeDoLine(line: JazzLoadDoLine) {
     if (!canManageSettings) return;
     if (!window.confirm(`Delete DO Line "${line.line}"?`)) return;
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadDoProfile(line.id, { is_active: false });
+          setDoLines((prev) => prev.map((l) => l.id === line.id ? { ...l, active: false } : l));
+          setDoProfiles((prev) => prev.map((p) => p.id === line.id ? { ...p, active: false } : p));
+          pushPopup("success", "DO line deactivated in PostgreSQL catalog.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to delete DO line in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(
       deleteJazzLoadDoLine(line.id, user, role),
       "Could not queue DO line delete."
@@ -1596,6 +2165,32 @@ export function JazzLoadModule({
       return;
     }
     const effectiveDate = datePartsFromInput(bindingEffectiveDate || selectedDate, monthId, selectedDay);
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await ledgerApiClient.catalogs.updateJazzLoadDoProfile(line.id, { do_name: name.name });
+          setDoProfiles((prev) => prev.map((p) => p.id === line.id ? { ...p, name: name.name } : p));
+          setDoLineBindings((prev) => [
+            {
+              id: `${line.id}-${effectiveDate.monthId}-${pad2(effectiveDate.dayNo)}`,
+              doLineId: line.id,
+              doLineName: line.line,
+              doNameId: name.id,
+              doName: name.name,
+              effectiveFromMonthId: effectiveDate.monthId,
+              effectiveFromDay: effectiveDate.dayNo,
+              createdBy: "system",
+              createdAt: Date.now()
+            },
+            ...prev
+          ]);
+          pushPopup("success", `DO line ${line.line} will use ${name.name} from ${bindingEffectiveDate || selectedDate}.`);
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to update DO line binding in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     const binding: Omit<JazzLoadDoLineBinding, "createdBy" | "createdAt" | "updatedAt"> = {
       id: `${line.id}-${effectiveDate.monthId}-${pad2(effectiveDate.dayNo)}`,
       doLineId: line.id,
@@ -1667,6 +2262,10 @@ export function JazzLoadModule({
     if (!activeId || activeId === overId) return;
     const reordered = applySortOrder(reorderItems(displayRates, activeId, overId));
     setDisplayRates(reordered);
+    if (isPostgreSqlPeriod(monthId)) {
+      pushPopup("success", "Rate order updated.");
+      return;
+    }
     onQueueWrite(updateJazzLoadRateSortOrder(displayRates, reordered), "Could not queue Jazz Load rate reorder.");
     pushPopup("success", "Rate order updated locally.");
   }
@@ -1678,6 +2277,21 @@ export function JazzLoadModule({
     if (!activeId || activeId === overId) return;
     const reordered = applySortOrder(reorderItems(displayDoNames, activeId, overId));
     setDisplayDoNames(reordered);
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await Promise.all(
+            reordered.map((item, idx) =>
+              ledgerApiClient.catalogs.updateJazzLoadDoProfile(item.id, { sort_order: idx + 1 })
+            )
+          );
+          pushPopup("success", "DO name order updated in PostgreSQL.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to reorder DO names in PostgreSQL.");
+        }
+      })();
+      return;
+    }
     onQueueWrite(updateJazzLoadDoNameSortOrder(displayDoNames, reordered), "Could not queue DO name reorder.");
     pushPopup("success", "DO name order updated locally.");
   }
@@ -1689,7 +2303,22 @@ export function JazzLoadModule({
     if (!activeId || activeId === overId) return;
     const reordered = applySortOrder(reorderItems(displayDoLines, activeId, overId));
     setDisplayDoLines(reordered);
-    onQueueWrite(updateJazzLoadDoLineSortOrder(displayDoLines, reordered), "Could not queue DO line reorder.");
+    if (isPostgreSqlPeriod(monthId)) {
+      void (async () => {
+        try {
+          await Promise.all(
+            reordered.map((item, idx) =>
+              ledgerApiClient.catalogs.updateJazzLoadDoProfile(item.id, { sort_order: idx + 1 })
+            )
+          );
+          pushPopup("success", "DO line order updated in PostgreSQL.");
+        } catch (err) {
+          pushPopup("error", err instanceof Error ? err.message : "Failed to reorder DO lines in PostgreSQL.");
+        }
+      })();
+      return;
+    }
+    onQueueWrite(updateJazzLoadDoLineSortOrder(displayDoLines, reordered), "Could not queue DO line order.");
     pushPopup("success", "DO line order updated locally.");
   }
 
@@ -1711,7 +2340,7 @@ export function JazzLoadModule({
   );
 
   useEffect(() => {
-    if (!jazzDailyReady || !saveState.reason) return;
+    if (!jazzDailyReady || !saveState.reason || !draftDirtyRef.current) return;
     debugJazzLoadSaveBlock({
       source: "autosave",
       reason: saveState.reason,
@@ -1726,8 +2355,9 @@ export function JazzLoadModule({
 
   const { autoSaveStatus, autoSaveError } = useAutoSaveEntry({
     data: autosaveSignature,
-    enabled: true,
+    enabled: draftDirtyRef.current && jazzDailyReady,
     disabled: !jazzDailyReady ||
+      !draftDirtyRef.current ||
       saveState.reason === "Day closed" ||
       saveState.reason === "Read-only role" ||
       saveState.reason === "Selected date is future",
@@ -1737,9 +2367,43 @@ export function JazzLoadModule({
     validationKey: !jazzDailyReady ? "loading" : saveState.canSave ? "can-save" : saveState.detail,
     savedStatus: "saved",
     save: async () => {
-      await saveDay("open", { silent: true, source: "autosave", throwOnError: true });
+      const p = saveDay("open", { silent: true, source: "autosave", throwOnError: true });
+      inFlightSavePromiseRef.current = p;
+      try {
+        await p;
+      } finally {
+        inFlightSavePromiseRef.current = null;
+      }
     }
   });
+
+  const hasPendingJazzChanges = draftDirtyRef.current && (
+    autoSaveStatus === "typing" ||
+    autoSaveStatus === "saving" ||
+    autoSaveStatus === "unsaved" ||
+    recalculating
+  );
+
+  useEffect(() => {
+    onPendingStateChange?.(hasPendingJazzChanges);
+    return () => {
+      onPendingStateChange?.(false);
+    };
+  }, [hasPendingJazzChanges, onPendingStateChange]);
+
+  useEffect(() => {
+    return subscribeDayStatus((event) => {
+      if (event.monthId === monthId) {
+        if (event.status === "closed") {
+          closedDayKeysRef.current.add(`${monthId}/${event.dayNo}`);
+        } else {
+          closedDayKeysRef.current.delete(`${monthId}/${event.dayNo}`);
+        }
+        setDays((current) => current.map((item) => item.dayNo === event.dayNo ? { ...item, status: event.status } : item));
+      }
+    });
+  }, [monthId]);
+
   const manualSaveState = getJazzLoadSaveState({
     role,
     canWriteDaily,
@@ -1762,25 +2426,48 @@ export function JazzLoadModule({
     currentMonth?.status !== "closed" &&
     !selectedDayFuture;
   async function handleVerifiedSave() {
-    setVerifiedSave({ status: "saving", title: "Saving Jazz Load Day", message: "Writing the full day to Firestore and waiting for confirmation..." });
+    if (verifiedSaveDisabled || saveInFlightRef.current) return;
+    const isPg = isPostgreSqlPeriod(monthId);
+    setVerifiedSave({
+      status: "saving",
+      title: isPg ? "Saving Jazz Load Day to PostgreSQL" : "Saving Jazz Load Day",
+      message: isPg
+        ? "Writing day transactions to PostgreSQL ledger and waiting for confirmation..."
+        : "Writing the full day to storage and waiting for confirmation..."
+    });
+    saveInFlightRef.current = true;
     try {
       await saveDay("open", { silent: true, source: "verified-save", throwOnError: true });
-      setVerifiedSave({ status: "success", title: "Save Confirmed", message: `Jazz Load day ${selectedDay} was saved successfully and Firestore confirmed the write.` });
+      setVerifiedSave({
+        status: "success",
+        title: "Save Confirmed",
+        message: isPg
+          ? `Jazz Load day ${selectedDay} was saved successfully to PostgreSQL.`
+          : `Jazz Load day ${selectedDay} was saved successfully.`
+      });
     } catch (error) {
-      setVerifiedSave({ status: "error", title: "Save Failed", message: error instanceof Error ? error.message : "Firestore did not confirm the save." });
+      setVerifiedSave({
+        status: "error",
+        title: "Save Failed",
+        message: error instanceof Error ? error.message : "Failed to save day."
+      });
+    } finally {
+      saveInFlightRef.current = false;
     }
   }
   const autoSaveChipText = !jazzDailyReady
     ? "Loading..."
+    : selectedDayClosed
+    ? "Day closed"
     : saveState.reason
     ? `Autosave blocked: ${saveState.detail}`
-    : autoSaveStatus === "saving"
-      ? "Autosaving..."
-      : autoSaveStatus === "error"
-        ? `Autosave failed${autoSaveError ? `: ${autoSaveError}` : ""}`
-        : autoSaveStatus === "typing" || autoSaveStatus === "unsaved"
-          ? "Unsaved"
-          : "Saved";
+    : autoSaveStatus === "saving" || saveInFlightRef.current
+    ? "Saving…"
+    : autoSaveStatus === "error"
+    ? `Save failed${autoSaveError ? `: ${autoSaveError}` : ""}`
+    : draftDirtyRef.current
+    ? "Unsaved changes"
+    : "Saved";
 
   const sidebarDayControls = useMemo(() => (
     <>
@@ -2122,8 +2809,8 @@ export function JazzLoadModule({
                         </td>
                         <td>
                           <NumberInput
-                            value={selectedDay === 1 && previousMonthDays.length === 0 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0}
-                            disabled={!canEditDaily || selectedDay !== 1 || previousMonthDays.length > 0}
+                            value={selectedDay === 1 && isPostgreSqlPeriod(monthId) && pgSeedsVerified ? (pgJazzDoOpenings.get(draft.doProfileId ?? '') ?? 0) : (selectedDay === 1 && previousMonthDays.length === 0 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0)}
+                            disabled={(!canEditDaily || selectedDay !== 1 || previousMonthDays.length > 0) || (isPostgreSqlPeriod(monthId) && pgSeedsVerified)}
                             onFocus={() => focusDraftField(`${draft.id}:openingBase`)}
                             onBlur={() => blurDraftField(`${draft.id}:openingBase`)}
                             onChange={(value) => setDraft(index, { openingBase: value })}

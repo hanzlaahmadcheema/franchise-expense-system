@@ -47,5 +47,19 @@ export async function assertAccountingDayActive(
     );
   }
 
+  // Also assert parent accounting period is not CLOSED
+  const period = await trx
+    .selectFrom("accounting_periods")
+    .select(["status", "period_key"])
+    .where("id", "=", day.period_id)
+    .where("franchise_id", "=", franchiseId)
+    .executeTakeFirst();
+
+  if (period && period.status === "closed") {
+    throw new DayClosedError(
+      `Financial Ledger Violation: Accounting period '${period.period_key}' is CLOSED. Mutations are prohibited.`
+    );
+  }
+
   return day;
 }

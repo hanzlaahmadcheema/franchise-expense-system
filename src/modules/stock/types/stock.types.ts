@@ -1,4 +1,5 @@
 import type { CalendarDayStatus, UserRole } from "../../../types/ledger";
+import type { StockProductDayProjection, StockAccountDayProjection } from "../../../services/api/ledgerApiClient";
 
 export type StockMonthStatus = "open" | "closed";
 export type StockDayStatus = CalendarDayStatus;
@@ -123,6 +124,8 @@ export type StockDayRecord = {
   stockOut?: StockDailyAccountEntry[];
   stockIn?: StockInRecord[];
   summary: StockDailySummary;
+  stockProductProjections?: StockProductDayProjection[];
+  stockAccountProjections?: StockAccountDayProjection[];
   notes?: string;
   createdBy: string;
   updatedBy?: string;
@@ -186,8 +189,8 @@ export type StockMonthlySummary = {
   totalAmount: number;
   totalPaymentReceived: number;
   totalDueBalance: number;
-  openingStock?: Record<string, number>;
-  closingStock?: Record<string, number>;
+  openingStock?: Record<string, number | null>;
+  closingStock?: Record<string, number | null>;
   openingJazzPayable?: number;
   closingJazzPayable?: number;
   productTotals: StockProductMonthlyTotal[];
@@ -252,17 +255,18 @@ export type StockInRecord = {
 };
 
 export type StockOpeningBalances = {
-  openingStock: Record<string, number>;
+  openingStock: Record<string, number | null>;
   jazzOpeningPayable: number;
+  stockAccountOpening?: Record<string, number>;
 };
 
 export type StockProductBalance = {
   productId: string;
   productName: string;
-  openingStock: number;
+  openingStock: number | null;
   totalStockIn: number;
   totalStockOut: number;
-  currentStock: number;
+  currentStock: number | null;
   updatedAt: number;
 };
 

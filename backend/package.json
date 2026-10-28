@@ -12,11 +12,14 @@
     "auth:provision": "tsx src/scripts/provision-local-accounts.ts",
     "import:august": "NODE_ENV=production tsx src/scripts/import-august-expenses.ts",
     "import:august-jazzload": "NODE_ENV=production tsx src/scripts/import-august-jazzload.ts",
-    "test": "tsx src/auth/auth.test.ts && tsx src/auth/localAuth.test.ts && tsx src/catalogs/catalogs.test.ts && tsx src/transactions/transactions.test.ts && tsx src/calculations/calculations.test.ts && tsx src/periods/periods.test.ts && tsx src/calculations/finalClosing.test.ts && tsx src/calculations/commissionSettlement.test.ts && tsx src/calculations/stagedPeriodSettlement.test.ts && tsx src/calculations/finalSettlementLayer.test.ts && tsx src/calculations/day32TransactionSemantics.test.ts && tsx src/calculations/augustFinalVerification.test.ts && tsx src/periods/closedMonthRecoveryAndNegativeStock.test.ts",
+    "import:september": "NODE_ENV=production tsx src/scripts/import-september-expenses.ts",
+    "import:september-jazzload": "NODE_ENV=production tsx src/scripts/import-september-jazzload.ts",
+    "test": "tsx src/auth/auth.test.ts && tsx src/auth/localAuth.test.ts && tsx src/catalogs/catalogs.test.ts && tsx src/transactions/transactions.test.ts && tsx src/transactions/stockBalanceTransfer.test.ts && tsx src/calculations/calculations.test.ts && tsx src/periods/periods.test.ts && tsx src/calculations/finalClosing.test.ts && tsx src/calculations/commissionSettlement.test.ts && tsx src/calculations/stagedPeriodSettlement.test.ts && tsx src/calculations/finalSettlementLayer.test.ts && tsx src/calculations/day32TransactionSemantics.test.ts && tsx src/calculations/augustFinalVerification.test.ts && tsx src/periods/closedMonthRecoveryAndNegativeStock.test.ts",
     "test:auth": "tsx src/auth/auth.test.ts",
     "test:local-auth": "tsx src/auth/localAuth.test.ts",
     "test:catalogs": "tsx src/catalogs/catalogs.test.ts",
     "test:transactions": "tsx src/transactions/transactions.test.ts",
+    "test:stock-transfers": "tsx src/transactions/stockBalanceTransfer.test.ts",
     "test:calculations": "tsx src/calculations/calculations.test.ts",
     "test:periods": "tsx src/periods/periods.test.ts",
     "test:final-closing": "tsx src/calculations/finalClosing.test.ts",
@@ -26,7 +29,8 @@
     "test:day32-semantics": "tsx src/calculations/day32TransactionSemantics.test.ts",
     "test:august-verif": "tsx src/calculations/augustFinalVerification.test.ts",
     "test:recovery": "tsx src/periods/closedMonthRecoveryAndNegativeStock.test.ts",
-    "test:import-jazzload": "NODE_ENV=production tsx src/scripts/import-august-jazzload.test.ts"
+    "test:import-jazzload": "NODE_ENV=production tsx src/scripts/import-august-jazzload.test.ts",
+    "test:import-september-jazzload": "NODE_ENV=production tsx src/scripts/import-september-jazzload.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

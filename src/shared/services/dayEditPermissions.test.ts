@@ -37,6 +37,15 @@ describe("day edit permissions", () => {
       canWriteDaily: true,
       monthClosed: false,
       isLiveDay: false,
+      dayClosed: false,
+      nowMs
+    })).toBe(true);
+
+    expect(canEditOperationalDailyEntry({
+      role: "admin",
+      canWriteDaily: true,
+      monthClosed: false,
+      isLiveDay: false,
       dayClosed: true,
       day: activeOwnerReopen,
       nowMs

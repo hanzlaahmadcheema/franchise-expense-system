@@ -1,7 +1,10 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 
-// Load environment variables from .env if present
+// Load environment variables (.env.production takes precedence if NODE_ENV === "production")
+if (process.env.NODE_ENV === "production") {
+  dotenv.config({ path: ".env.production" });
+}
 dotenv.config();
 
 const envSchema = z.object({

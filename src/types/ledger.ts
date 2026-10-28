@@ -17,6 +17,12 @@ export type CommissionCategory = string;
 
 export type UserRole = "owner" | "admin" | "viewer";
 
+export interface LedgerUser {
+  uid: string;
+  email?: string | null;
+  displayName?: string | null;
+}
+
 export type MonthStatus = "open" | "closed";
 export type CalendarDayStatus = "open" | "closed" | "reopen";
 
@@ -102,6 +108,9 @@ export type DailyLedgerInput = {
   recalculatedByRole?: UserRole;
   recalculationSource?: string;
   updatedAt?: number;
+  openingCash?: number;
+  ownerOpeningBalance?: number;
+  loadError?: string;
   expenses: ExpenseItem[];
   commissions: CommissionItem[];
   credits: CreditRow[];
@@ -114,6 +123,7 @@ export type DailyLedgerComputed = {
   label?: string;
   notes?: string;
   openingBalance: number;
+  ownerOpeningBalance?: number;
   issueBalance: number;
   totalBalance: number;
   expenseTotal: number;
@@ -180,6 +190,7 @@ export type ExpenseCarryForwardSeed = {
   openingBalance: number;
   ownerOpeningBalance: number;
   creditBalances: ExpenseCarryForwardCreditBalance[];
+  isGenesis?: boolean;
 };
 
 export type MonthRecord = {

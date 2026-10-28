@@ -16,7 +16,7 @@ type StockLiftingSummaryTableProps = {
   monthId: string;
   filterStartDate: number;
   filterEndDate: number;
-  monthOpeningStock: Record<string, number>;
+  monthOpeningStock: Record<string, number | null>;
   currentStockBalances: StockProductBalance[];
   productRateById: Record<string, number>;
 };
@@ -26,6 +26,7 @@ type StockIssuanceSummaryTableProps = {
   accounts: StockAccountProfile[];
   days: StockDayRecord[];
   prevSummary: StockMonthlySummary | null | undefined;
+  stockAccountOpening?: Record<string, number>;
   filterStartDate: number;
   filterEndDate: number;
   filterProductId: string;
@@ -45,7 +46,7 @@ type ProductStockFlowTableProps = {
   filterStockInMode: "" | "cash" | "credit";
   filterAccountType: "" | StockAccountType;
   filterAccountId: string;
-  monthOpeningStock: Record<string, number>;
+  monthOpeningStock: Record<string, number | null>;
 };
 
 type CashCreditStockInTableProps = {
@@ -95,15 +96,22 @@ export function StockLiftingSummaryTable({
   const productInHand: Record<string, number> = {};
   const productValuation: Record<string, number> = {};
 
+  const skippedProductIds = new Set(
+    activeProducts
+      .filter((p) => monthOpeningStock[p.id] === null)
+      .map((p) => p.id)
+  );
+
   activeProducts.forEach((product) => {
     const balanceRow = currentStockBalances.find((balance) => balance.productId === product.id);
     const rate = productRateById[product.id] ?? 0;
+    const isSkipped = skippedProductIds.has(product.id);
 
-    productOpening[product.id] = monthOpeningStock[product.id] ?? 0;
-    productReceived[product.id] = (monthOpeningStock[product.id] ?? 0) + (balanceRow?.totalStockIn ?? 0);
-    productIssued[product.id] = balanceRow?.totalStockOut ?? 0;
-    productInHand[product.id] = balanceRow?.currentStock ?? 0;
-    productValuation[product.id] = (balanceRow?.currentStock ?? 0) * rate;
+    productOpening[product.id] = isSkipped ? 0 : (monthOpeningStock[product.id] ?? 0);
+    productReceived[product.id] = isSkipped ? 0 : ((monthOpeningStock[product.id] ?? 0) + (balanceRow?.totalStockIn ?? 0));
+    productIssued[product.id] = isSkipped ? 0 : (balanceRow?.totalStockOut ?? 0);
+    productInHand[product.id] = isSkipped ? 0 : (balanceRow?.currentStock ?? 0);
+    productValuation[product.id] = isSkipped ? 0 : ((balanceRow?.currentStock ?? 0) * rate);
   });
 
   const grandOpening = activeProducts.reduce((sum, product) => sum + productOpening[product.id], 0);
@@ -169,15 +177,30 @@ export function StockLiftingSummaryTable({
             <tr className="border-b border-slate-800 font-bold">
               <td className="py-5 px-3 text-left font-black tracking-wide text-slate-400">OPENING</td>
               {activeProducts.map((product) => {
+                const isSkipped = skippedProductIds.has(product.id);
                 const value = productOpening[product.id];
                 return (
                   <td key={product.id} className="py-5 px-3 text-center font-mono text-slate-100">
-                    {value > 0 ? formatMoney(value) : "-"}
+                    {isSkipped ? (
+                      <span className="text-slate-500 italic font-normal">Skipped</span>
+                    ) : value < 0 ? (
+                      <span className="text-rose-400 font-bold">{formatMoney(value)}</span>
+                    ) : value > 0 ? (
+                      formatMoney(value)
+                    ) : (
+                      "-"
+                    )}
                   </td>
                 );
               })}
               <td className="py-5 px-3 text-center font-mono font-black text-slate-100">
-                {grandOpening > 0 ? formatMoney(grandOpening) : "-"}
+                {grandOpening < 0 ? (
+                  <span className="text-rose-400 font-bold">{formatMoney(grandOpening)}</span>
+                ) : grandOpening > 0 ? (
+                  formatMoney(grandOpening)
+                ) : (
+                  "-"
+                )}
               </td>
             </tr>
 
@@ -201,10 +224,10 @@ export function StockLiftingSummaryTable({
               );
             })}
 
-            <SummaryRow label="STOCK RECEIVED" labelClassName="text-indigo-400" valuesByProduct={productReceived} total={grandReceived} products={activeProducts} sectionStart />
-            <SummaryRow label="STOCK ISSUANCE" labelClassName="text-rose-400" valuesByProduct={productIssued} total={grandIssued} products={activeProducts} />
-            <SummaryRow label="STOCK IN HAND" labelClassName="text-amber-400" valuesByProduct={productInHand} total={grandInHand} products={activeProducts} prominent />
-            <SummaryRow label="STOCK VALUE" labelClassName="text-emerald-400" valuesByProduct={productValuation} total={grandValuation} products={activeProducts} prominent />
+            <SummaryRow label="STOCK RECEIVED" labelClassName="text-indigo-400" valuesByProduct={productReceived} total={grandReceived} products={activeProducts} skippedProductIds={skippedProductIds} sectionStart />
+            <SummaryRow label="STOCK ISSUANCE" labelClassName="text-rose-400" valuesByProduct={productIssued} total={grandIssued} products={activeProducts} skippedProductIds={skippedProductIds} />
+            <SummaryRow label="STOCK IN HAND" labelClassName="text-amber-400" valuesByProduct={productInHand} total={grandInHand} products={activeProducts} skippedProductIds={skippedProductIds} prominent />
+            <SummaryRow label="STOCK VALUE" labelClassName="text-emerald-400" valuesByProduct={productValuation} total={grandValuation} products={activeProducts} skippedProductIds={skippedProductIds} prominent />
           </tbody>
         </table>
       </div>
@@ -218,6 +241,7 @@ function SummaryRow({
   valuesByProduct,
   total,
   products,
+  skippedProductIds,
   prominent = false,
   sectionStart = false
 }: {
@@ -226,6 +250,7 @@ function SummaryRow({
   valuesByProduct: Record<string, number>;
   total: number;
   products: StockProduct[];
+  skippedProductIds?: Set<string>;
   prominent?: boolean;
   sectionStart?: boolean;
 }) {
@@ -245,15 +270,30 @@ function SummaryRow({
     <tr className={rowClass}>
       <td className={`${labelCellClass} ${labelClassName}`}>{label}</td>
       {products.map((product) => {
+        const isSkipped = skippedProductIds?.has(product.id);
         const value = valuesByProduct[product.id];
         return (
           <td key={product.id} className={`${cellClass} ${labelClassName}`}>
-            {value > 0 ? formatMoney(value) : "-"}
+            {isSkipped ? (
+              <span className="text-slate-500 italic font-normal">Skipped</span>
+            ) : value < 0 ? (
+              <span className="text-rose-400 font-bold">{formatMoney(value)}</span>
+            ) : value > 0 ? (
+              formatMoney(value)
+            ) : (
+              "-"
+            )}
           </td>
         );
       })}
       <td className={`${cellClass} ${labelClassName}`}>
-        {total > 0 ? formatMoney(total) : "-"}
+        {total < 0 ? (
+          <span className="text-rose-400 font-bold">{formatMoney(total)}</span>
+        ) : total > 0 ? (
+          formatMoney(total)
+        ) : (
+          "-"
+        )}
       </td>
     </tr>
   );
@@ -264,6 +304,7 @@ export function StockIssuanceSummaryTable({
   accounts,
   days,
   prevSummary,
+  stockAccountOpening,
   filterStartDate,
   filterEndDate,
   filterProductId,
@@ -299,12 +340,14 @@ export function StockIssuanceSummaryTable({
     if (filterProductId && (productQuantities[filterProductId] ?? 0) === 0) return [];
 
     const firstEntry = filteredDays.flatMap((day) => day.entries.filter((entry) => entry.accountId === account.id)).at(0);
-    const opening = firstEntry ? firstEntry.carryForwardBalance : resolveStockAccountOpeningDue(account, prevSummary);
+    const opening = firstEntry ? firstEntry.carryForwardBalance : (stockAccountOpening?.[account.id] ?? resolveStockAccountOpeningDue(account, prevSummary));
     const totalQty = entriesPeriod.reduce((sum, entry) => sum + entry.totalQty, 0);
     const totalAmount = entriesPeriod.reduce((sum, entry) => sum + entry.totalAmount, 0);
     const totalPayments = entriesPeriod.reduce((sum, entry) => sum + entry.totalPaymentReceived, 0);
-    const currentDue = roundMoney(opening + totalAmount - totalPayments);
-    const closing = currentDue;
+    const calculatedDue = roundMoney(opening + totalAmount - totalPayments);
+    const lastEntry = entriesPeriod.filter((e) => e.dueBalance !== undefined).at(-1);
+    const closing = lastEntry?.dueBalance !== undefined ? roundMoney(lastEntry.dueBalance) : calculatedDue;
+    const currentDue = closing;
 
     if (filterDueStatus === "due" && closing === 0) return [];
     if (filterDueStatus === "nodue" && closing !== 0) return [];
@@ -454,7 +497,9 @@ export function ProductStockFlowTable({
         </thead>
         <tbody>
           {filteredProducts.map((product) => {
+            const isSkipped = monthOpeningStock[product.id] === null;
             const todayOpening = (() => {
+              if (isSkipped) return null;
               const openingValue = monthOpeningStock[product.id] ?? 0;
               let cumulativeStockIn = 0;
               let cumulativeStockOut = 0;
@@ -490,23 +535,29 @@ export function ProductStockFlowTable({
                 return sum + entries.reduce((entrySum, entry) => entrySum + (entry.products.find((line) => line.productId === product.id)?.quantity ?? 0), 0);
               }, 0);
 
-            const closingPeriod = roundMoney(todayOpening + stockInPeriod - stockOutPeriod);
-            const value = roundMoney(closingPeriod * product.rate);
-            const isLow = closingPeriod < 20;
+            const closingPeriod = isSkipped ? null : roundMoney((todayOpening ?? 0) + stockInPeriod - stockOutPeriod);
+            const value = isSkipped ? 0 : roundMoney((closingPeriod ?? 0) * product.rate);
+            const isLow = !isSkipped && (closingPeriod ?? 0) < 20;
 
             return (
               <tr key={product.id}>
                 <td className="font-semibold text-slate-200">{product.name}</td>
-                <td>{formatMoney(todayOpening)}</td>
-                <td className="text-indigo-400">+{formatMoney(stockInPeriod)}</td>
-                <td className="text-rose-400">-{formatMoney(stockOutPeriod)}</td>
-                <td className="font-bold text-slate-100">{formatMoney(closingPeriod)}</td>
+                <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(todayOpening ?? 0)}</td>
+                <td className="text-indigo-400">{isSkipped ? "—" : `+${formatMoney(stockInPeriod)}`}</td>
+                <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(stockOutPeriod)}`}</td>
+                <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(closingPeriod ?? 0)}</td>
                 <td>{formatMoney(product.rate)}</td>
-                <td className="font-mono text-emerald-400">{formatMoney(value)}</td>
+                <td className="font-mono text-emerald-400">{isSkipped ? "—" : formatMoney(value)}</td>
                 <td>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${isLow ? "bg-amber-500/10 text-amber-400 border border-amber-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"}`}>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${
+                    isSkipped
+                      ? "bg-slate-800 text-slate-400 border border-slate-700"
+                      : isLow
+                        ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                        : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                  }`}>
                     {isLow && <AlertTriangle className="h-3 w-3" />}
-                    <span>{isLow ? "Low Stock" : "Healthy"}</span>
+                    <span>{isSkipped ? "Skipped" : isLow ? "Low Stock" : "Healthy"}</span>
                   </span>
                 </td>
               </tr>

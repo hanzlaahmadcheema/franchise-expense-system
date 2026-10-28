@@ -11,6 +11,7 @@
  * - Robust error handling with sanitized PostgreSQL mapping
  */
 import { Router, type Request, type Response } from "express";
+import { z } from "zod";
 import { db } from "../config/database.js";
 import { requireAuth } from "../auth/authMiddleware.js";
 import { requireFranchise } from "../auth/tenantMiddleware.js";
@@ -35,7 +36,10 @@ import {
   StockAccountPaymentCreateSchema,
   StockAccountPaymentUpdateSchema,
   JazzPayablePaymentCreateSchema,
-  JazzPayablePaymentUpdateSchema
+  JazzPayablePaymentUpdateSchema,
+  CommissionSettlementReceiptCreateSchema,
+  StockBalanceTransferCreateSchema,
+  StockBalanceTransferReverseSchema
 } from "./schemas.js";
 import {
   listExpenses,
@@ -83,6 +87,13 @@ import {
   createJazzPayablePayment,
   updateJazzPayablePayment,
   deleteJazzPayablePayment,
+  listCommissionSettlementReceipts,
+  getCommissionSettlementReceipt,
+  createCommissionSettlementReceipt,
+  deleteCommissionSettlementReceipt,
+  listStockBalanceTransfers,
+  createStockBalanceTransfer,
+  reverseStockBalanceTransfer,
   type MutationContext
 } from "./service.js";
 import {
@@ -95,7 +106,7 @@ import {
   checkIdempotency
 } from "./idempotency.js";
 
-export const transactionRouter = Router();
+export const transactionRouter: Router = Router();
 
 // Middleware chains
 const authChain = [requireAuth, requireFranchise];
@@ -614,6 +625,39 @@ transactionRouter.delete("/stock/account-payments/:id", mutateMin, async (req: R
 });
 
 // ===========================================================================
+// 9.5. STOCK BALANCE TRANSFERS
+// ===========================================================================
+
+transactionRouter.get("/stock/transfers", readOnlyMin, async (req: Request, res: Response) => {
+  try {
+    const dayId = req.query.day_id ? String(req.query.day_id) : undefined;
+    const accountId = req.query.account_id ? String(req.query.account_id) : undefined;
+    const rows = await listStockBalanceTransfers(getFranchiseId(req), { day_id: dayId, account_id: accountId });
+    res.json({ data: rows });
+  } catch (err) {
+    handleTransactionError(res, "GET /stock/transfers", err);
+  }
+});
+
+transactionRouter.post("/stock/transfers", mutateMin, async (req: Request, res: Response) => {
+  await handleIdempotentPost(req, res, "POST /stock/transfers", async (ctx) => {
+    const body = StockBalanceTransferCreateSchema.parse(req.body);
+    return createStockBalanceTransfer(ctx, body);
+  });
+});
+
+transactionRouter.post("/stock/transfers/:id/reverse", mutateMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const body = StockBalanceTransferReverseSchema.parse(req.body);
+    const result = await reverseStockBalanceTransfer(getMutationContext(req), id, body.reason, body.day_id);
+    res.json({ data: result });
+  } catch (err) {
+    handleTransactionError(res, "POST /stock/transfers/:id/reverse", err);
+  }
+});
+
+// ===========================================================================
 // 10. JAZZ COMPANY PAYABLE PAYMENTS
 // ===========================================================================
 
@@ -664,5 +708,50 @@ transactionRouter.delete("/jazz-company/payments/:id", mutateMin, async (req: Re
     res.json(result);
   } catch (err) {
     handleTransactionError(res, "DELETE /jazz-company/payments/:id", err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 11. Commission Settlement Receipts
+// ---------------------------------------------------------------------------
+transactionRouter.get("/commission-settlements", readOnlyMin, async (req: Request, res: Response) => {
+  try {
+    const filter = TransactionFilterQuery.extend({
+      source_period_key: z.string().optional()
+    }).parse(req.query);
+    const rows = await listCommissionSettlementReceipts(getFranchiseId(req), filter);
+    res.json({ data: rows });
+  } catch (err) {
+    handleTransactionError(res, "GET /commission-settlements", err);
+  }
+});
+
+transactionRouter.get("/commission-settlements/:id", readOnlyMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const row = await getCommissionSettlementReceipt(getFranchiseId(req), id);
+    if (!row) {
+      return void res.status(404).json({ error: "NOT_FOUND", message: "Commission settlement receipt not found." });
+    }
+    res.json({ data: row });
+  } catch (err) {
+    handleTransactionError(res, "GET /commission-settlements/:id", err);
+  }
+});
+
+transactionRouter.post("/commission-settlements", mutateMin, async (req: Request, res: Response) => {
+  await handleIdempotentPost(req, res, "POST /commission-settlements", async (ctx) => {
+    const body = CommissionSettlementReceiptCreateSchema.parse(req.body);
+    return createCommissionSettlementReceipt(ctx, body);
+  });
+});
+
+transactionRouter.delete("/commission-settlements/:id", mutateMin, async (req: Request, res: Response) => {
+  try {
+    const { id } = UuidParam.parse(req.params);
+    const result = await deleteCommissionSettlementReceipt(getMutationContext(req), id);
+    res.json(result);
+  } catch (err) {
+    handleTransactionError(res, "DELETE /commission-settlements/:id", err);
   }
 });

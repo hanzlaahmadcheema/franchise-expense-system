@@ -11,7 +11,7 @@ export interface RecordAuditParams {
   franchiseId: string;
   userId: string | null;
   userEmail: string | null;
-  action: "CREATE" | "UPDATE" | "DELETE";
+  action: "CREATE" | "UPDATE" | "DELETE" | "REVERSE";
   entityType: string;
   entityId: string;
   beforeState?: unknown;

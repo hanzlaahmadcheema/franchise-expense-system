@@ -749,8 +749,8 @@ export async function validateSeeds(
     ) {
       errors.push(`Stock product seed for '${prod.name}' has invalid numeric quantity (${seed.opening_quantity}).`);
     } else if (Number(seed.opening_quantity) < 0) {
-      warnings.push(
-        `Stock product seed for '${prod.name}' has negative opening quantity (${seed.opening_quantity}). Carried forward from day projections.`
+      errors.push(
+        `Stock product seed for '${prod.name}' cannot have negative opening quantity (${seed.opening_quantity}). Non-negative inventory is strictly required.`
       );
     }
   }
@@ -1091,6 +1091,8 @@ export async function activatePeriod(
     .updateTable("accounting_days")
     .set({
       status: "open",
+      closed_at: null,
+      closed_by_user_id: null,
       reopened_at: sql`clock_timestamp()`,
       reopened_by_user_id: user.id,
       updated_at: sql`clock_timestamp()`
@@ -1470,6 +1472,8 @@ export async function openNextAccountingDay(
       .updateTable("accounting_days")
       .set({
         status: "open",
+        closed_at: null,
+        closed_by_user_id: null,
         reopened_at: sql`clock_timestamp()`,
         reopened_by_user_id: user.id,
         notes: notes !== null ? notes : targetDay.notes,
@@ -1610,6 +1614,8 @@ export async function reopenAccountingDay(
       .updateTable("accounting_days")
       .set({
         status: "reopen",
+        closed_at: null,
+        closed_by_user_id: null,
         reopened_at: sql`clock_timestamp()`,
         reopened_by_user_id: user.id,
         notes: reason,
@@ -1848,88 +1854,155 @@ export async function initializeNextPeriodFromClosedPeriod(
 
       const day1 = existingDays.find((d) => d.day_no === 1);
 
-      // Idempotency: if already completely initialized and Day 1 is open
-      if (day1 && day1.status === "open") {
-        const idempResult = {
-          initialized: true,
-          alreadyInitialized: true,
-          sourcePeriod: {
-            id: sourcePeriod.id,
-            periodKey: sourcePeriod.period_key,
-            status: sourcePeriod.status
-          },
-          targetPeriod: {
-            id: existingNextPeriod.id,
-            periodKey: existingNextPeriod.period_key,
-            status: existingNextPeriod.status,
-            daysCount: existingDays.length || daysInNextMonth
-          },
-          targetDayNo: 1,
-          activatedDay: {
-            id: day1.id,
-            dayNo: 1,
-            status: day1.status,
-            calendarDate: day1.calendar_date
-          }
-        };
-
-        if (clientMutationId && !customTrx) {
-          await saveIdempotencyRecord(trx, {
-            franchiseId,
-            clientMutationId,
-            userId: user.id,
-            endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
-            payloadHash,
-            responseStatus: 200,
-            responseBody: idempResult
-          });
-        }
-
-        return idempResult;
+      // Extract authoritative month-end FINAL closing state from source period
+      const finalClosing = await getPeriodFinalProjectionsInternal(trx, franchiseId, sourcePeriod.id);
+      if (!finalClosing) {
+        throw new PeriodNotReadyError(
+          `Cannot initialize next period from '${sourcePeriod.period_key}': no final closing projections found.`
+        );
       }
 
-      // If seeds are already verified in existingNextPeriod, activate Day 1 directly
-      const existingFinSeed = await trx
-        .selectFrom("period_financial_seeds")
-        .selectAll()
+      // Stage updated seeds into existing next period (overwrites stale seeds)
+      await stageSeeds(franchiseId, existingNextPeriod.id, finalClosing.seedBundle, user, trx);
+
+      // Mark seeds as verified since derived from authoritative closed predecessor period
+      await trx
+        .updateTable("period_financial_seeds")
+        .set({
+          is_verified: true,
+          verified_by_user_id: user.id,
+          verified_at: sql`clock_timestamp()`
+        })
         .where("franchise_id", "=", franchiseId)
         .where("period_id", "=", existingNextPeriod.id)
-        .executeTakeFirst();
+        .execute();
 
-      if (existingFinSeed && existingFinSeed.is_verified) {
+      // If Day 1 is closed, activate it; otherwise ensure Day 1 is open
+      let activatedDayInfo = day1
+        ? {
+            id: day1.id,
+            dayNo: day1.day_no,
+            status: day1.status as string,
+            calendarDate: day1.calendar_date
+          }
+        : undefined;
+
+      if (!day1 || day1.status === "closed") {
         const actRes = await activatePeriod(franchiseId, existingNextPeriod.id, user, trx);
-        const res = {
-          initialized: true,
-          alreadyInitialized: false,
-          sourcePeriod: {
-            id: sourcePeriod.id,
-            periodKey: sourcePeriod.period_key,
-            status: sourcePeriod.status
-          },
-          targetPeriod: {
-            id: existingNextPeriod.id,
-            periodKey: existingNextPeriod.period_key,
-            status: existingNextPeriod.status,
-            daysCount: existingDays.length || daysInNextMonth
-          },
-          targetDayNo: 1,
-          activatedDay: actRes.day1
-        };
-
-        if (clientMutationId && !customTrx) {
-          await saveIdempotencyRecord(trx, {
-            franchiseId,
-            clientMutationId,
-            userId: user.id,
-            endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
-            payloadHash,
-            responseStatus: 200,
-            responseBody: res
-          });
+        if (actRes.day1) {
+          activatedDayInfo = {
+            id: actRes.day1.id,
+            dayNo: actRes.day1.dayNo,
+            status: actRes.day1.status,
+            calendarDate: actRes.day1.calendarDate
+          };
         }
-
-        return res;
       }
+
+      // Ensure forward recalculation cascade runs across all days in the successor period
+      const startDayId = activatedDayInfo?.id ?? day1?.id;
+      if (startDayId) {
+        await recalculateFromDayInternal(trx, franchiseId, startDayId, {
+          triggerSource: "period_close_sync",
+          userId: user.id,
+          allowClosedDays: true
+        });
+      }
+
+      // Link active commission settlements to target days in existing next period
+      const activeCommSettlements = await trx
+        .selectFrom("final_settlement_entries")
+        .selectAll()
+        .where("franchise_id", "=", franchiseId)
+        .where("period_id", "=", sourcePeriod.id)
+        .where("balance_domain", "=", "COMMISSION_RECEIVABLE")
+        .where("status", "=", "ACTIVE")
+        .execute();
+
+      if (activeCommSettlements.length > 0) {
+        for (const fse of activeCommSettlements) {
+          const fseDate = formatSettlementDate(fse.settlement_date);
+          const targetDay = existingDays.find((d) => d.calendar_date === fseDate) || existingDays.find((d) => d.day_no === 1);
+          if (targetDay) {
+            const existingReceipt = await trx
+              .selectFrom("commission_settlement_receipts")
+              .selectAll()
+              .where("franchise_id", "=", franchiseId)
+              .where("final_settlement_entry_id", "=", fse.id)
+              .executeTakeFirst();
+
+            if (!existingReceipt) {
+              await trx.insertInto("commission_settlement_receipts").values({
+                franchise_id: franchiseId,
+                day_id: targetDay.id,
+                source_period_key: sourcePeriod.period_key,
+                amount: fse.amount,
+                notes: fse.notes,
+                final_settlement_entry_id: fse.id
+              }).execute();
+            }
+
+            await trx.updateTable("final_settlement_entries")
+              .set({ target_day_id: targetDay.id })
+              .where("id", "=", fse.id)
+              .execute();
+          }
+        }
+      }
+
+      // Record lifecycle transition audit log
+      await recordAuditLog(trx, {
+        franchiseId,
+        userId: user.id,
+        userEmail: user.email,
+        action: "UPDATE",
+        entityType: "period_lifecycle_transition",
+        entityId: sourcePeriod.id,
+        afterState: {
+          fromPeriod: sourcePeriod.period_key,
+          toPeriod: existingNextPeriod.period_key,
+          transition: "CLOSED_PERIOD_SYNC_UPDATE",
+          activatedDay: activatedDayInfo?.dayNo ?? 1,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      const res = {
+        initialized: true,
+        alreadyInitialized: true,
+        sourcePeriod: {
+          id: sourcePeriod.id,
+          periodKey: sourcePeriod.period_key,
+          status: sourcePeriod.status
+        },
+        targetPeriod: {
+          id: existingNextPeriod.id,
+          periodKey: existingNextPeriod.period_key,
+          status: existingNextPeriod.status,
+          daysCount: existingDays.length || daysInNextMonth
+        },
+        targetDayNo: 1,
+        activatedDay: {
+          id: activatedDayInfo?.id ?? day1?.id ?? "",
+          dayNo: 1,
+          status: (activatedDayInfo?.status ?? day1?.status ?? "open") as "open" | "closed" | "reopen",
+          calendarDate: activatedDayInfo?.calendarDate ?? day1?.calendar_date ?? ""
+        }
+      };
+
+      if (clientMutationId && !customTrx) {
+        await saveIdempotencyRecord(trx, {
+          franchiseId,
+          clientMutationId,
+          userId: user.id,
+          endpoint: `POST /api/v1/periods/${sourcePeriodId}/initialize-next`,
+          payloadHash,
+          responseStatus: 200,
+          responseBody: res
+        });
+      }
+
+      return res;
     }
 
     // 3. Derives next period exclusively from August FINAL seedBundle

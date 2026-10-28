@@ -462,7 +462,7 @@ export function calculateJazzCompanyBalance(
 
 export function calculateCurrentStock(
   products: StockProduct[],
-  openingStock: Record<string, number>,
+  openingStock: Record<string, number | null | undefined>,
   stockInRecords: StockInRecord[],
   allDays: StockDayRecord[]
 ): StockProductBalance[] {
@@ -488,10 +488,12 @@ export function calculateCurrentStock(
   }
 
   return products.map((product) => {
-    const opening = openingStock[product.id] ?? 0;
+    const rawOpening = openingStock[product.id];
+    const isSkipped = rawOpening === null;
+    const opening = isSkipped ? null : (rawOpening ?? 0);
     const inFromJazz = stockInMap.get(product.id) ?? 0;
     const outToAccounts = stockOutMap.get(product.id) ?? 0;
-    const current = roundMoney(opening + inFromJazz - outToAccounts);
+    const current = isSkipped ? null : roundMoney((opening ?? 0) + inFromJazz - outToAccounts);
     return {
       productId: product.id,
       productName: product.name,

@@ -113,3 +113,70 @@ export class TenantIsolationError extends PeriodError {
     super("INV_TENANT_ISOLATION", message, 403, details);
   }
 }
+
+export class DayNotFoundError extends PeriodError {
+  constructor(dayNo: number, periodId: string) {
+    super("DAY_NOT_FOUND", `Accounting day ${dayNo} for period '${periodId}' not found.`, 404, { dayNo, periodId });
+  }
+}
+
+export class DayAlreadyClosedError extends PeriodError {
+  constructor(dayNo: number, details: Record<string, unknown> = {}) {
+    super("DAY_ALREADY_CLOSED", `Accounting day ${dayNo} is already closed.`, 409, { dayNo, ...details });
+  }
+}
+
+export class PreviousDayNotClosedError extends PeriodError {
+  constructor(prevDayNo: number, details: Record<string, unknown> = {}) {
+    super("PREVIOUS_DAY_NOT_CLOSED", `Previous day ${prevDayNo} must be closed before the next day can open.`, 422, { prevDayNo, ...details });
+  }
+}
+
+export class MultipleOpenDaysError extends PeriodError {
+  constructor(openDayNo: number, details: Record<string, unknown> = {}) {
+    super("MULTIPLE_OPEN_DAYS_PROHIBITED", `Cannot open day while day ${openDayNo} is already open. Only one day may be open at a time.`, 409, { openDayNo, ...details });
+  }
+}
+
+export class NonSequentialDayError extends PeriodError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super("NON_SEQUENTIAL_DAY_OPEN", message, 422, details);
+  }
+}
+
+export class PeriodAlreadyClosedError extends PeriodError {
+  constructor(periodKey: string, details: Record<string, unknown> = {}) {
+    super("PERIOD_ALREADY_CLOSED", `Accounting period '${periodKey}' is already closed.`, 409, { periodKey, ...details });
+  }
+}
+
+export class PeriodNotClosedError extends PeriodError {
+  constructor(periodKey: string, details: Record<string, unknown> = {}) {
+    super("PERIOD_NOT_CLOSED", `Accounting period '${periodKey}' must be closed before this action.`, 422, { periodKey, ...details });
+  }
+}
+
+export class PeriodHasOpenDaysError extends PeriodError {
+  constructor(unclosedCount: number, details: Record<string, unknown> = {}) {
+    super("PERIOD_HAS_OPEN_DAYS", `Cannot close period while ${unclosedCount} day(s) remain open or unclosed.`, 422, { unclosedCount, ...details });
+  }
+}
+
+export class HistoricalPeriodImmutableError extends PeriodError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super("HISTORICAL_PERIOD_IMMUTABLE", message, 422, details);
+  }
+}
+
+export class OverSettlementError extends PeriodError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super("OVER_SETTLEMENT", message, 422, details);
+  }
+}
+
+export class FinalSettlementImmutableError extends PeriodError {
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super("FINAL_SETTLEMENT_IMMUTABLE", message, 409, details);
+  }
+}
+

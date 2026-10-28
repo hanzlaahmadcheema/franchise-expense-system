@@ -15,12 +15,24 @@ export interface FranchisesTable {
 
 export interface UsersTable {
   id: Generated<string>;
-  firebase_uid: string;
-  email: string;
+  firebase_uid: string | null;
+  username: string | null;
+  password_hash: string | null;
+  email: string | null;
   display_name: string | null;
   is_active: boolean;
   created_at: Generated<Timestamp>;
   updated_at: Generated<Timestamp>;
+}
+
+export interface UserSessionsTable {
+  id: Generated<string>;
+  user_id: string;
+  token_hash: string;
+  created_at: Generated<Timestamp>;
+  expires_at: Timestamp;
+  revoked_at: Timestamp | null;
+  last_seen_at: Generated<Timestamp>;
 }
 
 export interface FranchiseUsersTable {
@@ -52,6 +64,10 @@ export interface AccountingPeriodsTable {
   month_num: number;
   label: string;
   status: "open" | "closed";
+  final_settlement_status: Generated<string>;
+  final_verified_at: Timestamp | null;
+  final_verified_by_user_id: string | null;
+  final_notes: string | null;
   closed_at: Timestamp | null;
   closed_by_user_id: string | null;
   reopened_at: Timestamp | null;
@@ -175,6 +191,7 @@ export interface PeriodFinancialSeedsTable {
   opening_owner_balance: Numeric;
   opening_jazz_lifting: Numeric;
   opening_jazz_payable: Numeric;
+  opening_commission_receivable: Numeric;
   source_period_key: string | null;
   source_day_no: number | null;
   verified_by_user_id: string | null;
@@ -202,7 +219,9 @@ export interface PeriodStockProductSeedsTable {
   franchise_id: string;
   period_id: string;
   product_id: string;
-  opening_quantity: number;
+  opening_quantity: number | null;
+  status: Generated<"active" | "skipped">;
+  notes: string | null;
   source_period_key: string | null;
   source_day_no: number | null;
   created_at: Generated<Timestamp>;
@@ -255,6 +274,43 @@ export interface CommissionItemsTable {
   category_id: string | null;
   category_name_snapshot: string;
   amount: Numeric;
+  revision: Generated<number>;
+  created_by_user_id: string | null;
+  created_at: Generated<Timestamp>;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface CommissionSettlementReceiptsTable {
+  id: Generated<string>;
+  franchise_id: string;
+  day_id: string;
+  source_period_key: string;
+  amount: Numeric;
+  category_id: string | null;
+  category_name_snapshot: string | null;
+  notes: string | null;
+  final_settlement_entry_id?: string | null;
+  revision: Generated<number>;
+  created_by_user_id: string | null;
+  created_at: Generated<Timestamp>;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface FinalSettlementEntriesTable {
+  id: Generated<string>;
+  franchise_id: string;
+  period_id: string;
+  source_period_key: string;
+  settlement_date: string;
+  balance_domain: string;
+  settlement_type: string;
+  target_entity_id: string | null;
+  target_entity_name: string | null;
+  amount: Numeric;
+  source_reference: string | null;
+  notes: string | null;
+  status: Generated<string>;
+  target_day_id: string | null;
   revision: Generated<number>;
   created_by_user_id: string | null;
   created_at: Generated<Timestamp>;
@@ -361,6 +417,25 @@ export interface StockAccountPaymentsTable {
   updated_at: Generated<Timestamp>;
 }
 
+export interface StockBalanceTransfersTable {
+  id: Generated<string>;
+  franchise_id: string;
+  day_id: string;
+  source_account_id: string;
+  destination_account_id: string;
+  amount: Numeric;
+  transfer_type: "credit" | "debt";
+  reason: string;
+  status: "completed" | "reversed";
+  reversal_of_id: string | null;
+  reversed_at: Timestamp | null;
+  reversed_by_user_id: string | null;
+  created_by_user_id: string | null;
+  idempotency_key: string | null;
+  created_at: Generated<Timestamp>;
+  updated_at: Generated<Timestamp>;
+}
+
 export interface JazzCompanyPayablePaymentsTable {
   id: Generated<string>;
   franchise_id: string;
@@ -387,6 +462,9 @@ export interface DayFinancialProjectionsTable {
   owner_closing_balance: Numeric;
   opening_jazz_payable: Numeric;
   closing_jazz_payable: Numeric;
+  commission_settlement_receipts: Generated<Numeric>;
+  opening_commission_receivable: Generated<Numeric>;
+  closing_commission_receivable: Generated<Numeric>;
   calculated_at: Generated<Timestamp>;
   calculation_version: Generated<number>;
   calc_run_id: string | null;
@@ -425,6 +503,8 @@ export interface StockAccountDayProjectionsTable {
   opening_due: Numeric;
   stock_taken_amount: Numeric;
   payment_received_amount: Numeric;
+  transfers_out_amount: Generated<Numeric>;
+  transfers_in_amount: Generated<Numeric>;
   closing_due: Numeric;
   calculated_at: Generated<Timestamp>;
 }
@@ -529,6 +609,7 @@ export interface MutationIdempotencyTable {
 export interface Database {
   franchises: FranchisesTable;
   users: UsersTable;
+  user_sessions: UserSessionsTable;
   franchise_users: FranchiseUsersTable;
   authorized_emails: AuthorizedEmailsTable;
   accounting_periods: AccountingPeriodsTable;
@@ -547,6 +628,8 @@ export interface Database {
   period_jazz_do_seeds: PeriodJazzDoSeedsTable;
   expense_items: ExpenseItemsTable;
   commission_items: CommissionItemsTable;
+  commission_settlement_receipts: CommissionSettlementReceiptsTable;
+  final_settlement_entries: FinalSettlementEntriesTable;
   credit_transactions: CreditTransactionsTable;
   owner_transactions: OwnerTransactionsTable;
   jazz_load_lifting_records: JazzLoadLiftingRecordsTable;
@@ -554,6 +637,7 @@ export interface Database {
   stock_orders: StockOrdersTable;
   stock_order_lines: StockOrderLinesTable;
   stock_account_payments: StockAccountPaymentsTable;
+  stock_balance_transfers: StockBalanceTransfersTable;
   jazz_company_payable_payments: JazzCompanyPayablePaymentsTable;
   day_financial_projections: DayFinancialProjectionsTable;
   credit_party_day_projections: CreditPartyDayProjectionsTable;

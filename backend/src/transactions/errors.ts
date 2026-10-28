@@ -49,6 +49,20 @@ export class IdempotencyConflictError extends Error {
   }
 }
 
+export class DuplicateSettlementError extends Error {
+  constructor(message = "Duplicate or excess settlement: amount exceeds remaining receivable for this period.") {
+    super(message);
+    this.name = "DuplicateSettlementError";
+  }
+}
+
+export class ConflictError extends Error {
+  constructor(message = "Conflict occurred.") {
+    super(message);
+    this.name = "ConflictError";
+  }
+}
+
 interface PgError {
   code?: string;
   constraint?: string;
@@ -149,6 +163,19 @@ export function handleTransactionError(res: Response, context: string, err: unkn
     return void res.status(409).json({
       error: "IDEMPOTENCY_KEY_REUSED",
       code: "IDEMPOTENCY_KEY_REUSED",
+      message: err.message
+    });
+  }
+  if (err instanceof DuplicateSettlementError) {
+    return void res.status(422).json({
+      error: "DUPLICATE_SETTLEMENT",
+      code: "DUPLICATE_SETTLEMENT",
+      message: err.message
+    });
+  }
+  if (err instanceof ConflictError) {
+    return void res.status(409).json({
+      error: "CONFLICT",
       message: err.message
     });
   }

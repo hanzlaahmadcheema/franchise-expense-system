@@ -35,8 +35,6 @@ import {
   YAxis
 } from "recharts";
 import type { MonthComputed } from "../types/ledger";
-import { subscribeJazzLoadMonthlySummary } from "../modules/jazzLoad/services/jazzLoadFirestore";
-import { subscribeStockMonthlySummary } from "../modules/stock/services/stockFirestore";
 import type { JazzLoadMonthlySummary } from "../modules/jazzLoad/types/jazzLoad.types";
 import type { StockMonthlySummary } from "../modules/stock/types/stock.types";
 
@@ -108,26 +106,10 @@ export function HomeDashboard({ month, monthId }: Props) {
   const [stockSummary, setStockSummary] = useState<StockMonthlySummary | null>(null);
 
   const [chartsReady, setChartsReady] = useState(false);
-  // Subscribe to summaries
+  // In pure PostgreSQL mode, summaries are server-calculated; no legacy Firestore summary subscriptions
   useEffect(() => {
-    if (!activeMonthId) return;
-
-    const unsubJazz = subscribeJazzLoadMonthlySummary(
-      activeMonthId,
-      (summary) => setJazzLoadSummary(summary),
-      (err) => console.error("Error subscribing to Jazz Load summary:", err)
-    );
-
-    const unsubStock = subscribeStockMonthlySummary(
-      activeMonthId,
-      (summary) => setStockSummary(summary),
-      (err) => console.error("Error subscribing to Stock summary:", err)
-    );
-
-    return () => {
-      unsubJazz();
-      unsubStock();
-    };
+    setJazzLoadSummary(null);
+    setStockSummary(null);
   }, [activeMonthId]);
 
   useEffect(() => {

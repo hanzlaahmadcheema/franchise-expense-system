@@ -58,6 +58,7 @@ export function UniversalDayControlBar({
   onReopenAllDays,
   onClosePreviousDaysExceptToday,
   onRunMasterRefresh,
+  closeDayLabel,
   extraActions
 }: UniversalDayControlBarProps) {
   const compact = density === "compact";
@@ -114,7 +115,7 @@ export function UniversalDayControlBar({
           onClick={onCloseSelectedDay}
           compact={compact}
         >
-          Close Day
+          {closeDayLabel ?? "Close Day"}
         </ActionButton>
       </div>
     </div>

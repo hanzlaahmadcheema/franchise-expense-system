@@ -16,8 +16,9 @@ export interface DecodedIdToken {
 
 export interface AuthenticatedUser {
   id: string;
-  firebaseUid: string;
-  email: string;
+  firebaseUid?: string | null;
+  username?: string | null;
+  email: string | null;
   displayName: string | null;
   isActive: boolean;
 }
@@ -39,8 +40,9 @@ export interface UserFranchiseMembership {
 }
 
 export interface AuthContext {
-  firebaseUid: string;
+  firebaseUid?: string | null;
   user: AuthenticatedUser;
+  token?: string;
   franchise?: FranchiseContext;
   availableFranchises?: UserFranchiseMembership[];
 }

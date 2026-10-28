@@ -38,8 +38,8 @@ export const NonNegativeIntegerSchema = z
 export const IntegerQuantitySchema = z
   .union([z.string(), z.number()])
   .transform((val) => (typeof val === "string" ? parseInt(val, 10) : val))
-  .refine((val) => Number.isInteger(val), {
-    message: "Must be an integer"
+  .refine((val) => Number.isInteger(val) && val >= 0, {
+    message: "Must be a non-negative integer"
   });
 
 export const FinancialSeedInputSchema = z

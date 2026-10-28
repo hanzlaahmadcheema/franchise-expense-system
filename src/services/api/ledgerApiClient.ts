@@ -344,7 +344,43 @@ export interface StockAccountDayProjection {
   opening_due: string | number;
   purchases_amount: string | number;
   payments_amount: string | number;
+  transfers_out_amount?: string | number;
+  transfers_in_amount?: string | number;
   closing_due: string | number;
+}
+
+export interface StockBalanceTransferRecord {
+  id: string;
+  franchise_id: string;
+  day_id: string;
+  source_account_id: string;
+  destination_account_id: string;
+  amount: string | number;
+  transfer_type: "credit" | "debt";
+  reason: string;
+  status: "completed" | "reversed";
+  reversal_of_id?: string | null;
+  reversed_at?: string | null;
+  reversed_by_user_id?: string | null;
+  created_by_user_id?: string | null;
+  idempotency_key?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateStockBalanceTransferPayload {
+  day_id: string;
+  source_account_id: string;
+  destination_account_id: string;
+  amount: number;
+  transfer_type?: "credit" | "debt";
+  reason: string;
+  idempotency_key?: string;
+}
+
+export interface ReverseStockBalanceTransferPayload {
+  reason: string;
+  day_id?: string;
 }
 
 export interface JazzLiftingDayProjection {
@@ -556,6 +592,41 @@ export const ledgerApiClient = {
     delete: (id: string) =>
       apiRequest<{ success: boolean }>(`/api/v1/transactions/stock/account-payments/${id}`, {
         method: "DELETE"
+      })
+  },
+
+  // Stock Balance Transfers (Person-to-Person)
+  stockTransfers: {
+    list: (params?: { day_id?: string; account_id?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.day_id) q.set("day_id", params.day_id);
+      if (params?.account_id) q.set("account_id", params.account_id);
+      const qs = q.toString() ? `?${q.toString()}` : "";
+      return apiRequest<{ data: StockBalanceTransferRecord[] }>(`/api/v1/transactions/stock/transfers${qs}`);
+    },
+    create: (data: CreateStockBalanceTransferPayload, options?: RequestOptions) =>
+      apiRequest<{
+        data: {
+          transfer: StockBalanceTransferRecord;
+          sourceAccountProjection: StockAccountDayProjection | null;
+          destinationAccountProjection: StockAccountDayProjection | null;
+        };
+      }>(`/api/v1/transactions/stock/transfers`, {
+        method: "POST",
+        body: JSON.stringify(data),
+        idempotencyKey: data.idempotency_key,
+        ...options
+      }),
+    reverse: (id: string, data: ReverseStockBalanceTransferPayload, options?: RequestOptions) =>
+      apiRequest<{
+        data: {
+          original: StockBalanceTransferRecord;
+          reversal: StockBalanceTransferRecord;
+        };
+      }>(`/api/v1/transactions/stock/transfers/${encodeURIComponent(id)}/reverse`, {
+        method: "POST",
+        body: JSON.stringify(data),
+        ...options
       })
   },
 
@@ -865,13 +936,53 @@ export const ledgerApiClient = {
       apiRequest<{ data: any }>(`/api/v1/catalogs/credit-parties/${id}`, {
         method: "DELETE"
       }),
-    getStockProducts: () =>
-      apiRequest<{ data: any[] }>(`/api/v1/catalogs/stock-products`),
-    getStockAccounts: () =>
-      apiRequest<{ data: any[] }>(`/api/v1/catalogs/stock-accounts`),
-    getJazzLoadDoProfiles: () =>
-      apiRequest<{ data: any[] }>(`/api/v1/catalogs/jazz-load-do-profiles`),
-    getJazzLoadRates: () =>
-      apiRequest<{ data: any[] }>(`/api/v1/catalogs/jazz-load-rates`)
+    getStockProducts: (includeInactive = true) =>
+      apiRequest<{ data: any[] }>(`/api/v1/catalogs/stock-products${includeInactive ? "?includeInactive=true" : ""}`),
+    createStockProduct: (payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/stock-products`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    updateStockProduct: (id: string, payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/stock-products/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }),
+    getStockAccounts: (includeInactive = true) =>
+      apiRequest<{ data: any[] }>(`/api/v1/catalogs/stock-accounts${includeInactive ? "?includeInactive=true" : ""}`),
+    createStockAccount: (payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/stock-accounts`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    updateStockAccount: (id: string, payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/stock-accounts/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }),
+    getJazzLoadDoProfiles: (includeInactive = true) =>
+      apiRequest<{ data: any[] }>(`/api/v1/catalogs/jazz-load-do-profiles${includeInactive ? "?includeInactive=true" : ""}`),
+    createJazzLoadDoProfile: (payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/jazz-load-do-profiles`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    updateJazzLoadDoProfile: (id: string, payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/jazz-load-do-profiles/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }),
+    getJazzLoadRates: (includeInactive = true) =>
+      apiRequest<{ data: any[] }>(`/api/v1/catalogs/jazz-load-rates${includeInactive ? "?includeInactive=true" : ""}`),
+    createJazzLoadRate: (payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/jazz-load-rates`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    updateJazzLoadRate: (id: string, payload: any) =>
+      apiRequest<{ data: any }>(`/api/v1/catalogs/jazz-load-rates/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      })
   }
 };

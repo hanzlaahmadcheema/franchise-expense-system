@@ -73,13 +73,14 @@ import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/con
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
 import { MasterCalculationRefreshModal } from "./shared/dayControls/MasterCalculationRefreshModal";
 import { UniversalDayControlBar } from "./shared/dayControls/UniversalDayControlBar";
-import { canEditOperationalDailyEntry, canReopenOperationalDay, isActiveReopenWindow, isAdminEditableReopenedDay } from "./shared/services/dayEditPermissions";
+import { canEditOperationalDailyEntry, canReopenOperationalDay, isActiveReopenWindow, isAdminEditableReopenedDay, isOperationalDayClosed } from "./shared/services/dayEditPermissions";
 import { resolveUniversalDayStatus } from "./shared/services/dayStatusService";
 import { runMasterRecalculation } from "./shared/services/masterRecalculationService";
 import { MASTER_REFRESH_ACCESS } from "./shared/services/masterRefreshPermissions";
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { resolveLedgerUiReadDecision } from "./shared/ledger/ledgerReadMode";
+import { closeOperationalDayUnified, reopenOperationalDayUnified, subscribeDayStatus } from "./services/api/dayLifecycleService";
 import {
   isPostgreSqlPeriod,
   getAccountingPeriodWithDays,
@@ -206,10 +207,15 @@ function previousDayFromExpenseSeed(seed: ExpenseCarryForwardSeed | null): Daily
   };
 }
 
-function expenseCarryForwardWarnings(
+export type ExpenseCarryForwardValidationOptions = {
+  day1LoadError?: string | null;
+};
+
+export function expenseCarryForwardWarnings(
   month: MonthRecord | undefined,
   days: DailyLedgerInput[],
-  seed: ExpenseCarryForwardSeed | null
+  seed: ExpenseCarryForwardSeed | null,
+  options?: ExpenseCarryForwardValidationOptions
 ) {
   if (!month || !seed) return [];
   if (isGenesisPeriod(month.id) || seed.isGenesis || !seed.sourceMonthId || seed.sourceMonthId === "genesis") {
@@ -224,6 +230,16 @@ function expenseCarryForwardWarnings(
   }
   const day1 = days.find((day) => day.dayNo === 1);
   if (!day1) return warnings;
+
+  const loadError = options?.day1LoadError || day1.loadError;
+  if (loadError) {
+    warnings.push(`Day 1 opening carry-forward verification unavailable: ${loadError}`);
+    return warnings;
+  }
+
+  if (!isServerLoadedDay(day1)) {
+    return warnings;
+  }
 
   const expectedCredits = new Map(seed.creditBalances.map((row) => [creditSeedKey(row), row]));
   for (const row of day1.credits) {
@@ -399,7 +415,7 @@ function replaceDay(days: DailyLedgerInput[], day: DailyLedgerInput) {
 }
 
 export function isServerLoadedDay(day?: DailyLedgerInput | null): boolean {
-  if (!day) return false;
+  if (!day || day.loadError) return false;
   if (day.openingCash !== undefined || day.ownerOpeningBalance !== undefined) return true;
   if (day.updatedAt !== undefined && day.updatedAt > 0) return true;
   if (
@@ -1686,6 +1702,7 @@ function App() {
   const [days, setDays] = useState<DailyLedgerInput[]>([]);
   const [computed, setComputed] = useState<MonthComputed | null>(null);
   const [expenseCarryForwardSeed, setExpenseCarryForwardSeed] = useState<ExpenseCarryForwardSeed | null>(null);
+  const [day1LoadError, setDay1LoadError] = useState<string | null>(null);
   const [importPreview, setImportPreview] = useState<WorkbookImportPreview | null>(null);
   const [importMonthId, setImportMonthId] = useState("2026-08");
   const [importType, setImportType] = useState<WorkbookImportPreview["importType"]>("full");
@@ -1727,6 +1744,7 @@ function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [hasPendingDayChanges, setHasPendingDayChanges] = useState(false);
+  const expenseManualSaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [masterRefreshModal, setMasterRefreshModal] = useState<MasterRefreshModalState>({
@@ -2256,7 +2274,7 @@ function App() {
               date: `${monthId}-${String(d).padStart(2, "0")}`,
               status,
               lockedAt: status === "closed" ? (dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : Date.now()) : undefined,
-              closedAt: dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : undefined,
+              closedAt: status === "closed" && dayRec?.closed_at ? new Date(dayRec.closed_at).getTime() : undefined,
               reopenedAt: dayRec?.reopened_at ? new Date(dayRec.reopened_at).getTime() : undefined,
               expenses: [],
               commissions: [],
@@ -2279,7 +2297,7 @@ function App() {
               const currentMap = new Map(currentDays.map((d) => [d.dayNo, d]));
               const merged = pgDays.map((pgDay) => {
                 const existing = currentMap.get(pgDay.dayNo);
-                if (existing && isServerLoadedDay(existing)) {
+                if (existing && isServerLoadedDay(existing) && (!existing.date || existing.date.startsWith(monthId))) {
                   return {
                     ...pgDay,
                     ...existing,
@@ -2331,13 +2349,50 @@ function App() {
   }, [calendarSelectionReady, monthId, role, user]);
 
   useEffect(() => {
+    setDay1LoadError(null);
+  }, [monthId]);
+
+  useEffect(() => {
     if (!user || !role || !calendarSelectionReady || !isPostgreSqlPeriod(monthId)) return;
     let cancelled = false;
+
+    // Load selected day
     void loadExpenseDayPostgres(monthId, selectedDay).then((dayData) => {
-      if (!cancelled && dayData) {
+      if (cancelled) return;
+      if (dayData) {
+        if (selectedDay === 1) {
+          setDay1LoadError(null);
+        }
         setDays((currentDays) => replaceDay(currentDays, dayData));
+      } else if (selectedDay === 1) {
+        const errorMsg = "Day 1 data not found";
+        setDay1LoadError(errorMsg);
+        setDays((currentDays) =>
+          currentDays.map((d) => (d.dayNo === 1 ? { ...d, loadError: errorMsg } : d))
+        );
       }
-    }).catch(() => {});
+    }).catch((err) => {
+      if (!cancelled && selectedDay === 1) {
+        const errorMsg = err instanceof Error ? err.message : "Failed to load Day 1";
+        setDay1LoadError(errorMsg);
+        setDays((currentDays) =>
+          currentDays.map((d) => (d.dayNo === 1 ? { ...d, loadError: errorMsg } : d))
+        );
+      }
+    });
+
+    // When a non-Day-1 is selected, also ensure Day 1 is hydrated in background for carry-forward verification
+    if (selectedDay !== 1) {
+      void loadExpenseDayPostgres(monthId, 1).then((day1Data) => {
+        if (cancelled || !day1Data) return;
+        setDay1LoadError(null);
+        setDays((currentDays) => replaceDay(currentDays, day1Data));
+      }).catch((err) => {
+        if (cancelled) return;
+        setDay1LoadError(err instanceof Error ? err.message : "Failed to load Day 1");
+      });
+    }
+
     return () => {
       cancelled = true;
     };
@@ -2384,11 +2439,32 @@ function App() {
     if (nextDay !== selectedDay) setSelectedDay(nextDay);
   }, [monthId, now, selectedDay]);
 
+  useEffect(() => {
+    return subscribeDayStatus((event) => {
+      if (event.monthId === monthId) {
+        if (event.status === "closed") {
+          closedExpenseDayKeysRef.current.add(`${monthId}/${event.dayNo}`);
+        } else {
+          closedExpenseDayKeysRef.current.delete(`${monthId}/${event.dayNo}`);
+        }
+        setDays((currentDays) => {
+          const existing = currentDays.find((d) => d.dayNo === event.dayNo);
+          if (existing && existing.status !== event.status) {
+            return replaceDay(currentDays, { ...existing, status: event.status });
+          }
+          return currentDays;
+        });
+      }
+    });
+  }, [monthId]);
+
   const isSelectedLiveDay = isLiveDay(monthId, selectedDay, now);
   const selectedDayReopenActive = isReopenActive(selectedDayInput, now);
+  const isSelectedDayClosed = isOperationalDayClosed(selectedDayInput, now.getTime());
   const canAdminEditSelectedExpenseDay = role === "admin" && (
     isSelectedLiveDay ||
-    (!isSelectedLiveDay && isAdminEditableReopenedDay(selectedDayInput, now.getTime()))
+    !isSelectedDayClosed ||
+    isAdminEditableReopenedDay(selectedDayInput, now.getTime())
   );
 
   function currentMonthRecord(): MonthRecord {
@@ -2412,7 +2488,7 @@ function App() {
       throw new Error(message);
     }
     if (role === "admin" && !canAdminEditSelectedExpenseDay) {
-      const message = "Admins can only edit the current running day or an owner-reopened previous day while it is manually open.";
+      const message = "Admins can only edit an open operational day or an owner-reopened day.";
       setStatus(message);
       throw new Error(message);
     }
@@ -2463,8 +2539,8 @@ function App() {
   async function closeDay(day: DailyLedgerInput) {
     if (day.dayNo === 32) {
       if (isPostgreSqlPeriod(monthId)) {
-        if (!roleCan(role, "daily")) {
-          const message = "Your role cannot verify FINAL.";
+        if (role !== "owner") {
+          const message = "Only owner can verify FINAL month-end settlement.";
           setStatus(message);
           throw new Error(message);
         }
@@ -2495,20 +2571,21 @@ function App() {
       return;
     }
     if (isPostgreSqlPeriod(monthId)) {
-      if (!roleCan(role, "daily")) {
+      if (!roleCan(role, "daily") || (role !== "owner" && role !== "admin")) {
         setStatus("Your role can view this month but cannot close days.");
         return;
       }
       try {
-        const periodData = await getAccountingPeriodWithDays(monthId);
-        if (!periodData) {
-          setStatus(`Cannot close day: period ${monthId} not initialized in PostgreSQL.`);
-          return;
-        }
-        await ledgerApiClient.periods.closeDay(periodData.period.id, day.dayNo, null);
-        await getAccountingPeriodWithDays(monthId, true);
-        setStatus(`Day ${day.dayNo} successfully closed in PostgreSQL authoritative ledger.`);
+        await closeOperationalDayUnified({
+          monthId,
+          dayNo: day.dayNo,
+          flushDraft: hasPendingDayChanges && expenseManualSaveRef.current
+            ? () => expenseManualSaveRef.current!()
+            : undefined
+        });
+        closedExpenseDayKeysRef.current.add(`${monthId}/${day.dayNo}`);
         setDays((currentDays) => replaceDay(currentDays, { ...day, status: "closed" }));
+        setStatus(`Day ${day.dayNo} successfully closed in PostgreSQL authoritative ledger.`);
         return;
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed to close day in PostgreSQL.";
@@ -2588,13 +2665,12 @@ function App() {
         return;
       }
       try {
-        const periodData = await getAccountingPeriodWithDays(monthId);
-        if (!periodData) {
-          setStatus(`Cannot reopen day: period ${monthId} not initialized in PostgreSQL.`);
-          return;
-        }
-        await ledgerApiClient.periods.reopenDay(periodData.period.id, dayNo, "Governed UI day reopen");
-        await getAccountingPeriodWithDays(monthId, true);
+        await reopenOperationalDayUnified({
+          monthId,
+          dayNo,
+          reason: "Governed UI day reopen"
+        });
+        closedExpenseDayKeysRef.current.delete(`${monthId}/${dayNo}`);
         setStatus(`Day ${dayNo} successfully reopened in PostgreSQL authoritative ledger.`);
         setDays((currentDays) => {
           const d = currentDays.find((entry) => entry.dayNo === dayNo) ?? emptyDay(dayNo);
@@ -3266,15 +3342,17 @@ function App() {
   }
 
   const currentExpenseMonth = months.find((month) => month.id === monthId);
-  const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed);
+  const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed, { day1LoadError });
   const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
   const isPeriodRoutingPending = isPostgreSqlPeriod(monthId) && (!pgPeriodRouting.checked || loading);
   const isPeriodUninitialized = isPostgreSqlPeriod(monthId) && pgPeriodRouting.checked && pgPeriodRouting.status === "UNINITIALIZED";
   const isClosed = !isPeriodUninitialized && monthStatus === "closed";
   const isSelectedCanonicalReopen = selectedDayInput.status === "reopen";
+  const isSelectedCanonicalOpen = selectedDayInput.status === "open";
   const isSelectedCanonicalClosed = selectedDayInput.status === "closed";
   const isSelectedLegacyLocked =
     !isSelectedCanonicalReopen &&
+    !isSelectedCanonicalOpen &&
     (
       selectedDayInput.closedAt != null ||
       selectedDayInput.lockedAt != null ||
@@ -3757,7 +3835,7 @@ function App() {
                   : "saved"
         }
         permissions={{
-          canCloseSelectedDay: expenseSection === "daily-entry" && canCloseSelectedDay && Boolean(user),
+          canCloseSelectedDay: expenseSection === "daily-entry" && (selectedDay === 32 ? role === "owner" : canCloseSelectedDay) && Boolean(user),
           canReopenSelectedDay: selectedDay !== 32 && expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
           canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
           canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
@@ -3765,7 +3843,9 @@ function App() {
           closeDisabledReason:
             selectedDayLocked
               ? (selectedDay === 32 ? "FINAL is verified and closed." : "This day is already closed.")
-              : "This day cannot be closed for your role.",
+              : (selectedDay === 32 && role !== "owner")
+                ? "Only owner can verify FINAL month-end settlement."
+                : "This day cannot be closed for your role.",
           reopenDisabledReason:
             selectedDay === 32
               ? "FINAL is a month-end closing snapshot and cannot be reopened. Reopen an operational day (such as Day 31) to make corrections."
@@ -4159,7 +4239,11 @@ function App() {
           )}
           {expenseOpeningMismatchCount > 0 && (role === "owner" || role === "admin") && (
             <div className="warning">
-              <p>{expenseOpeningMismatchCount} Expense month-to-month opening mismatch{expenseOpeningMismatchCount === 1 ? "" : "es"} detected. Verify opening carry-forward balances.</p>
+              <p>
+                {expenseCarryForwardWarningList.some((w) => w.includes("verification unavailable"))
+                  ? "Expense month-to-month opening verification warning. Verify opening carry-forward balances."
+                  : `${expenseOpeningMismatchCount} Expense month-to-month opening mismatch${expenseOpeningMismatchCount === 1 ? "" : "es"} detected. Verify opening carry-forward balances.`}
+              </p>
               <ul className="mt-2 list-disc pl-5 text-sm">
                 {expenseCarryForwardWarningList.slice(0, 5).map((warning) => (
                   <li key={warning}>{warning}</li>
@@ -4311,7 +4395,7 @@ function App() {
                     previousDay={previousDayInput}
                     disabled={!canEditSelectedDay || !user}
                     locked={selectedDayLocked}
-                    canClose={canCloseSelectedDay && !loading && Boolean(user)}
+                    canClose={(selectedDay === 32 ? role === "owner" : canCloseSelectedDay) && !loading && Boolean(user)}
                     canReopen={canReopenSelectedDay && !loading && Boolean(user)}
                     reopenLabel={selectedDayReopenLabel}
                     reopenRequiresTime={false}
@@ -4323,6 +4407,9 @@ function App() {
                     canSendEmail={false}
                     onCreateCatalog={saveCatalog}
                     onPendingStateChange={setHasPendingDayChanges}
+                    onManualSaveReady={(save) => {
+                      expenseManualSaveRef.current = save;
+                    }}
                     isOwner={role === "owner"}
                     monthId={monthId}
                   />

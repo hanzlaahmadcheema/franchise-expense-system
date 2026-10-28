@@ -78,6 +78,42 @@ export async function updateExpenseCategory(franchiseId: string, id: string, dat
     .executeTakeFirst();
 }
 
+export async function deleteExpenseCategory(franchiseId: string, id: string) {
+  const existing = await getExpenseCategory(franchiseId, id);
+  if (!existing) return null;
+
+  // Check if referenced by historical transactions
+  const txRef = await db
+    .selectFrom("expense_items")
+    .select(db.fn.count("id").as("count"))
+    .where("franchise_id", "=", franchiseId)
+    .where("category_id", "=", id)
+    .executeTakeFirst();
+
+  const refCount = Number(txRef?.count ?? 0);
+  if (refCount > 0) {
+    // Referenced by accounting transactions: preserve historical integrity via soft-delete
+    const updated = await db
+      .updateTable("expense_categories")
+      .set({ is_active: false })
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return { ...updated, soft_deleted: true };
+  }
+
+  // Not referenced: safe to permanently delete
+  const deleted = await db
+    .deleteFrom("expense_categories")
+    .where("franchise_id", "=", franchiseId)
+    .where("id", "=", id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
+
+  return { ...deleted, soft_deleted: false };
+}
+
 // ---------------------------------------------------------------------------
 // Commission Categories
 // ---------------------------------------------------------------------------
@@ -128,6 +164,39 @@ export async function updateCommissionCategory(franchiseId: string, id: string, 
     .where("id", "=", id)
     .returningAll()
     .executeTakeFirst();
+}
+
+export async function deleteCommissionCategory(franchiseId: string, id: string) {
+  const existing = await getCommissionCategory(franchiseId, id);
+  if (!existing) return null;
+
+  const txRef = await db
+    .selectFrom("commission_items")
+    .select(db.fn.count("id").as("count"))
+    .where("franchise_id", "=", franchiseId)
+    .where("category_id", "=", id)
+    .executeTakeFirst();
+
+  const refCount = Number(txRef?.count ?? 0);
+  if (refCount > 0) {
+    const updated = await db
+      .updateTable("commission_categories")
+      .set({ is_active: false })
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return { ...updated, soft_deleted: true };
+  }
+
+  const deleted = await db
+    .deleteFrom("commission_categories")
+    .where("franchise_id", "=", franchiseId)
+    .where("id", "=", id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
+
+  return { ...deleted, soft_deleted: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +255,47 @@ export async function updateCreditParty(franchiseId: string, id: string, data: C
     .where("id", "=", id)
     .returningAll()
     .executeTakeFirst();
+}
+
+export async function deleteCreditParty(franchiseId: string, id: string) {
+  const existing = await getCreditParty(franchiseId, id);
+  if (!existing) return null;
+
+  const [txRef, seedRef] = await Promise.all([
+    db
+      .selectFrom("credit_transactions")
+      .select(db.fn.count("id").as("count"))
+      .where("franchise_id", "=", franchiseId)
+      .where("party_id", "=", id)
+      .executeTakeFirst(),
+    db
+      .selectFrom("period_credit_party_seeds")
+      .select(db.fn.count("id").as("count"))
+      .where("franchise_id", "=", franchiseId)
+      .where("party_id", "=", id)
+      .executeTakeFirst()
+  ]);
+
+  const refCount = Number(txRef?.count ?? 0) + Number(seedRef?.count ?? 0);
+  if (refCount > 0) {
+    const updated = await db
+      .updateTable("credit_parties")
+      .set({ is_active: false })
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", id)
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return { ...updated, soft_deleted: true };
+  }
+
+  const deleted = await db
+    .deleteFrom("credit_parties")
+    .where("franchise_id", "=", franchiseId)
+    .where("id", "=", id)
+    .returningAll()
+    .executeTakeFirstOrThrow();
+
+  return { ...deleted, soft_deleted: false };
 }
 
 // ---------------------------------------------------------------------------

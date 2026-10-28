@@ -35,11 +35,12 @@ export function round4(value: number): number {
  * 1. Evaluate Operating Cash, Operating Profit, Owner Balance, and Jazz Payable.
  *
  * Rules:
- * - Operating Cash: closing = opening + issues - expenses.
+ * - Operating Cash: closing = opening + issues + settlementReceipts - expenses.
  * - Owner Injections/Draws DO NOT alter operating register cash.
- * - Operating Profit: operatingProfit = totalIssues - totalExpenses.
+ * - Operating Profit: operatingProfit = totalIssues - totalExpenses (strictly operational issues minus expenses; settlement receipts of prior commissions NEVER inflate operating profit!).
  * - Owner Balance: closing = opening + netMovement.
  * - Jazz Company Payable: closing = opening + inboundStockAmount - payablePayments.
+ * - Commission Receivable: closing = max(0, openingReceivable - settlementReceipts).
  */
 export function evaluateFinancialState(params: {
   openingCash: number;
@@ -50,11 +51,16 @@ export function evaluateFinancialState(params: {
   openingJazzPayable: number;
   inboundStockAmount: number;
   jazzPayablePayments: number;
+  commissionSettlementReceipts?: number;
+  openingCommissionReceivable?: number;
 }): DayFinancialProjectionData {
   const openingCash = round2(params.openingCash);
   const totalIssues = round2(params.totalIssues);
   const totalExpenses = round2(params.totalExpenses);
-  const closingCash = round2(openingCash + totalIssues - totalExpenses);
+  const settlementReceipts = round2(params.commissionSettlementReceipts ?? 0);
+  const openingCommRec = round2(params.openingCommissionReceivable ?? 0);
+
+  const closingCash = round2(openingCash + totalIssues + settlementReceipts - totalExpenses);
   const operatingProfit = round2(totalIssues - totalExpenses);
 
   const ownerOpeningBalance = round2(params.ownerOpeningBalance);
@@ -66,6 +72,8 @@ export function evaluateFinancialState(params: {
   const jazzPayablePayments = round2(params.jazzPayablePayments);
   const closingJazzPayable = round2(openingJazzPayable + inboundStockAmount - jazzPayablePayments);
 
+  const closingCommissionReceivable = round2(Math.max(0, openingCommRec - settlementReceipts));
+
   return {
     openingCash,
     totalIssues,
@@ -75,7 +83,10 @@ export function evaluateFinancialState(params: {
     ownerOpeningBalance,
     ownerClosingBalance,
     openingJazzPayable,
-    closingJazzPayable
+    closingJazzPayable,
+    commissionSettlementReceipts: settlementReceipts,
+    openingCommissionReceivable: openingCommRec,
+    closingCommissionReceivable
   };
 }
 
@@ -157,17 +168,25 @@ export function evaluateStockAccount(params: {
   openingDue: number;
   stockTakenAmount: number;
   paymentReceivedAmount: number;
+  transfersOutAmount?: number;
+  transfersInAmount?: number;
 }): StockAccountProjectionData {
   const openingDue = round2(params.openingDue);
   const stockTakenAmount = round2(params.stockTakenAmount);
   const paymentReceivedAmount = round2(params.paymentReceivedAmount);
-  const closingDue = round2(openingDue + stockTakenAmount - paymentReceivedAmount);
+  const transfersOutAmount = round2(params.transfersOutAmount ?? 0);
+  const transfersInAmount = round2(params.transfersInAmount ?? 0);
+  const closingDue = round2(
+    openingDue + stockTakenAmount - paymentReceivedAmount + transfersOutAmount - transfersInAmount
+  );
 
   return {
     accountId: params.accountId,
     openingDue,
     stockTakenAmount,
     paymentReceivedAmount,
+    transfersOutAmount,
+    transfersInAmount,
     closingDue
   };
 }

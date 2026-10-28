@@ -53,10 +53,18 @@ async function cleanupTestData() {
     DROP FUNCTION IF EXISTS trg_test_delay_race();
   `.execute(db);
 
-  // Reopen any closed test days so the trigger permits cleaning up test records
+  // Temporarily disable immutability triggers during test cleanup so historical rows on closed days can be cleaned up
   await sql`
-    UPDATE accounting_days SET status = 'open'
-    WHERE franchise_id IN (SELECT id FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2'));
+    ALTER TABLE expense_items DISABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items DISABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions DISABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions DISABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records DISABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries DISABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders DISABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines DISABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments DISABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments DISABLE TRIGGER trg_jazz_payable_payments_immutability;
   `.execute(db);
 
   await sql`
@@ -133,6 +141,19 @@ async function cleanupTestData() {
 
   await sql`DELETE FROM franchises WHERE code IN ('TEST-TX-F1', 'TEST-TX-F2');`.execute(db);
   await sql`DELETE FROM users WHERE firebase_uid LIKE 'test-tx-%';`.execute(db);
+
+  await sql`
+    ALTER TABLE expense_items ENABLE TRIGGER trg_expense_items_immutability;
+    ALTER TABLE commission_items ENABLE TRIGGER trg_commission_items_immutability;
+    ALTER TABLE credit_transactions ENABLE TRIGGER trg_credit_transactions_immutability;
+    ALTER TABLE owner_transactions ENABLE TRIGGER trg_owner_transactions_immutability;
+    ALTER TABLE jazz_load_lifting_records ENABLE TRIGGER trg_jazz_load_lifting_immutability;
+    ALTER TABLE jazz_load_do_entries ENABLE TRIGGER trg_jazz_load_do_entries_immutability;
+    ALTER TABLE stock_orders ENABLE TRIGGER trg_stock_orders_immutability;
+    ALTER TABLE stock_order_lines ENABLE TRIGGER trg_stock_order_lines_immutability;
+    ALTER TABLE stock_account_payments ENABLE TRIGGER trg_stock_account_payments_immutability;
+    ALTER TABLE jazz_company_payable_payments ENABLE TRIGGER trg_jazz_payable_payments_immutability;
+  `.execute(db);
 }
 
 async function setupTestData(): Promise<SetupData> {
@@ -190,6 +211,20 @@ async function setupTestData(): Promise<SetupData> {
   `.execute(db);
   const f1PeriodId = p1.rows[0].id;
 
+  const p1Reopen = await sql<{ id: string }>`
+    INSERT INTO accounting_periods (franchise_id, period_key, year_num, month_num, label, status)
+    VALUES (${f1Id}, '2026-10', 2026, 10, 'October 2026', 'open')
+    RETURNING id;
+  `.execute(db);
+  const f1ReopenPeriodId = p1Reopen.rows[0].id;
+
+  const p1Closed = await sql<{ id: string }>`
+    INSERT INTO accounting_periods (franchise_id, period_key, year_num, month_num, label, status)
+    VALUES (${f1Id}, '2026-11', 2026, 11, 'November 2026', 'open')
+    RETURNING id;
+  `.execute(db);
+  const f1ClosedPeriodId = p1Closed.rows[0].id;
+
   const p2 = await sql<{ id: string }>`
     INSERT INTO accounting_periods (franchise_id, period_key, year_num, month_num, label, status)
     VALUES (${f2Id}, '2026-09', 2026, 9, 'September 2026', 'open')
@@ -204,6 +239,8 @@ async function setupTestData(): Promise<SetupData> {
       opening_jazz_lifting, opening_jazz_payable, is_verified
     ) VALUES
       (${f1Id}, ${f1PeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true),
+      (${f1Id}, ${f1ReopenPeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true),
+      (${f1Id}, ${f1ClosedPeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true),
       (${f2Id}, ${f2PeriodId}, 10000.00, 5000.00, 20000.00, 10000.00, true);
   `.execute(db);
 
@@ -216,18 +253,18 @@ async function setupTestData(): Promise<SetupData> {
   `.execute(db);
   const f1OpenDayId = d1.rows[0].id;
 
-  // F1 Day 2: REOPEN
+  // F1 Day 2: REOPEN (in separate period f1ReopenPeriodId to satisfy uq_single_open_day_per_period)
   const d2 = await sql<{ id: string }>`
     INSERT INTO accounting_days (franchise_id, period_id, day_no, calendar_date, label, status)
-    VALUES (${f1Id}, ${f1PeriodId}, 2, '2026-09-02', 'Day 2', 'reopen')
+    VALUES (${f1Id}, ${f1ReopenPeriodId}, 1, '2026-10-01', 'Day 1', 'reopen')
     RETURNING id;
   `.execute(db);
   const f1ReopenDayId = d2.rows[0].id;
 
-  // F1 Day 3: CLOSED
+  // F1 Day 3: CLOSED (in separate period f1ClosedPeriodId to satisfy uq_single_open_day_per_period)
   const d3 = await sql<{ id: string }>`
     INSERT INTO accounting_days (franchise_id, period_id, day_no, calendar_date, label, status)
-    VALUES (${f1Id}, ${f1PeriodId}, 3, '2026-09-03', 'Day 3', 'closed')
+    VALUES (${f1Id}, ${f1ClosedPeriodId}, 1, '2026-11-01', 'Day 1', 'closed')
     RETURNING id;
   `.execute(db);
   const f1ClosedDayId = d3.rows[0].id;
@@ -440,6 +477,57 @@ async function runTransactionTests() {
       const rList = await req(base, "GET", `/api/v1/transactions/expenses?day_id=${data.f1OpenDayId}`, "tx-owner");
       assert(rList.status === 200, "Owner lists expenses for day", rList.status);
       assert(rList.body?.data?.some((e: any) => e.id === expenseId), "Created expense appears in list");
+
+      // Regression: Blank item_name with description creates an expense
+      const rBlankNameDesc = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "",
+        description: "Office electricity bill without name",
+        amount: 3200
+      });
+      assert(rBlankNameDesc.status === 201, "Blank name with description creates expense", rBlankNameDesc.status);
+      assert(rBlankNameDesc.body?.data?.item_name === "", "Blank item_name preserved as empty string", rBlankNameDesc.body?.data?.item_name);
+
+      // Regression: Blank item_name with valid amount creates an expense
+      const rBlankNameAmount = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        amount: 1500
+      });
+      assert(rBlankNameAmount.status === 201, "Blank name with valid amount creates expense", rBlankNameAmount.status);
+      assert(rBlankNameAmount.body?.data?.item_name === "", "Omitted item_name defaults to empty string", rBlankNameAmount.body?.data?.item_name);
+
+      // Regression: Two expenses with identical names are both created as separate rows
+      const rIdentical1 = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "Tea",
+        description: "Morning",
+        amount: 100
+      });
+      assert(rIdentical1.status === 201, "First expense with name 'Tea' created", rIdentical1.status);
+
+      const rIdentical2 = await req(base, "POST", "/api/v1/transactions/expenses", "tx-admin", {
+        day_id: data.f1OpenDayId,
+        category_id: data.f1ExpCatId,
+        item_name: "Tea",
+        description: "Evening",
+        amount: 150
+      });
+      assert(rIdentical2.status === 201, "Second expense with name 'Tea' created", rIdentical2.status);
+      assert(rIdentical1.body?.data?.id !== rIdentical2.body?.data?.id, "Identical name expenses receive distinct IDs");
+
+      // Regression: Updating one expense with identical name does not affect the other
+      const rUpdateIdentical = await req(base, "PATCH", `/api/v1/transactions/expenses/${rIdentical2.body?.data?.id}`, "tx-admin", {
+        baseRevision: rIdentical2.body?.data?.revision,
+        amount: 180
+      });
+      assert(rUpdateIdentical.status === 200, "Second 'Tea' expense updated by ID", rUpdateIdentical.status);
+      assert(rUpdateIdentical.body?.data?.amount === "180.00", "Amount updated to 180.00");
+
+      const rVerifyFirst = await req(base, "GET", `/api/v1/transactions/expenses/${rIdentical1.body?.data?.id}`, "tx-admin");
+      assert(rVerifyFirst.body?.data?.amount === "100.00", "First 'Tea' expense remained completely untouched");
 
       // Tenant isolation: F2 cannot read F1 expense
       const rF2Get = await req(base, "GET", `/api/v1/transactions/expenses/${expenseId}`, "tx-f2owner");
