@@ -16,7 +16,7 @@ import {
   ledgerApiClient,
   type DayProjectionsResponse
 } from "./ledgerApiClient";
-import { resolveAccountingDayId, getAccountingPeriodWithDays } from "./periodDayService";
+import { resolveAccountingDayId, getAccountingPeriodWithDays, runWithConcurrency } from "./periodDayService";
 
 export interface SaveExpenseDayResult {
   success: boolean;
@@ -801,4 +801,40 @@ export async function loadExpenseDayPostgres(
     ownerBalances
   };
 }
+
+export async function loadExpenseMonthPostgres(
+  periodKey: string
+): Promise<DailyLedgerInput[]> {
+  const periodData = await getAccountingPeriodWithDays(periodKey).catch(() => null);
+  if (!periodData) return [];
+
+  const dayNumbers: number[] = [];
+  const dayCount = periodData.days?.size || new Date(Number(periodKey.split("-")[0]), Number(periodKey.split("-")[1]), 0).getDate();
+  for (let d = 1; d <= dayCount; d++) {
+    dayNumbers.push(d);
+  }
+
+  // Check if Day 32 (final settlement period) exists
+  try {
+    const finalRes = await ledgerApiClient.calculations.getPeriodFinalProjections(periodData.period.id).catch(() => null);
+    const finalData = (finalRes as any)?.data ?? finalRes;
+    if (finalData?.closingBalances || finalData?.operationalBalances) {
+      dayNumbers.push(32);
+    }
+  } catch {
+    // Day 32 optional
+  }
+
+  const loadedDays = await runWithConcurrency(dayNumbers, 6, async (dayNo) => {
+    try {
+      return await loadExpenseDayPostgres(periodKey, dayNo);
+    } catch (err) {
+      console.warn(`[expenseTransactionService] Failed to load day ${dayNo} for month ${periodKey}:`, err);
+      return null;
+    }
+  });
+
+  return loadedDays.filter((d): d is DailyLedgerInput => Boolean(d)).sort((a, b) => a.dayNo - b.dayNo);
+}
+
 

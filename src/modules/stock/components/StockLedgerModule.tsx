@@ -1326,7 +1326,7 @@ export function StockLedgerModule({
               const currentDaysMap = new Map(currentDays.map((d) => [d.dayNo, d]));
               return pgStockDays.map((newDay) => {
                 const existing = currentDaysMap.get(newDay.dayNo);
-                if (existing && isServerLoadedStockDay(existing)) {
+                if (existing && existing.monthId === monthId && isServerLoadedStockDay(existing)) {
                   return {
                     ...existing,
                     status: newDay.status,
@@ -1432,6 +1432,16 @@ export function StockLedgerModule({
 
   useEffect(() => {
     setStockDaysInitialized(false);
+    setDays((curr) => curr.filter((d) => d.monthId === monthId));
+    setFilterStartDate(1);
+    setFilterEndDate(daysInMonth(monthId));
+    setFilterProductId("");
+    setFilterAccountId("");
+    setFilterAccountType("");
+    setFilterStockInMode("");
+    setFilterDueStatus("");
+    setFilterDayStatus("");
+    setFilterActiveStatus("all");
   }, [monthId]);
 
   useEffect(() => {
@@ -1456,14 +1466,22 @@ export function StockLedgerModule({
   }, [accounts, monthId, products, selectedDay, user]);
 
   const [reportsRefreshing, setReportsRefreshing] = useState(false);
+  const productsRef = useRef(products);
+  productsRef.current = products;
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
 
   const refreshStockReports = useCallback(async () => {
-    if (!isPostgreSqlPeriod(monthId) || products.length === 0) return;
+    if (!isPostgreSqlPeriod(monthId) || productsRef.current.length === 0) return;
     setReportsRefreshing(true);
     try {
-      const monthDays = await loadStockMonthPostgres(monthId, products, accounts);
+      const monthDays = await loadStockMonthPostgres(monthId, productsRef.current, accountsRef.current);
       if (monthDays && monthDays.length > 0) {
-        setDays(monthDays);
+        setDays((current) => {
+          const map = new Map(current.filter((d) => d.monthId === monthId).map((d) => [d.dayNo, d]));
+          monthDays.forEach((d) => map.set(d.dayNo, d));
+          return Array.from(map.values()).sort((a, b) => a.dayNo - b.dayNo);
+        });
         setSummary(calculateMonthlySummary(monthId, monthDays));
       }
     } catch (err) {
@@ -1471,7 +1489,7 @@ export function StockLedgerModule({
     } finally {
       setReportsRefreshing(false);
     }
-  }, [accounts, isPostgreSqlPeriod, monthId, products]);
+  }, [isPostgreSqlPeriod, monthId]);
 
   useEffect(() => {
     if (section === "reportsHub" && isPostgreSqlPeriod(monthId)) {
@@ -3425,7 +3443,7 @@ export function StockLedgerModule({
                             </th>
                           );
                         })}
-                        <th className="sticky top-0 z-20 bg-slate-900">Total Allotted Qty</th>
+                        <th className="sticky top-0 z-20 bg-slate-900">Total Qty</th>
                         <th className="sticky top-0 z-20 bg-slate-900">Total Stock Amount</th>
                         <th
                           className={`sticky top-0 z-20 cursor-pointer transition-colors ${

@@ -25,7 +25,7 @@ import {
 } from "../../modules/jazzLoad/services/jazzLoadCalculations";
 import { dayDate, roundMoney } from "../../modules/jazzLoad/utils/jazzLoadFormatters";
 import { ledgerApiClient, type DayProjectionsResponse } from "./ledgerApiClient";
-import { getAccountingPeriodWithDays, resolveAccountingDayId } from "./periodDayService";
+import { getAccountingPeriodWithDays, resolveAccountingDayId, runWithConcurrency } from "./periodDayService";
 
 export interface SaveJazzLoadDayResult {
   success: boolean;
@@ -359,16 +359,16 @@ export async function loadJazzLoadMonthPostgres(
   const periodData = await getAccountingPeriodWithDays(periodKey).catch(() => null);
   if (!periodData) return [];
   const dayCount = periodData.days?.size || new Date(Number(periodKey.split("-")[0]), Number(periodKey.split("-")[1]), 0).getDate();
-  const dayPromises: Promise<JazzLoadDay | null>[] = [];
+  const dayNumbers: number[] = [];
   for (let d = 1; d <= dayCount; d++) {
-    dayPromises.push(
-      loadJazzLoadDayPostgres(periodKey, d, doProfiles, rates, periodData).catch((err) => {
-        console.warn(`[jazzLoadTransactionService] Failed to load day ${d} for month ${periodKey}:`, err);
-        return null;
-      })
-    );
+    dayNumbers.push(d);
   }
-  const loadedDays = await Promise.all(dayPromises);
+  const loadedDays = await runWithConcurrency(dayNumbers, 6, async (d) => {
+    return loadJazzLoadDayPostgres(periodKey, d, doProfiles, rates, periodData).catch((err) => {
+      console.warn(`[jazzLoadTransactionService] Failed to load day ${d} for month ${periodKey}:`, err);
+      return null;
+    });
+  });
   return loadedDays.filter((d): d is JazzLoadDay => Boolean(d)).sort((a, b) => a.dayNo - b.dayNo);
 }
 

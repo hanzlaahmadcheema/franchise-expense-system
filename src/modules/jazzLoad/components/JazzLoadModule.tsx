@@ -887,7 +887,7 @@ export function JazzLoadModule({
             const currentMap = new Map(currentDays.map((d) => [d.dayNo, d]));
             return pgJazzDays.map((pgDay) => {
               const existing = currentMap.get(pgDay.dayNo);
-              if (existing && isServerLoadedJazzDay(existing)) {
+              if (existing && existing.date?.startsWith(monthId) && isServerLoadedJazzDay(existing)) {
                 return {
                   ...pgDay,
                   ...existing,

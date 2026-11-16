@@ -40,6 +40,7 @@ import {
   GripVertical,
   AlertTriangle,
   SlidersHorizontal,
+  RefreshCw,
   Info
 } from "lucide-react";
 import { AppHeader } from "./components/AppHeader";
@@ -105,7 +106,7 @@ import {
   type PeriodRoutingStatus
 } from "./services/api/periodDayService";
 import { ledgerApiClient, setAuthTokenProvider } from "./services/api/ledgerApiClient";
-import { saveExpenseDayPostgres, loadExpenseDayPostgres } from "./services/api/expenseTransactionService";
+import { saveExpenseDayPostgres, loadExpenseDayPostgres, loadExpenseMonthPostgres } from "./services/api/expenseTransactionService";
 import { createExpenseRecalculationAdapter } from "./modules/expense/adapters/expenseRecalculationAdapter";
 import { GuidedMonthCloseModal } from "./components/GuidedMonthCloseModal";
 import {
@@ -1356,6 +1357,9 @@ function RecordsView({
   days,
   computed,
   loading,
+  commissionCategories,
+  refreshing,
+  onRefresh,
   onExportDailyXlsx,
   onExportDailyPdf,
   onExportMonthlyXlsx,
@@ -1366,6 +1370,9 @@ function RecordsView({
   days: DailyLedgerInput[];
   computed: MonthComputed | null;
   loading: boolean;
+  commissionCategories?: CatalogItem[];
+  refreshing?: boolean;
+  onRefresh?: () => void;
   onExportDailyXlsx?: () => void;
   onExportDailyPdf?: () => void;
   onExportMonthlyXlsx?: () => void;
@@ -1375,6 +1382,51 @@ function RecordsView({
   const dayInput = days.find((day) => day.dayNo === selectedDay);
   const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
   const monthRows = computed?.homeSummary.dayRows ?? [];
+
+  const activeCommissionCategories = useMemo(() => {
+    if (!computed) return [];
+    const categoriesSet = new Set<string>();
+    for (const row of computed.homeSummary.commissionMatrix) {
+      for (const [cat, amt] of Object.entries(row.byCategory)) {
+        if (amt !== 0) categoriesSet.add(cat);
+      }
+    }
+    if (categoriesSet.size === 0 && commissionCategories && commissionCategories.length > 0) {
+      commissionCategories.forEach((c) => categoriesSet.add(c.name));
+    }
+    return Array.from(categoriesSet).sort();
+  }, [commissionCategories, computed]);
+
+  const dailyCommissionRows = useMemo(() => {
+    if (!computed) return [];
+    const rows: string[][] = [];
+    const catTotals: Record<string, number> = {};
+    activeCommissionCategories.forEach((cat) => (catTotals[cat] = 0));
+
+    for (const day of computed.days) {
+      const matrixRow = computed.homeSummary.commissionMatrix.find((r) => r.dayNo === day.dayNo);
+      const dayTotal = matrixRow?.rowTotal ?? 0;
+      const catAmounts = activeCommissionCategories.map((cat) => {
+        const amt = matrixRow?.byCategory[cat] ?? 0;
+        catTotals[cat] = (catTotals[cat] ?? 0) + amt;
+        return amt !== 0 ? currency(amt) : "-";
+      });
+
+      const dateStr = day.date ? day.date : dateLabelFor(monthId, day.dayNo);
+      const labelStr = day.label && day.label !== dateStr ? `${day.label} (${dateStr})` : (day.label ?? dateStr);
+
+      rows.push([labelStr, ...catAmounts, dayTotal !== 0 ? currency(dayTotal) : "-"]);
+    }
+
+    if (rows.length > 0) {
+      rows.push([
+        "Total",
+        ...activeCommissionCategories.map((cat) => currency(catTotals[cat] ?? 0)),
+        currency(computed.homeSummary.monthlyIssueTotal)
+      ]);
+    }
+    return rows;
+  }, [activeCommissionCategories, computed, monthId]);
   const ownerRowsData = computed?.days.map((day) => {
     const opening = day.ownerBalances[0]?.opening ?? day.ownerBalanceTotal ?? 0;
     const expense = day.ownerBalances.reduce((total, row) => total + (row.expense ?? Math.max(row.amount, 0)), 0);
@@ -1477,26 +1529,42 @@ function RecordsView({
                 </button>
               </>
             )}
-            {recordMode === "month" && onExportMonthlyXlsx && onExportMonthlyPdf && (
+            {recordMode === "month" && (
               <>
-                <button
-                  type="button"
-                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
-                  disabled={!computed}
-                  onClick={onExportMonthlyXlsx}
-                >
-                  <FileSpreadsheet className="h-3.5 w-3.5" />
-                  Export Monthly Excel
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
-                  disabled={!computed}
-                  onClick={onExportMonthlyPdf}
-                >
-                  <FileDown className="h-3.5 w-3.5" />
-                  Export Monthly PDF
-                </button>
+                {onRefresh && (
+                  <button
+                    type="button"
+                    className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                    disabled={refreshing}
+                    onClick={onRefresh}
+                    title="Refresh records and calculations from server without reloading page"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin text-emerald-400" : "text-emerald-400"}`} />
+                    <span>{refreshing ? "Refreshing..." : "Refresh Records"}</span>
+                  </button>
+                )}
+                {onExportMonthlyXlsx && onExportMonthlyPdf && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                      disabled={!computed}
+                      onClick={onExportMonthlyXlsx}
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                      Export Monthly Excel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                      disabled={!computed}
+                      onClick={onExportMonthlyPdf}
+                    >
+                      <FileDown className="h-3.5 w-3.5" />
+                      Export Monthly PDF
+                    </button>
+                  </>
+                )}
               </>
             )}
           </div>
@@ -1592,6 +1660,12 @@ function RecordsView({
                 }
                 return rows;
               })()}
+            />
+            <RecordTable
+              title="Daily Commission Summary (Whole Month)"
+              className="xl:col-span-2"
+              headers={["Date / Day", ...activeCommissionCategories, "Total Commission"]}
+              rows={dailyCommissionRows}
             />
             <RecordTable
               title="Month Day Records"
@@ -1762,12 +1836,22 @@ function RecordsView({
   );
 }
 
-function RecordTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+function RecordTable({
+  title,
+  headers,
+  rows,
+  className
+}: {
+  title: string;
+  headers: string[];
+  rows: string[][];
+  className?: string;
+}) {
   const isRowTotal = (row: string[]) => row.includes("Total");
   const dataRowCount = rows.filter((r) => !isRowTotal(r)).length;
 
   return (
-    <section className="panel">
+    <section className={`panel ${className ?? ""}`}>
       <div className="panel-title">
         <div>
           <h3>{title}</h3>
@@ -2668,7 +2752,40 @@ function App() {
 
   useEffect(() => {
     setDay1LoadError(null);
+    setDays((curr) => curr.filter((d) => !d.date || d.date.startsWith(monthId)));
   }, [monthId]);
+
+  const [expenseReportsRefreshing, setExpenseReportsRefreshing] = useState(false);
+
+  const refreshExpenseMonth = useCallback(async (targetMonthId: string = monthId) => {
+    if (!isPostgreSqlPeriod(targetMonthId)) return;
+    setExpenseReportsRefreshing(true);
+    try {
+      const monthDays = await loadExpenseMonthPostgres(targetMonthId);
+      if (monthDays && monthDays.length > 0) {
+        setDays((currentDays) => {
+          const map = new Map(currentDays.filter((d) => !d.date || d.date.startsWith(targetMonthId)).map((d) => [d.dayNo, d]));
+          monthDays.forEach((md) => {
+            const existing = map.get(md.dayNo);
+            if (!existing || !existing.updatedAt || (md.updatedAt && md.updatedAt >= existing.updatedAt)) {
+              map.set(md.dayNo, md);
+            }
+          });
+          return Array.from(map.values()).sort((a, b) => a.dayNo - b.dayNo);
+        });
+      }
+    } catch (err) {
+      console.warn("[App] Failed to refresh expense month from PostgreSQL:", err);
+    } finally {
+      setExpenseReportsRefreshing(false);
+    }
+  }, [monthId]);
+
+  useEffect(() => {
+    if (user && role && calendarSelectionReady && isPostgreSqlPeriod(monthId)) {
+      void refreshExpenseMonth(monthId);
+    }
+  }, [calendarSelectionReady, monthId, refreshExpenseMonth, role, user]);
 
   useEffect(() => {
     if (!user || !role || !calendarSelectionReady || !isPostgreSqlPeriod(monthId)) return;
@@ -4901,7 +5018,10 @@ function App() {
                   selectedDay={selectedDay}
                   days={days}
                   computed={computed}
-                  loading={loading}
+                  loading={loading || expenseReportsRefreshing}
+                  commissionCategories={commissionCategories}
+                  refreshing={expenseReportsRefreshing}
+                  onRefresh={() => void refreshExpenseMonth(monthId)}
                   onExportDailyXlsx={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
                   onExportDailyPdf={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
                   onExportMonthlyXlsx={() => computed && runReportExport(() => exportMonthlyXlsx(computed))}

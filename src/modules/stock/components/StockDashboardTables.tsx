@@ -402,14 +402,13 @@ export function StockIssuanceSummaryTable({
           <thead>
             <tr>
               <th className="text-left">Dealer / Account Name</th>
-              <th className="text-left">Account Type</th>
               <th className="text-right">Opening Balance</th>
               {activeProducts.map((product) => (
                 <th key={product.id} className="text-center font-mono">
                   {product.name}
                 </th>
               ))}
-              <th className="text-right">Total Allotted Qty</th>
+              <th className="text-right">Total Qty</th>
               <th className="text-right">Total Stock Amount</th>
               <th className="text-right">Payment Received</th>
               <th className="text-right">Closing Balance</th>
@@ -419,7 +418,6 @@ export function StockIssuanceSummaryTable({
             {visibleRows.map((row) => (
                 <tr key={row.account.id} className="hover:bg-slate-800/40 transition-colors">
                   <td className="font-semibold text-slate-200 whitespace-nowrap">{row.account.name}</td>
-                  <td className="uppercase font-bold text-[10px] text-slate-400 whitespace-nowrap">{row.account.type}</td>
                   <td className="font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(row.opening)}</td>
                   {activeProducts.map((product) => {
                     const quantity = row.productQuantities[product.id] ?? 0;
@@ -438,7 +436,6 @@ export function StockIssuanceSummaryTable({
             {visibleRows.length > 0 ? (
               <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
                 <td className="text-slate-100 whitespace-nowrap">Total</td>
-                <td className="text-slate-500 whitespace-nowrap">-</td>
                 <td className="font-mono text-slate-100 text-right tabular-nums whitespace-nowrap">{formatMoney(totals.opening)}</td>
                 {activeProducts.map((product) => {
                   const quantity = totals.productQuantities[product.id] ?? 0;

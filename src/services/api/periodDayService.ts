@@ -274,3 +274,25 @@ export function getNextPeriodKey(currentPeriodKey: string): { nextPeriodKey: str
 
   return { nextPeriodKey, daysInNextMonth };
 }
+
+/**
+ * Concurrency-limited runner to prevent browser HTTP connection pool saturation
+ * when loading large batches of monthly days.
+ */
+export async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let index = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      results[current] = await fn(items[current]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}

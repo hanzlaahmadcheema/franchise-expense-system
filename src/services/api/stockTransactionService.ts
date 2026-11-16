@@ -28,7 +28,7 @@ import {
 } from "../../modules/stock/services/stockCalculations";
 import { dayDate, roundMoney } from "../../modules/stock/utils/stockFormatters";
 import { ledgerApiClient, type DayProjectionsResponse } from "./ledgerApiClient";
-import { getAccountingPeriodWithDays, resolveAccountingDayId, type PeriodCacheEntry } from "./periodDayService";
+import { getAccountingPeriodWithDays, resolveAccountingDayId, runWithConcurrency, type PeriodCacheEntry } from "./periodDayService";
 
 export interface SaveStockDayResult {
   success: boolean;
@@ -488,15 +488,15 @@ export async function loadStockMonthPostgres(
   const periodData = await getAccountingPeriodWithDays(periodKey).catch(() => null);
   if (!periodData) return [];
   const dayCount = periodData.days.size || 31;
-  const dayPromises: Promise<StockDayRecord | null>[] = [];
+  const dayNumbers: number[] = [];
   for (let d = 1; d <= dayCount; d++) {
-    dayPromises.push(
-      loadStockDayPostgres(periodKey, d, products, accounts, periodData).catch((err) => {
-        console.warn(`[stockTransactionService] Failed to load day ${d} for month ${periodKey}:`, err);
-        return null;
-      })
-    );
+    dayNumbers.push(d);
   }
-  const loadedDays = await Promise.all(dayPromises);
+  const loadedDays = await runWithConcurrency(dayNumbers, 6, async (d) => {
+    return loadStockDayPostgres(periodKey, d, products, accounts, periodData).catch((err) => {
+      console.warn(`[stockTransactionService] Failed to load day ${d} for month ${periodKey}:`, err);
+      return null;
+    });
+  });
   return loadedDays.filter((d): d is StockDayRecord => Boolean(d)).sort((a, b) => a.dayNo - b.dayNo);
 }
