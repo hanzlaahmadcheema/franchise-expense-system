@@ -55,6 +55,15 @@ function money(value: number) {
   return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+function getDaysInMonth(monthId: string): number {
+  if (!monthId || !monthId.includes("-")) return 31;
+  const [yearStr, monthStr] = monthId.split("-");
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+  if (isNaN(year) || isNaN(month)) return 31;
+  return new Date(year, month, 0).getDate();
+}
+
 function compactMoney(value: number) {
   return Intl.NumberFormat(undefined, {
     notation: "compact",
@@ -261,30 +270,26 @@ export function HomeDashboard({ month, monthId }: Props) {
   const totalExpenseCommission = [...expenseCommissionTotals.values()].reduce((a, b) => a + b, 0);
 
   // --- Calculations for Grand Totals (Consolidated Overview) ---
-  const grandVolume =
-    (month?.homeSummary.monthlyIssueTotal || 0) +
-    (jazzLoadSummary?.totalIssuanceBase || 0) +
-    (stockSummary?.totalAmount || 0);
-
-  const grandPayments =
-    (month?.homeSummary.monthlyReturnBalance || 0) +
-    (jazzLoadSummary?.totalPaymentsBase || 0) +
-    (stockSummary?.totalPaymentReceived || 0);
-
-  const grandCommission =
-    totalExpenseCommission +
-    (jazzLoadSummary?.totalCommission || 0);
-
+  const totalOperationalExpenses = month?.homeSummary.monthlyExpenseTotal || 0;
+  const grandCommission = totalExpenseCommission + (jazzLoadSummary?.totalCommission || 0);
+  const netOperatingProfit = grandCommission - totalOperationalExpenses;
+  const grandGrossTurnover = (jazzLoadSummary?.totalIssuanceBase || 0) + (stockSummary?.totalAmount || 0);
+  const consolidatedInHandLiquidity = (month?.homeSummary.monthlyReturnBalance || 0) + (jazzLoadSummary?.latestInHandBalance || 0);
   const grandCredit =
     (month?.homeSummary.creditBalanceTotal || 0) +
     (jazzLoadSummary?.totalClosingBase || 0) +
     (stockSummary?.totalDueBalance || 0);
 
+  const totalCalendarDays = getDaysInMonth(activeMonthId);
+  const recordedDaysCount = month ? month.days.filter((day) => day.dayNo <= totalCalendarDays).length : 0;
+  const missingDaysCount = Math.max(0, totalCalendarDays - recordedDaysCount);
+  const completionPercentage = Math.round((recordedDaysCount / totalCalendarDays) * 100);
+
   // Consolidated Module Contributions for BarChart
   const consolidatedContributionData = [
-    { name: "Expense Ledger", Volume: month?.homeSummary.monthlyIssueTotal || 0, fill: "#10b981" },
-    { name: "Jazz Load", Volume: jazzLoadSummary?.totalIssuanceBase || 0, fill: "#06b6d4" },
-    { name: "Stock Ledger", Volume: stockSummary?.totalAmount || 0, fill: "#f97316" }
+    { name: "Jazz Load Gross", Volume: jazzLoadSummary?.totalIssuanceBase || 0, fill: "#06b6d4" },
+    { name: "Stock Sales", Volume: stockSummary?.totalAmount || 0, fill: "#f97316" },
+    { name: "Commission Revenue", Volume: grandCommission, fill: "#10b981" }
   ];
 
   return (
@@ -362,30 +367,30 @@ export function HomeDashboard({ month, monthId }: Props) {
           {/* Executive Stat Cards */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-4">
             <MetricCard
-              label="Grand Volume"
-              value={money(grandVolume)}
-              helper="Combined sales and issues across all modules"
+              label="Net Operating Margin"
+              value={money(netOperatingProfit)}
+              helper={`Revenue (${money(grandCommission)}) - Expenses (${money(totalOperationalExpenses)})`}
+              icon={TrendingUp}
+              tone={netOperatingProfit >= 0 ? "emerald" : "rose"}
+            />
+            <MetricCard
+              label="Gross Market Turnover"
+              value={money(grandGrossTurnover)}
+              helper="Combined Jazz Load distribution & Stock product sales"
               icon={Activity}
               tone="cyan"
             />
             <MetricCard
-              label="Grand Inflow / Payments"
-              value={money(grandPayments)}
-              helper="Total returns & payments processed"
+              label="In-Hand Liquid Cash"
+              value={money(consolidatedInHandLiquidity)}
+              helper="Register cash drawer + Jazz Load in-hand cash"
               icon={Banknote}
-              tone="emerald"
-            />
-            <MetricCard
-              label="Combined Commissions"
-              value={money(grandCommission)}
-              helper="Total revenues earned from categories & lifting"
-              icon={Coins}
-              tone="amber"
+              tone="blue"
             />
             <MetricCard
               label="Grand Credit Exposure"
               value={money(grandCredit)}
-              helper="Total outstanding credit & due balances"
+              helper="Receivables across credit parties, DOs & retailers"
               icon={Landmark}
               tone="orange"
             />
@@ -630,7 +635,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                 <div>
                   <h3 className="text-xl font-semibold tracking-tight text-white">Expense & Credit Command Center</h3>
                   <p className="mt-1 text-sm text-slate-400">
-                    {month.days.length} ledger periods · {Math.round((month.days.filter((day) => day.dayNo <= 31).length / 31) * 100)}% daily completion
+                    {recordedDaysCount} of {totalCalendarDays} days recorded · {completionPercentage}% daily completion
                   </p>
                 </div>
                 <div className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300">
@@ -804,7 +809,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                     <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
                       <CalendarDays className="h-5 w-5 text-blue-300" />
                       <p className="mt-3 text-2xl font-semibold text-white">
-                        {31 - month.days.filter((day) => day.dayNo <= 31).length}
+                        {missingDaysCount}
                       </p>
                       <p className="text-sm text-slate-400">Missing days</p>
                     </div>
@@ -819,7 +824,7 @@ export function HomeDashboard({ month, monthId }: Props) {
                   <div className="mt-4 rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-4">
                     <p className="text-sm font-semibold text-emerald-200">Recommendation</p>
                     <p className="mt-1 text-sm text-emerald-50">
-                      {month.days.filter((day) => day.dayNo <= 31).length < 31
+                      {missingDaysCount > 0
                         ? "Complete missing days before closing the month."
                         : "Month is ready for owner review and export."}
                     </p>

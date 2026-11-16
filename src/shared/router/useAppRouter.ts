@@ -33,8 +33,7 @@ export const STOCK_SECTION_TO_SLUG: Record<StockSection, string> = {
   products: "products",
   accounts: "accounts",
   settings: "settings",
-  backup: "backup",
-  dashboard: "dashboard"
+  backup: "backup"
 };
 
 export const SLUG_TO_STOCK_SECTION: Record<string, StockSection> = {
@@ -53,7 +52,7 @@ export const SLUG_TO_STOCK_SECTION: Record<string, StockSection> = {
   accounts: "accounts",
   settings: "settings",
   backup: "backup",
-  dashboard: "dashboard"
+  dashboard: "reportsHub"
 };
 
 // Slugs mapping for Jazz Load sections

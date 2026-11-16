@@ -369,8 +369,7 @@ export function AppHeader({
                             (item.id === "jazz-load" && jazzLoadSection === opt.id) ||
                             (item.id === "stock-ledger" &&
                               (stockSection === opt.id ||
-                                (opt.id === "reportsHub" &&
-                                  (stockSection === "dashboard" || stockSection === "backup")))));
+                                (opt.id === "reportsHub" && stockSection === "backup"))));
                         const isLocked =
                           (item.id === "expense" && opt.id === "settings" && !canManageExpenseSettings) ||
                           (item.id === "jazz-load" && opt.id === "settings" && !canManageJazzLoadSettings) ||

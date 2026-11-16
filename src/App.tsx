@@ -1672,7 +1672,7 @@ function RecordsView({
             />
             <RecordTable
               title="Credit Parties"
-              headers={["Party", "Opening", "Loan Description", "Loan", "Receive Description", "Receive", "Legacy Description", "Balance"]}
+              headers={["Party", "Opening", "Loan Description", "Loan", "Receive Description", "Receive", "Balance"]}
               rows={[
                 ...dayComputed.creditRows.map((row) => {
                   const descriptions = resolveCreditDescriptions(row);
@@ -1683,7 +1683,6 @@ function RecordsView({
                     currency(row.loan ?? row.today ?? 0),
                     descriptions.receiveDescription || "-",
                     currency(row.receive),
-                    descriptions.legacyDescription || "-",
                     currency(row.balance ?? 0)
                   ];
                 }),
@@ -1694,7 +1693,6 @@ function RecordsView({
                   currency(dayComputed.creditTotals.today),
                   "-",
                   currency(dayComputed.creditTotals.receive),
-                  "-",
                   currency(dayComputed.creditTotals.balance)
                 ]
               ]}
