@@ -1534,18 +1534,24 @@ function RecordsView({
 
       {recordMode === "month" && computed ? (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
             {[
               { label: "Opening Cash", value: computed.openingBalance, color: "text-slate-100" },
               { label: "Commissions", value: computed.homeSummary.monthlyIssueTotal, color: "text-emerald-400" },
               { label: "Expenses", value: computed.homeSummary.monthlyExpenseTotal, color: "text-rose-400" },
               { label: "Return Cash", value: computed.homeSummary.monthlyReturnBalance, color: "text-sky-400" },
-              { label: "Credit Dues", value: computed.homeSummary.creditBalanceTotal, color: "text-amber-400" }
-            ].map(({ label, value, color }) => (
+              { label: "Credit Dues", value: computed.homeSummary.creditBalanceTotal, color: "text-amber-400" },
+              {
+                label: "Burn Rate",
+                value: `${((computed.homeSummary.monthlyExpenseTotal / (computed.homeSummary.monthlyIssueTotal || 1)) * 100).toFixed(1)}%`,
+                isText: true,
+                color: "text-indigo-400"
+              }
+            ].map(({ label, value, color, isText }) => (
               <div key={label} className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-sm">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
                 <p className={`mt-1 font-mono text-xl font-bold tabular-nums ${color}`}>
-                  {currency(value)}
+                  {isText ? value : currency(Number(value))}
                 </p>
               </div>
             ))}
@@ -1574,11 +1580,15 @@ function RecordsView({
             />
             <RecordTable
               title="Expense Categories"
-              headers={["Category", "Amount"]}
+              headers={["Category", "Amount", "% Share"]}
               rows={(() => {
-                const rows = computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)]);
+                const totalExp = computed.homeSummary.monthlyExpenseTotal || 1;
+                const rows = computed.homeSummary.expenseByCategory.map((row) => {
+                  const pct = ((row.amount / totalExp) * 100).toFixed(1);
+                  return [row.category, currency(row.amount), `${pct}%`];
+                });
                 if (rows.length > 0) {
-                  rows.push(["Total", currency(computed.homeSummary.monthlyExpenseTotal)]);
+                  rows.push(["Total", currency(computed.homeSummary.monthlyExpenseTotal), "100.0%"]);
                 }
                 return rows;
               })()}
@@ -1617,6 +1627,35 @@ function RecordsView({
               title="Franchise Owner"
               headers={["Day", "Opening", "Expense", "Received", "Balance"]}
               rows={ownerMonthRows}
+            />
+            <RecordTable
+              title="Franchise Cash & Safe Reconciliation"
+              headers={["Reconciliation Item", "Inflow (+)", "Outflow (-)", "Net Cash"]}
+              rows={(() => {
+                const totalCreditLoan = computed.days.reduce(
+                  (total, day) => total + day.creditRows.reduce((sum, r) => sum + (r.loan ?? r.today ?? 0), 0),
+                  0
+                );
+                const totalCreditReceived = computed.days.reduce(
+                  (total, day) => total + day.creditRows.reduce((sum, r) => sum + r.receive, 0),
+                  0
+                );
+                const totalOwnerExpense = computed.days.reduce(
+                  (total, day) => total + day.ownerBalances.reduce((sum, r) => sum + (r.expense ?? Math.max(r.amount, 0)), 0),
+                  0
+                );
+                const totalOwnerReceived = computed.days.reduce(
+                  (total, day) => total + day.ownerBalances.reduce((sum, r) => sum + (r.received ?? Math.max(-r.amount, 0)), 0),
+                  0
+                );
+                return [
+                  ["Opening Cash Drawer (Day 1)", currency(computed.openingBalance), "-", currency(computed.openingBalance)],
+                  ["Commission vs Expenses", currency(computed.homeSummary.monthlyIssueTotal), currency(computed.homeSummary.monthlyExpenseTotal), currency(computed.homeSummary.monthlyIssueTotal - computed.homeSummary.monthlyExpenseTotal)],
+                  ["Party Debt Recoveries vs Loans", currency(totalCreditReceived), currency(totalCreditLoan), currency(totalCreditReceived - totalCreditLoan)],
+                  ["Owner Capital Activity", currency(totalOwnerReceived), currency(totalOwnerExpense), currency(totalOwnerReceived - totalOwnerExpense)],
+                  ["Total Closing Cash in Drawer", "-", "-", currency(computed.homeSummary.monthlyReturnBalance)]
+                ];
+              })()}
             />
           </section>
         </>
@@ -1765,11 +1804,11 @@ function RecordTable({ title, headers, rows }: { title: string; headers: string[
         {rows.length === 0 && <p className="mobile-empty">No saved rows.</p>}
       </div>
       <div className="table-wrap hidden md:block">
-        <table>
+        <table className="table-compact w-full">
           <thead>
             <tr>
               {headers.map((header, idx) => (
-                <th key={header} className={idx > 0 ? "text-right" : "text-left"}>
+                <th key={header} className={`sticky top-0 bg-slate-900/95 ${idx > 0 ? "text-right" : "text-left"}`}>
                   {header}
                 </th>
               ))}
@@ -1781,17 +1820,17 @@ function RecordTable({ title, headers, rows }: { title: string; headers: string[
               return (
                 <tr
                   key={`${title}-${index}`}
-                  className={isTotal ? "border-t-2 border-slate-700 bg-slate-900/90 font-bold" : undefined}
+                  className={isTotal ? "border-t-2 border-slate-700 bg-slate-900/90 font-bold" : "hover:bg-slate-800/40 transition-colors"}
                 >
                   {row.map((cell, cellIndex) => (
                     <td
                       key={`${title}-${index}-${cellIndex}`}
                       className={
                         isTotal
-                          ? `${cellIndex > 0 ? "font-mono text-right tabular-nums" : ""} font-bold text-emerald-300 py-2.5`
+                          ? `${cellIndex > 0 ? "font-mono text-right tabular-nums" : "text-left"} font-bold text-emerald-300 py-1.5 whitespace-nowrap`
                           : cellIndex > 0
-                            ? "font-mono text-right tabular-nums font-bold text-white"
-                            : "font-bold text-white"
+                            ? "font-mono text-right tabular-nums font-semibold text-white whitespace-nowrap"
+                            : "font-bold text-white whitespace-nowrap"
                       }
                     >
                       {cell}

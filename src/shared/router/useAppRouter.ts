@@ -128,11 +128,23 @@ export function parseRoute(pathname: string): ParsedRoute {
     return result;
   }
 
-  // Segment 1: Month ID (YYYY-MM)
+  // Segment 1: Month ID (YYYY-MM) or Section Slug
   if (parts.length > 1) {
-    const rawMonth = parts[1];
-    if (/^\d{4}-\d{2}$/.test(rawMonth)) {
-      result.monthId = rawMonth;
+    const rawSegment = parts[1].toLowerCase();
+    if (/^\d{4}-\d{2}$/.test(rawSegment)) {
+      result.monthId = rawSegment;
+    } else {
+      // Direct section slug without month
+      if (view === "stock-ledger") {
+        const mapped = SLUG_TO_STOCK_SECTION[rawSegment];
+        if (mapped) result.stockSection = mapped;
+      } else if (view === "jazz-load") {
+        const mapped = SLUG_TO_JAZZ_LOAD_SECTION[rawSegment];
+        if (mapped) result.jazzLoadSection = mapped;
+      } else if (view === "expense") {
+        const mapped = SLUG_TO_EXPENSE_SECTION[rawSegment];
+        if (mapped) result.expenseSection = mapped;
+      }
     }
   }
 

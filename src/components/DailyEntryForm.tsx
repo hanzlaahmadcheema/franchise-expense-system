@@ -1160,7 +1160,7 @@ export function DailyEntryForm({
             {visibleCommissions.length === 0 && <p className="mobile-empty">No commission entries match this filter.</p>}
           </div>
           <div className="table-wrap hidden md:block">
-            <table>
+            <table className="table-compact w-full">
               <thead>
                 <tr>
                   <th className="w-16 text-center">#</th>
@@ -1301,7 +1301,7 @@ export function DailyEntryForm({
             {expenses.length === 0 && <p className="mobile-empty">No expense entries.</p>}
           </div>
           <div className="table-wrap hidden md:block">
-            <table>
+            <table className="table-compact w-full">
               <thead>
                 <tr>
                   <th>Category</th>
@@ -1422,7 +1422,7 @@ export function DailyEntryForm({
             {derivedOwnerBalances.length === 0 && <p className="mobile-empty">No owner entries.</p>}
           </div>
           <div className="table-wrap hidden md:block">
-            <table>
+            <table className="table-compact w-full">
               <thead>
                 <tr>
                   <th>Description</th>
@@ -1605,7 +1605,7 @@ export function DailyEntryForm({
             {derivedCredits.length === 0 && <p className="mobile-empty">No credit entries.</p>}
           </div>
           <div className="table-wrap hidden md:block">
-            <table>
+            <table className="table-compact w-full">
               <thead>
                 <tr>
                   <th>Party</th>

@@ -138,49 +138,49 @@ export function StockLiftingSummaryTable({
   return (
     <div className="space-y-4">
       <div className="table-wrap">
-        <table className="!text-xs w-full">
+        <table className="table-compact w-full">
           <thead>
             <tr className="border-b border-slate-800 text-slate-100 font-semibold text-center uppercase tracking-wider">
-              <th className="py-2.5 px-3 text-left">Date</th>
-              <th colSpan={activeProducts.length} className="py-2.5 px-3 text-slate-100">
+              <th className="py-1 px-2 text-left">Date</th>
+              <th colSpan={activeProducts.length} className="py-1 px-2 text-slate-100">
                 Monthly Stock Position & Value
               </th>
-              <th className="py-2.5 px-3 text-slate-100">Total</th>
+              <th className="py-1 px-2 text-slate-100 text-right">Total</th>
             </tr>
 
             <tr className="border-b border-slate-800 text-slate-200 font-mono text-center">
-              <th className="py-2 px-3 text-left font-sans text-[10px] uppercase font-bold text-slate-400">
+              <th className="py-1 px-2 text-left font-sans text-[10px] uppercase font-bold text-slate-400">
                 Unit Rate (Rs.)
               </th>
               {activeProducts.map((product) => (
-                <th key={product.id} className="py-2 px-3 font-bold text-emerald-400">
+                <th key={product.id} className="py-1 px-2 font-bold text-emerald-400 text-center">
                   {productRateById[product.id] ?? 0}
                 </th>
               ))}
-              <th className="py-2 px-3 font-bold text-slate-100">RATE</th>
+              <th className="py-1 px-2 font-bold text-slate-100 text-right">RATE</th>
             </tr>
 
             <tr className="border-b border-slate-800 text-slate-100 font-extrabold text-center">
-              <th className="py-2 px-3 text-left text-[10px] uppercase tracking-wider text-slate-400">
+              <th className="py-1 px-2 text-left text-[10px] uppercase tracking-wider text-slate-400">
                 Product Name
               </th>
               {activeProducts.map((product) => (
-                <th key={product.id} className="py-2 px-3 font-bold uppercase text-slate-100">
+                <th key={product.id} className="py-1 px-2 font-bold uppercase text-slate-100 text-center">
                   {product.name}
                 </th>
               ))}
-              <th className="py-2 px-3 font-bold uppercase text-slate-100">TOTAL QTY</th>
+              <th className="py-1 px-2 font-bold uppercase text-slate-100 text-right">TOTAL QTY</th>
             </tr>
           </thead>
 
           <tbody>
-            <tr className="border-b border-slate-800 font-bold">
-              <td className="py-5 px-3 text-left font-black tracking-wide text-slate-400">OPENING</td>
+            <tr className="border-b border-slate-800 font-bold bg-slate-900/40">
+              <td className="py-1.5 px-2 text-left font-black tracking-wide text-slate-400">OPENING</td>
               {activeProducts.map((product) => {
                 const isSkipped = skippedProductIds.has(product.id);
                 const value = productOpening[product.id];
                 return (
-                  <td key={product.id} className="py-5 px-3 text-center font-mono text-slate-100">
+                  <td key={product.id} className="py-1.5 px-2 text-center font-mono text-slate-100 whitespace-nowrap">
                     {isSkipped ? (
                       <span className="text-slate-500 italic font-normal">Skipped</span>
                     ) : value < 0 ? (
@@ -193,7 +193,7 @@ export function StockLiftingSummaryTable({
                   </td>
                 );
               })}
-              <td className="py-5 px-3 text-center font-mono font-black text-slate-100">
+              <td className="py-1.5 px-2 text-right font-mono font-black text-slate-100 whitespace-nowrap">
                 {grandOpening < 0 ? (
                   <span className="text-rose-400 font-bold">{formatMoney(grandOpening)}</span>
                 ) : grandOpening > 0 ? (
@@ -206,18 +206,18 @@ export function StockLiftingSummaryTable({
 
             {liftingRows.map((row) => {
               return (
-                <tr key={row.dayNo} className="border-b border-slate-800 transition-colors hover:bg-slate-900/40">
-                  <td className="py-4 px-3 text-left font-bold text-slate-400 w-24">{dayLabel(monthId, row.dayNo)}</td>
+                <tr key={row.dayNo} className="border-b border-slate-800/80 transition-colors hover:bg-slate-900/40">
+                  <td className="py-1 px-2 text-left font-bold text-slate-400 whitespace-nowrap">{dayLabel(monthId, row.dayNo)}</td>
                   {activeProducts.map((product) => {
                     const dayProductQty = row.productQuantities[product.id] ?? 0;
 
                     return (
-                      <td key={product.id} className={`py-4 px-3 text-center font-mono font-semibold ${dayProductQty > 0 ? "text-slate-100 font-bold" : "text-slate-600"}`}>
+                      <td key={product.id} className={`py-1 px-2 text-center font-mono font-semibold whitespace-nowrap ${dayProductQty > 0 ? "text-slate-100 font-bold" : "text-slate-600"}`}>
                         {dayProductQty > 0 ? formatMoney(dayProductQty) : "-"}
                       </td>
                     );
                   })}
-                  <td className="py-4 px-3 text-center font-mono font-bold text-slate-100">
+                  <td className="py-1 px-2 text-right font-mono font-bold text-slate-100 whitespace-nowrap">
                     {formatMoney(row.dayTotalQty)}
                   </td>
                 </tr>
@@ -260,11 +260,11 @@ function SummaryRow({
     prominent ? "bg-slate-900/90 font-extrabold" : ""
   ].filter(Boolean).join(" ");
   const cellClass = prominent
-    ? "py-3.5 px-3 text-center font-mono font-black text-[13px] bg-slate-900/60"
-    : "py-3 px-3 text-center font-mono font-black bg-slate-900/60";
+    ? "py-1.5 px-2 text-center font-mono font-black text-xs bg-slate-900/60 whitespace-nowrap"
+    : "py-1 px-2 text-center font-mono font-black text-xs bg-slate-900/60 whitespace-nowrap";
   const labelCellClass = prominent
-    ? "py-3.5 px-3 text-left uppercase tracking-wider font-black text-[13px] bg-slate-900/80 border-l-4 border-current"
-    : "py-3 px-3 text-left uppercase tracking-wider font-black bg-slate-900/80 border-l-4 border-current";
+    ? "py-1.5 px-2 text-left uppercase tracking-wider font-black text-xs bg-slate-900/80 border-l-4 border-current whitespace-nowrap"
+    : "py-1 px-2 text-left uppercase tracking-wider font-black text-xs bg-slate-900/80 border-l-4 border-current whitespace-nowrap";
 
   return (
     <tr className={rowClass}>
@@ -286,7 +286,7 @@ function SummaryRow({
           </td>
         );
       })}
-      <td className={`${cellClass} ${labelClassName}`}>
+      <td className={`${cellClass} ${labelClassName} text-right`}>
         {total < 0 ? (
           <span className="text-rose-400 font-bold">{formatMoney(total)}</span>
         ) : total > 0 ? (
@@ -398,60 +398,60 @@ export function StockIssuanceSummaryTable({
   return (
     <div className="space-y-4">
       <div className="table-wrap">
-        <table className="!text-xs">
+        <table className="table-compact w-full">
           <thead>
             <tr>
-              <th>Dealer / Account Name</th>
-              <th>Account Type</th>
-              <th>Opening Balance</th>
+              <th className="text-left">Dealer / Account Name</th>
+              <th className="text-left">Account Type</th>
+              <th className="text-right">Opening Balance</th>
               {activeProducts.map((product) => (
                 <th key={product.id} className="text-center font-mono">
                   {product.name}
                 </th>
               ))}
-              <th>Total Allotted Qty</th>
-              <th>Total Stock Amount</th>
-              <th>Payment Received</th>
-              <th>Closing Balance</th>
+              <th className="text-right">Total Allotted Qty</th>
+              <th className="text-right">Total Stock Amount</th>
+              <th className="text-right">Payment Received</th>
+              <th className="text-right">Closing Balance</th>
             </tr>
           </thead>
           <tbody>
             {visibleRows.map((row) => (
-                <tr key={row.account.id}>
-                  <td className="font-semibold text-slate-200">{row.account.name}</td>
-                  <td className="uppercase font-bold text-[10px] text-slate-400">{row.account.type}</td>
-                  <td className="font-mono">{formatMoney(row.opening)}</td>
+                <tr key={row.account.id} className="hover:bg-slate-800/40 transition-colors">
+                  <td className="font-semibold text-slate-200 whitespace-nowrap">{row.account.name}</td>
+                  <td className="uppercase font-bold text-[10px] text-slate-400 whitespace-nowrap">{row.account.type}</td>
+                  <td className="font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(row.opening)}</td>
                   {activeProducts.map((product) => {
                     const quantity = row.productQuantities[product.id] ?? 0;
                     return (
-                      <td key={product.id} className={`text-center font-mono font-semibold ${quantity !== 0 ? "text-indigo-400" : "text-slate-500"}`}>
+                      <td key={product.id} className={`text-center font-mono font-semibold whitespace-nowrap ${quantity !== 0 ? "text-indigo-400" : "text-slate-500"}`}>
                         {quantity !== 0 ? quantity : "-"}
                       </td>
                     );
                   })}
-                  <td className="font-semibold text-slate-300">{formatMoney(row.totalQty)}</td>
-                  <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
-                  <td className="text-emerald-400 font-semibold font-mono">{formatMoney(row.totalPayments)}</td>
-                  <td className="text-rose-400 font-bold font-mono">{formatMoney(row.closing)}</td>
+                  <td className="font-semibold text-slate-300 font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(row.totalQty)}</td>
+                  <td className="font-mono text-slate-300 text-right tabular-nums whitespace-nowrap">{formatMoney(row.totalAmount)}</td>
+                  <td className="text-emerald-400 font-semibold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(row.totalPayments)}</td>
+                  <td className="text-rose-400 font-bold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(row.closing)}</td>
                 </tr>
             ))}
             {visibleRows.length > 0 ? (
               <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-                <td className="text-slate-100">Total</td>
-                <td className="text-slate-500">-</td>
-                <td className="font-mono text-slate-100">{formatMoney(totals.opening)}</td>
+                <td className="text-slate-100 whitespace-nowrap">Total</td>
+                <td className="text-slate-500 whitespace-nowrap">-</td>
+                <td className="font-mono text-slate-100 text-right tabular-nums whitespace-nowrap">{formatMoney(totals.opening)}</td>
                 {activeProducts.map((product) => {
                   const quantity = totals.productQuantities[product.id] ?? 0;
                   return (
-                    <td key={product.id} className="text-center font-mono text-slate-100">
+                    <td key={product.id} className="text-center font-mono text-slate-100 whitespace-nowrap">
                       {quantity !== 0 ? formatMoney(quantity) : "-"}
                     </td>
                   );
                 })}
-                <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
-                <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
-                <td className="text-emerald-400 font-semibold font-mono">{formatMoney(totals.totalPayments)}</td>
-                <td className="text-rose-400 font-bold font-mono">{formatMoney(totals.closing)}</td>
+                <td className="text-slate-100 font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(totals.totalQty)}</td>
+                <td className="font-mono text-slate-100 text-right tabular-nums whitespace-nowrap">{formatMoney(totals.totalAmount)}</td>
+                <td className="text-emerald-400 font-semibold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(totals.totalPayments)}</td>
+                <td className="text-rose-400 font-bold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(totals.closing)}</td>
               </tr>
             ) : (
               <tr>
@@ -543,31 +543,31 @@ export function ProductStockFlowTable({
 
   return (
     <div className="table-wrap">
-      <table>
+      <table className="table-compact w-full">
         <thead>
           <tr>
-            <th>Product</th>
-            <th>Opening Stock</th>
-            <th>Stock Received</th>
-            <th>Stock Allotted</th>
-            <th>Closing Stock</th>
-            <th>Rate Snapshot</th>
-            <th>Inventory Value</th>
-            <th>Status</th>
+            <th className="text-left">Product</th>
+            <th className="text-right">Opening Stock</th>
+            <th className="text-right">Stock Received</th>
+            <th className="text-right">Stock Allotted</th>
+            <th className="text-right">Closing Stock</th>
+            <th className="text-right">Rate Snapshot</th>
+            <th className="text-right">Inventory Value</th>
+            <th className="text-center">Status</th>
           </tr>
         </thead>
         <tbody>
           {rowsData.map(({ product, isSkipped, todayOpening, stockInPeriod, stockOutPeriod, closingPeriod, value, isLow }) => (
-            <tr key={product.id}>
-              <td className="font-semibold text-slate-200">{product.name}</td>
-              <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(todayOpening ?? 0)}</td>
-              <td className="text-indigo-400">{isSkipped ? "—" : `+${formatMoney(stockInPeriod)}`}</td>
-              <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(stockOutPeriod)}`}</td>
-              <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(closingPeriod ?? 0)}</td>
-              <td>{formatMoney(product.rate)}</td>
-              <td className="font-mono text-emerald-400">{isSkipped ? "—" : formatMoney(value)}</td>
-              <td>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${
+            <tr key={product.id} className="hover:bg-slate-800/40 transition-colors">
+              <td className="font-semibold text-slate-200 whitespace-nowrap">{product.name}</td>
+              <td className="font-mono text-right tabular-nums whitespace-nowrap">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(todayOpening ?? 0)}</td>
+              <td className="text-indigo-400 font-mono text-right tabular-nums whitespace-nowrap">{isSkipped ? "—" : `+${formatMoney(stockInPeriod)}`}</td>
+              <td className="text-rose-400 font-mono text-right tabular-nums whitespace-nowrap">{isSkipped ? "—" : `-${formatMoney(stockOutPeriod)}`}</td>
+              <td className="font-bold text-slate-100 font-mono text-right tabular-nums whitespace-nowrap">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(closingPeriod ?? 0)}</td>
+              <td className="font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(product.rate)}</td>
+              <td className="font-mono text-emerald-400 text-right tabular-nums whitespace-nowrap">{isSkipped ? "—" : formatMoney(value)}</td>
+              <td className="text-center whitespace-nowrap">
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase inline-flex items-center justify-center gap-1 ${
                   isSkipped
                     ? "bg-slate-800 text-slate-400 border border-slate-700"
                     : isLow
@@ -591,14 +591,14 @@ export function ProductStockFlowTable({
         {filteredProducts.length > 0 && (
           <tfoot>
             <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
-              <td className="py-2.5 font-bold">Total</td>
-              <td className="py-2.5 font-mono">{formatMoney(totalOpening)}</td>
-              <td className="py-2.5 font-mono text-indigo-400">+{formatMoney(totalStockIn)}</td>
-              <td className="py-2.5 font-mono text-rose-400">-{formatMoney(totalStockOut)}</td>
-              <td className="py-2.5 font-mono font-bold text-slate-100">{formatMoney(totalClosing)}</td>
-              <td className="py-2.5 text-slate-400">—</td>
-              <td className="py-2.5 font-mono text-emerald-400">{formatMoney(totalValue)}</td>
-              <td className="py-2.5 text-slate-400">—</td>
+              <td className="py-1.5 font-bold whitespace-nowrap">Total</td>
+              <td className="py-1.5 font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(totalOpening)}</td>
+              <td className="py-1.5 font-mono text-indigo-400 text-right tabular-nums whitespace-nowrap">+{formatMoney(totalStockIn)}</td>
+              <td className="py-1.5 font-mono text-rose-400 text-right tabular-nums whitespace-nowrap">-{formatMoney(totalStockOut)}</td>
+              <td className="py-1.5 font-mono font-bold text-slate-100 text-right tabular-nums whitespace-nowrap">{formatMoney(totalClosing)}</td>
+              <td className="py-1.5 text-slate-400 text-right whitespace-nowrap">—</td>
+              <td className="py-1.5 font-mono text-emerald-400 text-right tabular-nums whitespace-nowrap">{formatMoney(totalValue)}</td>
+              <td className="py-1.5 text-slate-400 text-center whitespace-nowrap">—</td>
             </tr>
           </tfoot>
         )}
@@ -624,39 +624,41 @@ export function CashCreditStockInTable({
 
   return (
     <div className="table-wrap">
-      <table>
+      <table className="table-compact w-full">
         <thead>
           <tr>
-            <th>Payment Mode</th>
-            <th>Shipment Count</th>
-            <th>Total Value received (Rs.)</th>
-            <th>Paid Amount (Rs.)</th>
-            <th>outstanding payable (Rs.)</th>
+            <th className="text-left">Payment Mode</th>
+            <th className="text-right">Shipment Count</th>
+            <th className="text-right">Total Value received (Rs.)</th>
+            <th className="text-right">Paid Amount (Rs.)</th>
+            <th className="text-right">outstanding payable (Rs.)</th>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td className="font-bold text-emerald-400">Cash Mode</td>
-            <td>{cashRecords.length}</td>
-            <td>{formatMoney(cashTotalAmount)}</td>
-            <td className="text-emerald-400 font-semibold">{formatMoney(cashTotalAmount)}</td>
-            <td>Rs. 0.00</td>
+          <tr className="hover:bg-slate-800/40 transition-colors">
+            <td className="font-bold text-emerald-400 whitespace-nowrap">Cash Mode</td>
+            <td className="font-mono text-right tabular-nums whitespace-nowrap">{cashRecords.length}</td>
+            <td className="font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(cashTotalAmount)}</td>
+            <td className="text-emerald-400 font-semibold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(cashTotalAmount)}</td>
+            <td className="font-mono text-right tabular-nums whitespace-nowrap">Rs. 0.00</td>
           </tr>
-          <tr>
-            <td className="font-bold text-indigo-400">Credit Mode</td>
-            <td>{creditRecords.length}</td>
-            <td>{formatMoney(creditTotalAmount)}</td>
-            <td className="text-blue-400 font-semibold">{formatMoney(creditPaidAmount)}</td>
-            <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
-          </tr>
-          <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-            <td className="text-slate-100">Total</td>
-            <td>{cashRecords.length + creditRecords.length}</td>
-            <td>{formatMoney(cashTotalAmount + creditTotalAmount)}</td>
-            <td className="text-blue-400 font-semibold">{formatMoney(cashTotalAmount + creditPaidAmount)}</td>
-            <td className="text-rose-400 font-bold">{formatMoney(creditPayable)}</td>
+          <tr className="hover:bg-slate-800/40 transition-colors">
+            <td className="font-bold text-indigo-400 whitespace-nowrap">Credit Mode</td>
+            <td className="font-mono text-right tabular-nums whitespace-nowrap">{creditRecords.length}</td>
+            <td className="font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(creditTotalAmount)}</td>
+            <td className="text-blue-400 font-semibold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(creditPaidAmount)}</td>
+            <td className="text-rose-400 font-bold font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(creditPayable)}</td>
           </tr>
         </tbody>
+        <tfoot>
+          <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
+            <td className="py-1.5 font-bold whitespace-nowrap">Total</td>
+            <td className="py-1.5 font-mono text-right tabular-nums whitespace-nowrap">{stockInRecords.length}</td>
+            <td className="py-1.5 font-mono text-right tabular-nums whitespace-nowrap">{formatMoney(cashTotalAmount + creditTotalAmount)}</td>
+            <td className="py-1.5 font-mono text-emerald-400 text-right tabular-nums whitespace-nowrap">{formatMoney(cashTotalAmount + creditPaidAmount)}</td>
+            <td className="py-1.5 font-mono text-rose-400 text-right tabular-nums whitespace-nowrap">{formatMoney(creditPayable)}</td>
+          </tr>
+        </tfoot>
       </table>
     </div>
   );

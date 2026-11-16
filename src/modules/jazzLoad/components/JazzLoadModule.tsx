@@ -2998,9 +2998,110 @@ export function JazzLoadModule({
             const totalDoClosing = doBalanceRows.reduce((acc, r) => acc + (r.closingMl || 0), 0);
             const totalComm1 = localSummary.dayRows.reduce((acc, r) => acc + (r.commission1 || 0), 0);
             const totalComm2 = localSummary.dayRows.reduce((acc, r) => acc + (r.commission2 || 0), 0);
+            const startingInHand = days.find((d) => d.dayNo === 1)?.lifting.openingBalance ?? days[0]?.lifting.openingBalance ?? 0;
+            const theoreticalClosingInHand = startingInHand + localSummary.totalLifting - localSummary.totalIssuanceMl;
+            const actualClosingInHand = localSummary.latestInHandBalance;
+            const loadVariance = actualClosingInHand - theoreticalClosingInHand;
+            const effectiveMarginRate = localSummary.totalIssuanceMl > 0
+              ? ((localSummary.totalCommission / localSummary.totalIssuanceMl) * 100).toFixed(2)
+              : "0.00";
+            const overallDoReceivable = totalDoOpening + totalDoIssuance;
+            const overallRecoveryRate = overallDoReceivable > 0
+              ? ((totalDoPayments / overallDoReceivable) * 100).toFixed(1)
+              : "100.0";
 
             return (
               <>
+                {/* Critical Accounting Reconciliations */}
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-sm">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                      <div>
+                        <h4 className="font-semibold text-white">Load Inventory Reconciliation</h4>
+                        <p className="text-xs text-slate-400">Opening + Lifting - Issuance = In-Hand Balance</p>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase ${
+                        Math.abs(loadVariance) < 0.01
+                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                          : loadVariance < 0
+                            ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                            : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                      }`}>
+                        {Math.abs(loadVariance) < 0.01 ? "Audited (Balanced)" : loadVariance < 0 ? "Load Shortage" : "Surplus"}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">Starting Load (Day 1)</span>
+                        <span className="font-mono font-bold text-white text-sm">{formatCurrency(startingInHand)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-indigo-400 block font-medium">(+) Bank Lifting</span>
+                        <span className="font-mono font-bold text-indigo-300 text-sm">{formatCurrency(localSummary.totalLifting)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-rose-400 block font-medium">(-) DO Issuance (ML)</span>
+                        <span className="font-mono font-bold text-rose-300 text-sm">{formatCurrency(localSummary.totalIssuanceMl)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">(=) Theoretical In-Hand</span>
+                        <span className="font-mono font-bold text-slate-200 text-sm">{formatCurrency(theoreticalClosingInHand)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-emerald-400 block font-medium">Actual Closing In-Hand</span>
+                        <span className="font-mono font-bold text-emerald-300 text-sm">{formatCurrency(actualClosingInHand)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">Audit Variance</span>
+                        <span className={`font-mono font-bold text-sm ${Math.abs(loadVariance) < 0.01 ? "text-emerald-400" : "text-rose-400"}`}>
+                          {formatCurrency(loadVariance)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-sm">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                      <div>
+                        <h4 className="font-semibold text-white">Commission Settlement Breakdown</h4>
+                        <p className="text-xs text-slate-400">Front-End Realized vs Month-End Receivable</p>
+                      </div>
+                      <span className="px-2 py-0.5 rounded text-[11px] font-bold uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        Margin: {effectiveMarginRate}%
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-emerald-400 block font-medium">Comm 1 (Instant Margin)</span>
+                        <span className="font-mono font-bold text-emerald-300 text-sm">{formatCurrency(totalComm1)}</span>
+                        <span className="text-[10px] text-slate-500 block">Deducted at bank lifting</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-sky-400 block font-medium">Comm 2 (Jazz Backend)</span>
+                        <span className="font-mono font-bold text-sky-300 text-sm">{formatCurrency(totalComm2)}</span>
+                        <span className="text-[10px] text-slate-500 block">Accrued month-end payout</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-amber-400 block font-medium">Total Commission</span>
+                        <span className="font-mono font-bold text-amber-300 text-sm">{formatCurrency(localSummary.totalCommission)}</span>
+                        <span className="text-[10px] text-slate-500 block">Combined profit margin</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">Gross Issuance Turnover</span>
+                        <span className="font-mono font-bold text-slate-200 text-sm">{formatCurrency(localSummary.totalIssuanceMl)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">Total DO Payments</span>
+                        <span className="font-mono font-bold text-slate-200 text-sm">{formatCurrency(totalDoPayments)}</span>
+                      </div>
+                      <div className="rounded-lg bg-slate-950/50 p-2.5 border border-slate-800/80">
+                        <span className="text-slate-400 block font-medium">Overall DO Recovery</span>
+                        <span className="font-mono font-bold text-emerald-400 text-sm">{overallRecoveryRate}%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                   <ReportTable
                     title="Highest Outstanding DOs"
@@ -3017,9 +3118,21 @@ export function JazzLoadModule({
 
                 <ReportTable
                   title="DO Balance Report"
-                  headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load"]}
-                  rows={doBalanceRows.map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.openingBase), formatCurrency(row.issuanceBase), formatCurrency(row.paymentBase), formatCurrency(row.closingMl)])}
-                  totals={["Total", "-", formatCurrency(totalDoOpening), formatCurrency(totalDoIssuance), formatCurrency(totalDoPayments), formatCurrency(totalDoClosing)]}
+                  headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load", "Recovery %"]}
+                  rows={doBalanceRows.map((row) => {
+                    const receivable = (row.openingBase || 0) + (row.issuanceBase || 0);
+                    const recPct = receivable > 0 ? `${((row.paymentBase / receivable) * 100).toFixed(1)}%` : "100.0%";
+                    return [
+                      row.doName,
+                      row.doLine ?? "-",
+                      formatCurrency(row.openingBase),
+                      formatCurrency(row.issuanceBase),
+                      formatCurrency(row.paymentBase),
+                      formatCurrency(row.closingMl),
+                      recPct
+                    ];
+                  })}
+                  totals={["Total", "-", formatCurrency(totalDoOpening), formatCurrency(totalDoIssuance), formatCurrency(totalDoPayments), formatCurrency(totalDoClosing), `${overallRecoveryRate}%`]}
                 />
                 <ReportTable
                   title="Jazz Load Issuance Report"
@@ -3436,22 +3549,50 @@ function ReportTable({
 }) {
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>{title}</h3><p>{rows.length} rows</p></div></div>
+      <div className="panel-title"><div><h3>{title}</h3><p className="text-xs text-slate-400">{rows.length} rows</p></div></div>
       <div className="table-wrap">
-        <table className="w-full">
-          <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm"><tr>{headers.map((header) => <th key={header} className="sticky top-0 bg-slate-900/95">{header}</th>)}</tr></thead>
+        <table className="table-compact w-full">
+          <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
+            <tr>
+              {headers.map((header, idx) => (
+                <th key={header} className={`sticky top-0 bg-slate-900/95 ${idx > 0 && idx !== 1 ? "text-right" : "text-left"}`}>
+                  {header}
+                </th>
+              ))}
+            </tr>
+          </thead>
           <tbody>
-            {rows.map((row, index) => <tr key={`${title}-${index}`}>{row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`} className="font-bold text-white">{cell}</td>)}</tr>)}
-            {rows.length === 0 && <tr><td colSpan={headers.length}>No Jazz Load rows yet.</td></tr>}
+            {rows.map((row, index) => (
+              <tr key={`${title}-${index}`} className="hover:bg-slate-800/40 transition-colors">
+                {row.map((cell, cellIndex) => {
+                  const isNumeric = cellIndex > 0 && cellIndex !== 1;
+                  return (
+                    <td
+                      key={`${title}-${index}-${cellIndex}`}
+                      className={`${isNumeric ? "text-right font-mono tabular-nums font-semibold" : "text-left font-bold"} text-white whitespace-nowrap`}
+                    >
+                      {cell}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={headers.length} className="text-center py-6 text-slate-500">No Jazz Load rows yet.</td></tr>}
           </tbody>
           {totals && totals.length > 0 && rows.length > 0 && (
             <tfoot>
               <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
-                {totals.map((cell, cellIndex) => (
-                  <td key={`${title}-total-${cellIndex}`} className="py-2.5 font-bold text-emerald-300">
-                    {cell}
-                  </td>
-                ))}
+                {totals.map((cell, cellIndex) => {
+                  const isNumeric = cellIndex > 0 && cellIndex !== 1;
+                  return (
+                    <td
+                      key={`${title}-total-${cellIndex}`}
+                      className={`py-1.5 font-bold text-emerald-300 ${isNumeric ? "text-right font-mono tabular-nums" : "text-left"} whitespace-nowrap`}
+                    >
+                      {cell}
+                    </td>
+                  );
+                })}
               </tr>
             </tfoot>
           )}

@@ -932,26 +932,26 @@ export function HomeDashboard({ month, monthId }: Props) {
                 <h3 className="text-lg font-semibold text-white">DO Balances & Activity</h3>
                 <p className="text-sm text-slate-400 mb-4">Outstanding balances for load operators</p>
                 <div className="table-wrap">
-                  <table>
+                  <table className="table-compact w-full">
                     <thead>
                       <tr>
-                        <th>DO Operator</th>
-                        <th>Opening</th>
-                        <th>Issuance</th>
-                        <th>Payments</th>
-                        <th>Closing Outstanding</th>
+                        <th className="text-left">DO Operator</th>
+                        <th className="text-right">Opening</th>
+                        <th className="text-right">Issuance</th>
+                        <th className="text-right">Payments</th>
+                        <th className="text-right">Closing Outstanding</th>
                       </tr>
                     </thead>
                     <tbody>
                       {jazzLoadSummary.doBalances.map((doRow) => (
-                        <tr key={doRow.doName} className="hover:bg-slate-800/40">
-                          <td className="font-semibold text-white">
+                        <tr key={doRow.doName} className="hover:bg-slate-800/40 transition-colors">
+                          <td className="font-semibold text-white whitespace-nowrap">
                             {doRow.doName} <span className="text-xs text-slate-500 font-normal">{doRow.doLine ? `(${doRow.doLine})` : ""}</span>
                           </td>
-                          <td>{money(doRow.openingBase)}</td>
-                          <td className="text-cyan-300 font-medium">{money(doRow.issuanceBase)}</td>
-                          <td className="text-emerald-300 font-medium">{money(doRow.paymentBase)}</td>
-                          <td className={`font-semibold ${doRow.closingBase > 0 ? "text-amber-400" : "text-slate-400"}`}>
+                          <td className="font-mono text-right tabular-nums whitespace-nowrap text-slate-300">{money(doRow.openingBase)}</td>
+                          <td className="font-mono text-right tabular-nums whitespace-nowrap text-cyan-300 font-medium">{money(doRow.issuanceBase)}</td>
+                          <td className="font-mono text-right tabular-nums whitespace-nowrap text-emerald-300 font-medium">{money(doRow.paymentBase)}</td>
+                          <td className={`font-mono text-right tabular-nums whitespace-nowrap font-semibold ${doRow.closingBase > 0 ? "text-amber-400" : "text-slate-400"}`}>
                             {money(doRow.closingBase)}
                           </td>
                         </tr>
@@ -960,17 +960,17 @@ export function HomeDashboard({ month, monthId }: Props) {
                     {jazzLoadSummary.doBalances.length > 0 && (
                       <tfoot>
                         <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
-                          <td className="py-2.5 font-bold">Total</td>
-                          <td className="py-2.5 font-mono">
+                          <td className="py-1.5 font-bold whitespace-nowrap">Total</td>
+                          <td className="py-1.5 font-mono text-right tabular-nums whitespace-nowrap">
                             {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.openingBase || 0), 0))}
                           </td>
-                          <td className="py-2.5 font-mono text-cyan-300">
+                          <td className="py-1.5 font-mono text-cyan-300 text-right tabular-nums whitespace-nowrap">
                             {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.issuanceBase || 0), 0))}
                           </td>
-                          <td className="py-2.5 font-mono text-emerald-300">
+                          <td className="py-1.5 font-mono text-emerald-300 text-right tabular-nums whitespace-nowrap">
                             {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.paymentBase || 0), 0))}
                           </td>
-                          <td className="py-2.5 font-mono text-amber-400">
+                          <td className="py-1.5 font-mono text-amber-400 font-bold text-right tabular-nums whitespace-nowrap">
                             {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.closingBase || 0), 0))}
                           </td>
                         </tr>
@@ -1108,26 +1108,26 @@ export function HomeDashboard({ month, monthId }: Props) {
                   <h3 className="text-lg font-semibold text-white">Top Customer Accounts</h3>
                   <p className="text-sm text-slate-400 mb-4">Active retailers & DSOs outstanding due balances</p>
                   <div className="table-wrap">
-                    <table>
+                    <table className="table-compact w-full">
                       <thead>
                         <tr>
-                          <th>Account Name</th>
-                          <th>Type</th>
-                          <th>Qty Sold</th>
-                          <th>Due Balance</th>
+                          <th className="text-left">Account Name</th>
+                          <th className="text-left">Type</th>
+                          <th className="text-right">Qty Sold</th>
+                          <th className="text-right">Due Balance</th>
                         </tr>
                       </thead>
                       <tbody>
                         {stockSummary.accountTotals.slice(0, 6).map((acc) => (
-                          <tr key={acc.accountId} className="hover:bg-slate-800/40">
-                            <td className="font-semibold text-white">{acc.accountName}</td>
-                            <td>
+                          <tr key={acc.accountId} className="hover:bg-slate-800/40 transition-colors">
+                            <td className="font-semibold text-white whitespace-nowrap">{acc.accountName}</td>
+                            <td className="whitespace-nowrap">
                               <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300 uppercase">
                                 {acc.accountType}
                               </span>
                             </td>
-                            <td>{acc.totalQty.toLocaleString()} units</td>
-                            <td className={`font-semibold ${acc.dueBalance > 0 ? "text-rose-400" : "text-slate-400"}`}>
+                            <td className="font-mono text-right tabular-nums whitespace-nowrap text-slate-200">{acc.totalQty.toLocaleString()} units</td>
+                            <td className={`font-mono text-right tabular-nums whitespace-nowrap font-semibold ${acc.dueBalance > 0 ? "text-rose-400" : "text-slate-400"}`}>
                               {money(acc.dueBalance)}
                             </td>
                           </tr>
@@ -1136,12 +1136,12 @@ export function HomeDashboard({ month, monthId }: Props) {
                       {stockSummary.accountTotals.length > 0 && (
                         <tfoot>
                           <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
-                            <td className="py-2.5 font-bold">Total (Top Accounts)</td>
-                            <td className="py-2.5">-</td>
-                            <td className="py-2.5 font-mono text-slate-200">
+                            <td className="py-1.5 font-bold whitespace-nowrap">Total (Top Accounts)</td>
+                            <td className="py-1.5 whitespace-nowrap">-</td>
+                            <td className="py-1.5 font-mono text-slate-200 text-right tabular-nums whitespace-nowrap">
                               {stockSummary.accountTotals.slice(0, 6).reduce((acc, r) => acc + (r.totalQty || 0), 0).toLocaleString()} units
                             </td>
-                            <td className="py-2.5 font-mono text-rose-400">
+                            <td className="py-1.5 font-mono text-rose-400 text-right tabular-nums whitespace-nowrap">
                               {money(stockSummary.accountTotals.slice(0, 6).reduce((acc, r) => acc + (r.dueBalance || 0), 0))}
                             </td>
                           </tr>

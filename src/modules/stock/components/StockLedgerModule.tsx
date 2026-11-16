@@ -493,7 +493,7 @@ function SettingsTable({
         </div>
       )}
       <div className="table-wrap">
-        <table>
+        <table className="table-compact w-full">
           <thead>
             <tr>
               {canEdit && <th>Move</th>}
@@ -3403,7 +3403,7 @@ export function StockLedgerModule({
                   ))}
                 </div>
                 <div className="table-wrap mt-3">
-                  <table className="!text-xs">
+                  <table className="table-compact w-full">
                     <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                       <tr>
                         <th className="sticky top-0 left-0 z-30 bg-slate-900 border-r border-slate-800">Date</th>
@@ -4371,7 +4371,7 @@ function SummaryTable({ title, headers, rows }: { title: string; headers: string
     <section className="panel">
       <div className="panel-title"><div><h2>{title}</h2><p>Stock Ledger report only.</p></div></div>
       <div className="table-wrap">
-        <table>
+        <table className="table-compact w-full">
           <thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
           <tbody>{rows.length > 0 ? rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex} className="font-bold text-white">{cell}</td>)}</tr>) : <tr><td colSpan={headers.length} className="font-bold text-white">No stock data yet.</td></tr>}</tbody>
         </table>
