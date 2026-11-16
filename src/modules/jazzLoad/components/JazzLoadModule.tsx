@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { BarChart3, BookOpen, CalendarDays, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, RefreshCw, Save, Settings, Trash2, X } from "lucide-react";
+import { BarChart3, BookOpen, CalendarDays, ChevronDown, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Percent, Plus, Printer, RefreshCw, Save, Settings, Trash2, UserCheck, X } from "lucide-react";
 import { Alert, SaveControlBar, StatusBadge } from "../../../shared/components";
 import type { LedgerUser, UserRole } from "../../../types/ledger";
 import type { SyncState } from "../../../lib/syncStatus";
@@ -463,6 +463,20 @@ export function JazzLoadModule({
   const [rateType, setRateType] = useState<JazzLoadRateType>("ml_addition");
   const [ratePercentage, setRatePercentage] = useState(0);
   const [editingRateId, setEditingRateId] = useState<string | null>(null);
+
+  // Unified Phase 1 Settings State
+  const [rawRateSchedules, setRawRateSchedules] = useState<any[]>([]);
+  const [scheduleName, setScheduleName] = useState("");
+  const [scheduleMlRate, setScheduleMlRate] = useState<number | string>(2.4);
+  const [scheduleComm1Rate, setScheduleComm1Rate] = useState<number | string>(2.4);
+  const [scheduleComm2Rate, setScheduleComm2Rate] = useState<number | string>(1.16);
+  const [scheduleEffectiveFrom, setScheduleEffectiveFrom] = useState(`${monthId}-01`);
+  const [newDoName, setNewDoName] = useState("");
+  const [newDoLine, setNewDoLine] = useState("");
+  const [editingDoId, setEditingDoId] = useState<string | null>(null);
+  const [editingDoName, setEditingDoName] = useState("");
+  const [editingDoLine, setEditingDoLine] = useState("");
+
   const [profileName, setProfileName] = useState("");
   const [profileLine, setProfileLine] = useState("");
   const [doNameDraft, setDoNameDraft] = useState("");
@@ -800,14 +814,25 @@ export function JazzLoadModule({
       });
 
       void ledgerApiClient.catalogs.getJazzLoadRates().then((res) => {
+        const rows = res.data || [];
+        setRawRateSchedules(rows);
         const mappedRates: JazzLoadRateConfig[] = [];
-        for (const row of res.data || []) {
+        for (const row of rows) {
           mappedRates.push({ id: row.id + '_ml', type: 'ml_addition', percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + ' ML', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
           mappedRates.push({ id: row.id + '_c1', type: 'commission1_adjustment', percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + ' Comm1', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
           mappedRates.push({ id: row.id + '_c2', type: 'commission2_payment', percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + ' Comm2', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
         }
         setRates(mappedRates);
         markJazzSettingInitialized("rates");
+
+        const activeRow = rows.find((r: any) => r.is_active) ?? rows[0];
+        if (activeRow) {
+          setScheduleName(activeRow.name ?? `Standard Rates - ${monthId}`);
+          setScheduleMlRate(Number(activeRow.ml_rate ?? 2.4));
+          setScheduleComm1Rate(Number(activeRow.comm1_rate ?? 2.4));
+          setScheduleComm2Rate(Number(activeRow.comm2_rate ?? 1.16));
+          setScheduleEffectiveFrom(activeRow.effective_from ?? `${monthId}-01`);
+        }
       }).catch(() => {
         markJazzSettingInitialized("rates");
       });
@@ -2371,6 +2396,254 @@ export function JazzLoadModule({
     pushPopup("success", "DO line order updated locally.");
   }
 
+  // Unified Phase 1 Settings Handlers
+  const sortedProfiles = useMemo(() => {
+    return [...doProfiles].sort((a, b) => {
+      const orderA = a.sortOrder ?? Number.POSITIVE_INFINITY;
+      const orderB = b.sortOrder ?? Number.POSITIVE_INFINITY;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.name.localeCompare(b.name, undefined, { numeric: true });
+    });
+  }, [doProfiles]);
+
+  const activeRateSchedule = useMemo(() => {
+    return rawRateSchedules.find((r) => r.is_active) ?? rawRateSchedules[0] ?? {
+      name: "Standard Rates",
+      ml_rate: 2.4,
+      comm1_rate: 2.4,
+      comm2_rate: 1.16,
+      effective_from: `${monthId}-01`,
+      is_active: true
+    };
+  }, [rawRateSchedules, monthId]);
+
+  async function handleSaveRateSchedule() {
+    if (!canManageSettings) return;
+    const name = scheduleName.trim() || `Standard Rates - ${monthId}`;
+    const effectiveFrom = scheduleEffectiveFrom || `${monthId}-01`;
+    const ml = Number(scheduleMlRate);
+    const c1 = Number(scheduleComm1Rate);
+    const c2 = Number(scheduleComm2Rate);
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.createJazzLoadRate({
+          name,
+          ml_rate: ml,
+          comm1_rate: c1,
+          comm2_rate: c2,
+          effective_from: effectiveFrom,
+          is_active: true
+        });
+
+        const res = await ledgerApiClient.catalogs.getJazzLoadRates();
+        const rows = res.data || [];
+        setRawRateSchedules(rows);
+        const mappedRates: JazzLoadRateConfig[] = [];
+        for (const row of rows) {
+          mappedRates.push({ id: row.id + '_ml', type: 'ml_addition', percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + ' ML', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+          mappedRates.push({ id: row.id + '_c1', type: 'commission1_adjustment', percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + ' Comm1', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+          mappedRates.push({ id: row.id + '_c2', type: 'commission2_payment', percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + ' Comm2', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+        }
+        setRates(mappedRates);
+        pushPopup("success", `Active rate schedule updated (ML: ${ml}%, Comm 1: ${c1}%, Comm 2: ${c2}%).`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to save rate schedule.");
+      }
+      return;
+    }
+
+    onQueueWrite(
+      Promise.all([
+        upsertJazzLoadRate({ id: slug(`${name}-ml`), name: `${name} ML`, type: "ml_addition", percentage: ml, active: true, sortOrder: 1 }, user, role),
+        upsertJazzLoadRate({ id: slug(`${name}-c1`), name: `${name} Comm1`, type: "commission1_adjustment", percentage: c1, active: true, sortOrder: 2 }, user, role),
+        upsertJazzLoadRate({ id: slug(`${name}-c2`), name: `${name} Comm2`, type: "commission2_payment", percentage: c2, active: true, sortOrder: 3 }, user, role)
+      ]),
+      "Could not queue rate schedule."
+    );
+    pushPopup("success", `Rate schedule ${name} saved.`);
+  }
+
+  async function handleAddDo() {
+    if (!canManageSettings || !newDoName.trim()) return;
+    const name = newDoName.trim();
+    const line = newDoLine.trim() || undefined;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        const nextOrder = doProfiles.length + 1;
+        const res = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
+          do_name: name,
+          do_line: line,
+          sort_order: nextOrder,
+          is_active: true
+        });
+        const p = res.data;
+        const created: JazzLoadDoProfile = {
+          id: p.id,
+          name: p.do_name,
+          line: p.do_line,
+          active: p.is_active,
+          sortOrder: p.sort_order,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        };
+        setDoProfiles((prev) => [...prev, created]);
+        setDoLines((prev) => [...prev, { id: p.id, line: p.do_line || p.do_name, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+        setDoNames((prev) => [...prev, { id: p.id, name: p.do_name, active: p.is_active, sortOrder: p.sort_order, createdAt: Date.now(), updatedAt: Date.now() }]);
+        setNewDoName("");
+        setNewDoLine("");
+        pushPopup("success", `DO ${name} added to directory.`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to add DO.");
+      }
+      return;
+    }
+
+    const id = slug(`${name}-${line ?? "line"}`);
+    onQueueWrite(
+      upsertJazzLoadDoProfile({ id, name, line, active: true }, user, role),
+      "Could not queue DO profile."
+    );
+    setNewDoName("");
+    setNewDoLine("");
+    pushPopup("success", `DO ${name} added locally.`);
+  }
+
+  async function handleSaveEditDo(profileId: string) {
+    if (!canManageSettings || !editingDoName.trim()) return;
+    const name = editingDoName.trim();
+    const line = editingDoLine.trim() || undefined;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateJazzLoadDoProfile(profileId, {
+          do_name: name,
+          do_line: line ?? null
+        });
+        setDoProfiles((prev) => prev.map((p) => p.id === profileId ? { ...p, name, line } : p));
+        setDoLines((prev) => prev.map((l) => l.id === profileId ? { ...l, line: line || name } : l));
+        setDoNames((prev) => prev.map((n) => n.id === profileId ? { ...n, name } : n));
+        setEditingDoId(null);
+        pushPopup("success", `DO profile updated to ${name}.`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to update DO.");
+      }
+      return;
+    }
+
+    setDoProfiles((prev) => prev.map((p) => p.id === profileId ? { ...p, name, line } : p));
+    setEditingDoId(null);
+    pushPopup("success", "DO updated locally.");
+  }
+
+  async function handleReassignLine(profile: JazzLoadDoProfile) {
+    if (!canManageSettings) return;
+    const lineLabel = profile.line ? `Line ${profile.line}` : profile.name;
+    const newOfficer = window.prompt(`Reassign ${lineLabel} to New Officer Name:`, "")?.trim();
+    if (!newOfficer || newOfficer === profile.name) return;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateJazzLoadDoProfile(profile.id, {
+          do_name: newOfficer
+        });
+        setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, name: newOfficer } : p));
+        setDoNames((prev) => prev.map((n) => n.id === profile.id ? { ...n, name: newOfficer } : n));
+        pushPopup("success", `${lineLabel} reassigned to ${newOfficer}. Previous closed days remain frozen in saved snapshots.`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to reassign line.");
+      }
+      return;
+    }
+
+    setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, name: newOfficer } : p));
+    pushPopup("success", `${lineLabel} reassigned to ${newOfficer}.`);
+  }
+
+  async function handleToggleDoActive(profile: JazzLoadDoProfile) {
+    if (!canManageSettings) return;
+    const nextActive = !profile.active;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateJazzLoadDoProfile(profile.id, {
+          is_active: nextActive
+        });
+        setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, active: nextActive } : p));
+        setDoLines((prev) => prev.map((l) => l.id === profile.id ? { ...l, active: nextActive } : l));
+        setDoNames((prev) => prev.map((n) => n.id === profile.id ? { ...n, active: nextActive } : n));
+        pushPopup("success", `DO ${profile.name} ${nextActive ? "activated" : "deactivated"}.`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to toggle DO.");
+      }
+      return;
+    }
+
+    setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, active: nextActive } : p));
+  }
+
+  async function handleDeleteDo(profile: JazzLoadDoProfile) {
+    if (!canManageSettings) return;
+    if (!window.confirm(`Deactivate DO "${profile.name}" (${profile.line ?? "no line"})?`)) return;
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await ledgerApiClient.catalogs.updateJazzLoadDoProfile(profile.id, {
+          is_active: false
+        });
+        setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, active: false } : p));
+        setDoLines((prev) => prev.map((l) => l.id === profile.id ? { ...l, active: false } : l));
+        setDoNames((prev) => prev.map((n) => n.id === profile.id ? { ...n, active: false } : n));
+        pushPopup("success", `DO ${profile.name} deactivated.`);
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to deactivate DO.");
+      }
+      return;
+    }
+
+    setDoProfiles((prev) => prev.map((p) => p.id === profile.id ? { ...p, active: false } : p));
+  }
+
+  async function handleMoveDo(index: number, direction: "up" | "down") {
+    if (!canManageSettings) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= sortedProfiles.length) return;
+
+    const source = sortedProfiles[index];
+    const target = sortedProfiles[targetIndex];
+
+    const newSourceOrder = target.sortOrder ?? (targetIndex + 1);
+    const newTargetOrder = source.sortOrder ?? (index + 1);
+
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        await Promise.all([
+          ledgerApiClient.catalogs.updateJazzLoadDoProfile(source.id, { sort_order: newSourceOrder }),
+          ledgerApiClient.catalogs.updateJazzLoadDoProfile(target.id, { sort_order: newTargetOrder })
+        ]);
+        setDoProfiles((prev) =>
+          prev.map((p) => {
+            if (p.id === source.id) return { ...p, sortOrder: newSourceOrder };
+            if (p.id === target.id) return { ...p, sortOrder: newTargetOrder };
+            return p;
+          })
+        );
+      } catch (err) {
+        pushPopup("error", err instanceof Error ? err.message : "Failed to reorder DOs.");
+      }
+      return;
+    }
+
+    setDoProfiles((prev) =>
+      prev.map((p) => {
+        if (p.id === source.id) return { ...p, sortOrder: newSourceOrder };
+        if (p.id === target.id) return { ...p, sortOrder: newTargetOrder };
+        return p;
+      })
+    );
+  }
+
   const autosaveSignature = useMemo(
     () =>
       JSON.stringify({
@@ -3214,251 +3487,389 @@ export function JazzLoadModule({
       )}
 
       {section === "settings" && canManageSettings && (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <div className="space-y-6">
+          {/* Card 1: Standard Calculation Rates */}
           <section className="panel">
-            <div className="panel-title"><div><h3>Calculation Rates</h3><p>Owner-managed rates apply only to new saves and are snapshotted on each day.</p></div></div>
-            <p className="mb-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs text-slate-300">
-              New rates apply to new Jazz Load days. Existing saved days keep their saved rate snapshots unless the owner explicitly applies current rates to that day.
-            </p>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_10rem_auto] sm:items-end">
-              <label>
-                Type
-                <select value={rateType} disabled={!canManageSettings} onChange={(event) => setRateType(event.target.value as JazzLoadRateType)}>
-                  <option value="ml_addition">Jazz Load Addition Rate</option>
-                  <option value="commission1_adjustment">Commission 1 Adjustment Rate</option>
-                  <option value="commission2_payment">Commission 2 Payment Rate</option>
-                </select>
-              </label>
-              <label>Name<input value={rateName} disabled={!canManageSettings} onChange={(event) => setRateName(event.target.value)} placeholder="Rate name" /></label>
-              <label>Percentage<NumberInput value={ratePercentage} disabled={!canManageSettings} className="!w-full !max-w-none" onChange={setRatePercentage} /></label>
-              <div className="flex items-end gap-2">
-                <button className="btn-primary" disabled={!canManageSettings || !rateName.trim()} onClick={saveRate}>
-                  {editingRateId ? "Update Rate" : "Save Rate"}
-                </button>
-                {editingRateId && (
-                  <button className="btn-secondary" disabled={!canManageSettings} onClick={cancelRateEdit}>
-                    Cancel
-                  </button>
-                )}
+            <div className="panel-title border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                  <Percent className="h-4 w-4 text-emerald-400" />
+                  Calculation Rates & Commission Schedule
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Standard owner-managed rates applied to daily operations. Changes take effect on new days; existing saved days retain their locked snapshots.
+                </p>
               </div>
             </div>
-            <SettingsRows
-              rows={displayRates.map((rate) => ({
-                id: rate.id,
-                label: `${rate.active ? "Active" : "Inactive"} · ${rate.name} · ${formatPercentage(rate.percentage)} · ${rate.type}`,
-                active: rate.active,
-                onToggle: () => toggleRate(rate),
-                onEdit: () => editRate(rate),
-                onDelete: () => removeRate(rate)
-              }))}
-              canEdit={canManageSettings}
-              onDragStart={(id) => { draggedRateIdRef.current = id; }}
-              onDrop={reorderRates}
-            />
-          </section>
-          <section className="panel">
-            <div className="panel-title"><div><h3>DO Names</h3><p>Names are managed independently from fixed lines.</p></div></div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-              <label>DO Name<input value={doNameDraft} disabled={!canManageSettings} onChange={(event) => setDoNameDraft(event.target.value)} /></label>
-              <button className="btn-primary" disabled={!canManageSettings || !doNameDraft.trim()} onClick={saveDoName}>Save Name</button>
-            </div>
-            <div className="mt-4 space-y-2">
-              {displayDoNames.map((name) => (
-                <div
-                  key={name.id}
-                  className="flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-300 sm:flex-row sm:items-center sm:justify-between"
-                  draggable={canManageSettings}
-                  onDragStart={() => { draggedDoNameIdRef.current = name.id; }}
-                  onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
-                  onDrop={() => reorderDoNames(name.id)}
-                >
-                  <div>
-                    <p className="flex items-center gap-2 font-medium text-white">
-                      {canManageSettings && (
-                        <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
-                          <GripVertical className="h-4 w-4" />
-                        </button>
-                      )}
-                      {name.name}
-                    </p>
-                    <p className="text-xs text-slate-500">{name.active ? "active" : "inactive"}</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <button className="btn-secondary !h-9 !w-9 !px-0" disabled={!canManageSettings} onClick={() => editDoName(name)} title="Edit DO name">
-                      <Pencil />
-                    </button>
-                    <button className="btn-secondary !h-9 !w-9 !px-0" disabled={!canManageSettings} onClick={() => removeDoName(name)} title="Delete DO name">
-                      <Trash2 />
-                    </button>
-                  </div>
+
+            {/* Current Active Rates Overview Card */}
+            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Active Rate Schedule:</span>
+                  <span className="font-semibold text-white">{activeRateSchedule.name || "Default Schedule"}</span>
                 </div>
-              ))}
-              {displayDoNames.length === 0 && <p className="text-sm text-slate-500">No rows configured.</p>}
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <span>Effective From:</span>
+                  <span className="font-mono text-emerald-400">
+                    {activeRateSchedule.effective_from ? activeRateSchedule.effective_from.slice(0, 10) : `${monthId}-01`}
+                  </span>
+                  <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                    Active
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border border-slate-800/80 bg-slate-900/60 p-3">
+                  <p className="text-xs text-slate-400">Jazz Load Addition (ML)</p>
+                  <p className="mt-1 text-lg font-bold text-emerald-400">
+                    {formatPercentage(Number(activeRateSchedule.ml_rate || 0))}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">Base × (1 + Rate%) = Jazz Load ML</p>
+                </div>
+                <div className="rounded-lg border border-slate-800/80 bg-slate-900/60 p-3">
+                  <p className="text-xs text-slate-400">Commission 1 (Instant Margin)</p>
+                  <p className="mt-1 text-lg font-bold text-sky-400">
+                    {formatPercentage(Number(activeRateSchedule.comm1_rate || 0))}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">Adjusted directly in day sheet</p>
+                </div>
+                <div className="rounded-lg border border-slate-800/80 bg-slate-900/60 p-3">
+                  <p className="text-xs text-slate-400">Commission 2 (Backend Payout)</p>
+                  <p className="mt-1 text-lg font-bold text-indigo-400">
+                    {formatPercentage(Number(activeRateSchedule.comm2_rate || 0))}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">Second payout margin</p>
+                </div>
+              </div>
             </div>
-          </section>
-          <section className="panel">
-            <div className="panel-title"><div><h3>DO Lines</h3><p>Lines stay fixed and can be assigned to different names per date.</p></div></div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-              <label>DO Line<input value={doLineDraft} disabled={!canManageSettings} onChange={(event) => setDoLineDraft(event.target.value)} /></label>
-              <button className="btn-primary" disabled={!canManageSettings || !doLineDraft.trim()} onClick={saveDoLine}>Save Line</button>
-            </div>
-            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-              <p className="text-sm font-semibold text-white">DO Line Binding</p>
-              <p className="mt-1 text-xs text-slate-400">New bindings apply from the effective date onward. Saved historical rows keep their stored DO name snapshots.</p>
-              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_11rem_auto] md:items-end">
-                <label>
-                  DO Line
-                  <select value={bindingLineId} disabled={!canManageSettings} onChange={(event) => setBindingLineId(event.target.value)}>
-                    <option value="">Select line</option>
-                    {activeLines.map((line) => (
-                      <option key={line.id} value={line.id}>{line.line}</option>
-                    ))}
-                  </select>
+
+            {/* Update / Create Schedule Form */}
+            <div className="mt-5 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                Update or Publish New Rates
+              </h4>
+              <p className="mt-1 text-xs text-slate-400">
+                Enter revised percentages below and click Save. Old rate records are preserved in audit history.
+              </p>
+
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5 items-end">
+                <label className="text-xs font-medium text-slate-300">
+                  Schedule Name
+                  <input
+                    type="text"
+                    value={scheduleName}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setScheduleName(e.target.value)}
+                    placeholder={`Standard Rates ${monthId}`}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                  />
                 </label>
-                <label>
-                  DO Name
-                  <select value={bindingDoNameId} disabled={!canManageSettings} onChange={(event) => setBindingDoNameId(event.target.value)}>
-                    <option value="">Select name</option>
-                    {activeDoNames.map((name) => (
-                      <option key={name.id} value={name.id}>{name.name}</option>
-                    ))}
-                  </select>
+                <label className="text-xs font-medium text-slate-300">
+                  ML Addition %
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={scheduleMlRate}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setScheduleMlRate(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                  />
                 </label>
-                <label>
+                <label className="text-xs font-medium text-slate-300">
+                  Commission 1 %
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={scheduleComm1Rate}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setScheduleComm1Rate(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                  />
+                </label>
+                <label className="text-xs font-medium text-slate-300">
+                  Commission 2 %
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={scheduleComm2Rate}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setScheduleComm2Rate(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                  />
+                </label>
+                <label className="text-xs font-medium text-slate-300">
                   Effective From
                   <input
                     type="date"
-                    value={bindingEffectiveDate || selectedDate}
+                    value={scheduleEffectiveFrom}
                     disabled={!canManageSettings}
-                    onChange={(event) => setBindingEffectiveDate(event.target.value)}
+                    onChange={(e) => setScheduleEffectiveFrom(e.target.value)}
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
                   />
                 </label>
-                <button className="btn-primary" disabled={!canManageSettings || !bindingLineId || !bindingDoNameId} onClick={saveDoLineBinding}>
-                  Save Binding
+              </div>
+
+              <div className="mt-3 flex items-center justify-end">
+                <button
+                  type="button"
+                  className="btn-primary flex items-center gap-1.5"
+                  disabled={!canManageSettings || scheduleMlRate === "" || scheduleComm1Rate === "" || scheduleComm2Rate === ""}
+                  onClick={handleSaveRateSchedule}
+                >
+                  <Save className="h-4 w-4" />
+                  Save Rate Schedule
                 </button>
               </div>
             </div>
-            <div className="mt-4 space-y-2">
-              {displayDoLines.map((line, index) => {
-                const currentBinding = resolveDoLineBindingForDate(doLineBindings, line.id, monthId, selectedDay);
-                return (
-                  <div
-                    key={line.id}
-                    className="flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-300 sm:flex-row sm:items-center sm:justify-between"
-                    draggable={canManageSettings}
-                    onDragStart={() => { draggedDoLineIdRef.current = line.id; }}
-                    onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
-                    onDrop={() => reorderDoLines(line.id)}
-                  >
-                    <div>
-                      <p className="flex items-center gap-2 font-medium text-white">
-                        {canManageSettings && (
-                          <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
-                            <GripVertical className="h-4 w-4" />
-                          </button>
-                        )}
-                        {line.line}
-                      </p>
-                      <p className="text-xs text-slate-500">Order {index + 1} · {line.active ? "active" : "inactive"}</p>
-                      <p className="text-xs text-slate-400">
-                        Bound DO Name: {currentBinding ? `${currentBinding.doName} from ${bindingEffectiveDateLabel(currentBinding)}` : "No binding for selected date"}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button className="btn-secondary !h-9" disabled={!canManageSettings} onClick={() => editDoLineBinding(line)} title="Bind DO line">
-                        Bind
-                      </button>
-                      <button className="btn-secondary !h-9 !w-9 !px-0" disabled={!canManageSettings} onClick={() => editDoLine(line)} title="Edit DO line">
-                        <Pencil />
-                      </button>
-                      <button className="btn-secondary !h-9 !w-9 !px-0" disabled={!canManageSettings} onClick={() => removeDoLine(line)} title="Delete DO line">
-                        <Trash2 />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-              {displayDoLines.length === 0 && <p className="text-sm text-slate-500">No rows configured.</p>}
-            </div>
-            <div className="mt-4">
-              <p className="text-sm font-semibold text-white">Binding History</p>
-              <div className="mt-2 space-y-2">
-                {orderedDoLineBindings.slice(0, 20).map((binding) => (
-                  <p key={binding.id} className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
-                    {binding.doLineName ?? binding.doLineId} {"->"} {binding.doName} from {bindingEffectiveDateLabel(binding)}
-                  </p>
-                ))}
-                {orderedDoLineBindings.length === 0 && <p className="text-sm text-slate-500">No DO line bindings configured.</p>}
+          </section>
+
+          {/* Card 2: Unified Distribution Officer (DO) Directory */}
+          <section className="panel">
+            <div className="panel-title border-b border-slate-800 pb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                  <UserCheck className="h-4 w-4 text-sky-400" />
+                  Distribution Officer (DO) Directory
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Single consolidated directory of officers and assigned lines. Reassign lines seamlessly without altering historical daily sheets.
+                </p>
+              </div>
+              <div className="text-xs text-slate-400">
+                Total Officers: <span className="font-semibold text-white">{sortedProfiles.length}</span> ({sortedProfiles.filter((p) => p.active).length} active)
               </div>
             </div>
-            <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-              <p className="text-sm font-semibold text-amber-100">Historical DO Binding Repair</p>
-              <p className="mt-1 text-xs text-amber-100/80">
-                One-time owner repair for old saved days. It updates DO name snapshots only and leaves all financial values unchanged.
+
+            {/* Quick Add DO Bar */}
+            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                Add New Distribution Officer
               </p>
-              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-                <label>
-                  From Month
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+                <label className="text-xs font-medium text-slate-300">
+                  Officer Name
                   <input
-                    type="month"
-                    value={bindingBackfillFromMonthId}
-                    disabled={bindingBackfillRunning || role !== "owner"}
-                    onChange={(event) => {
-                      setBindingBackfillFromMonthId(event.target.value);
-                      setBindingBackfillPreview(null);
-                    }}
+                    type="text"
+                    value={newDoName}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setNewDoName(e.target.value)}
+                    placeholder="e.g. Ali Khan"
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
                   />
                 </label>
-                <label>
-                  To Month
+                <label className="text-xs font-medium text-slate-300">
+                  Line Number / MSISDN
                   <input
-                    type="month"
-                    value={bindingBackfillToMonthId}
-                    disabled={bindingBackfillRunning || role !== "owner"}
-                    onChange={(event) => {
-                      setBindingBackfillToMonthId(event.target.value);
-                      setBindingBackfillPreview(null);
-                    }}
+                    type="text"
+                    value={newDoLine}
+                    disabled={!canManageSettings}
+                    onChange={(e) => setNewDoLine(e.target.value)}
+                    placeholder="e.g. 03001234567"
+                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
                   />
                 </label>
                 <button
-                  className="btn-secondary"
-                  disabled={bindingBackfillRunning || role !== "owner" || !bindingBackfillFromMonthId || !bindingBackfillToMonthId}
-                  onClick={applyCurrentDoBindingsBackfill}
+                  type="button"
+                  className="btn-primary flex items-center justify-center gap-1.5 !h-9 text-xs"
+                  disabled={!canManageSettings || !newDoName.trim()}
+                  onClick={handleAddDo}
                 >
-                  {bindingBackfillRunning ? "Repair Running..." : "Apply Current DO Bindings To Previous Days"}
+                  <Plus className="h-4 w-4" />
+                  Add Officer
                 </button>
               </div>
-              {bindingBackfillPreview && (
-                <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-xs text-slate-300">
-                  <p>Days scanned: {bindingBackfillPreview.daysScanned}</p>
-                  <p>Rows scanned: {bindingBackfillPreview.rowsScanned}</p>
-                  <p>Rows that will change: {bindingBackfillPreview.rowsThatWillChange}</p>
-                  <p>Rows already correct: {bindingBackfillPreview.rowsAlreadyCorrect}</p>
-                  <p>Rows missing binding: {bindingBackfillPreview.rowsMissingBinding}</p>
-                  <p>Rows skipped because no current binding exists: {bindingBackfillPreview.rowsSkippedNoCurrentBinding}</p>
-                  {bindingBackfillPreview.sampleChanges.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      <p className="font-semibold text-white">Sample changes</p>
-                      {bindingBackfillPreview.sampleChanges.map((sample) => (
-                        <p key={`${sample.monthId}-${sample.dayNo}-${sample.rowId}`}>
-                          {sample.monthId} day {sample.dayNo} {sample.doLine ?? sample.doLineId ?? "DO line"}: {sample.oldDoName || "(blank)"} {"->"} {sample.newDoName}
-                        </p>
-                      ))}
-                    </div>
+            </div>
+
+            {/* Compact DO Directory Table */}
+            <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/40">
+              <table className="w-full border-collapse text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-900/80 font-semibold text-slate-300">
+                    <th className="w-16 px-2.5 py-2 text-center">#</th>
+                    <th className="px-3 py-2">Officer Name</th>
+                    <th className="px-3 py-2">Line / MSISDN</th>
+                    <th className="w-24 px-3 py-2 text-center">Status</th>
+                    <th className="w-64 px-3 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {sortedProfiles.map((profile, idx) => {
+                    const isEditing = editingDoId === profile.id;
+                    return (
+                      <tr
+                        key={profile.id}
+                        className={`transition-colors hover:bg-slate-900/40 ${
+                          !profile.active ? "opacity-60 bg-slate-950/30" : ""
+                        }`}
+                      >
+                        {/* Order & Reorder arrows */}
+                        <td className="px-2 py-1.5 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <span className="w-4 text-center font-mono text-slate-400">{idx + 1}</span>
+                            {canManageSettings && (
+                              <div className="flex flex-col">
+                                <button
+                                  type="button"
+                                  disabled={idx === 0}
+                                  onClick={() => handleMoveDo(idx, "up")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move up"
+                                >
+                                  <ChevronUp className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={idx === sortedProfiles.length - 1}
+                                  onClick={() => handleMoveDo(idx, "down")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move down"
+                                >
+                                  <ChevronDown className="h-3 w-3" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* Officer Name */}
+                        <td className="px-3 py-1.5">
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={editingDoName}
+                              onChange={(e) => setEditingDoName(e.target.value)}
+                              className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              placeholder="Officer Name"
+                              autoFocus
+                            />
+                          ) : (
+                            <div className="font-semibold text-white flex items-center gap-1.5">
+                              {profile.name}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Line Number */}
+                        <td className="px-3 py-1.5">
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={editingDoLine}
+                              onChange={(e) => setEditingDoLine(e.target.value)}
+                              className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              placeholder="Line / MSISDN"
+                            />
+                          ) : (
+                            <span className="font-mono text-slate-300">
+                              {profile.line || <span className="italic text-slate-500">Unassigned</span>}
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Status */}
+                        <td className="px-3 py-1.5 text-center">
+                          {profile.active ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                              Active
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
+                              <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
+                              Inactive
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="px-3 py-1.5 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {isEditing ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn-primary !h-7 !px-2.5 text-xs flex items-center gap-1"
+                                  onClick={() => handleSaveEditDo(profile.id)}
+                                  disabled={!editingDoName.trim()}
+                                >
+                                  <Save className="h-3.5 w-3.5" />
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                  onClick={() => setEditingDoId(null)}
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                  onClick={() => {
+                                    setEditingDoId(profile.id);
+                                    setEditingDoName(profile.name);
+                                    setEditingDoLine(profile.line ?? "");
+                                  }}
+                                  title="Edit Name & Line"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1 text-sky-400 hover:text-sky-300 hover:border-sky-500/40"
+                                  onClick={() => handleReassignLine(profile)}
+                                  title="Reassign line to a new officer without breaking past history"
+                                >
+                                  <UserCheck className="h-3.5 w-3.5" />
+                                  Reassign Line
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`btn-secondary !h-7 !px-2 text-xs ${
+                                    profile.active ? "text-slate-400 hover:text-amber-300" : "text-emerald-400 hover:text-emerald-300"
+                                  }`}
+                                  onClick={() => handleToggleDoActive(profile)}
+                                  title={profile.active ? "Deactivate DO" : "Activate DO"}
+                                >
+                                  {profile.active ? "Deactivate" : "Activate"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-secondary !h-7 !w-7 !p-0 text-rose-400 hover:text-rose-300 hover:border-rose-500/40"
+                                  onClick={() => handleDeleteDo(profile)}
+                                  title="Delete / Deactivate DO"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 mx-auto" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {sortedProfiles.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-slate-500">
+                        No distribution officers found. Add your first DO using the form above.
+                      </td>
+                    </tr>
                   )}
-                </div>
-              )}
+                </tbody>
+              </table>
             </div>
-          </section>
-          <section className="panel xl:col-span-2">
-            <div className="panel-title"><div><h3>Legacy DO Profiles</h3><p>Kept for old records only. New workflow uses separate DO Names and DO Lines.</p></div></div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-              <label>Legacy Name<input value={profileName} disabled={!roleCanJazzLoad(role, "daily")} onChange={(event) => setProfileName(event.target.value)} /></label>
-              <label>Legacy Line<input value={profileLine} disabled={!roleCanJazzLoad(role, "daily")} onChange={(event) => setProfileLine(event.target.value)} /></label>
-              <button className="btn-secondary" disabled={!roleCanJazzLoad(role, "daily") || !profileName.trim()} onClick={saveProfile}>Save Legacy DO</button>
-            </div>
-            <SimpleBadges rows={doProfiles.map((profile) => `${profile.name} · ${profile.line ?? "No line"} · ${profile.active ? "active" : "inactive"}`)} />
+
+            <p className="mt-3 text-[11px] text-slate-500">
+              💡 <span className="font-medium text-slate-400">Reassign Line Feature:</span> When an officer leaves or a line is reassigned, click &quot;Reassign Line&quot;. Historical daily sheets retain the previous officer&apos;s name in their locked snapshots, while all future days automatically use the newly assigned officer.
+            </p>
           </section>
         </div>
       )}

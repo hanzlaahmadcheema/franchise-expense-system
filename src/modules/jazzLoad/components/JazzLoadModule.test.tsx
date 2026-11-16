@@ -308,4 +308,24 @@ describe("JazzLoadModule — Redesigned Navigation & Workflow", () => {
     // Day closing is global, not inside the module-specific section
     expect(screen.queryByRole("button", { name: /Close Day/i })).toBeNull();
   });
+
+  it("renders unified DO Directory and Rate Schedule for owner role in settings", () => {
+    renderJazzLoad({ role: "owner" });
+
+    const settingsTab = screen.getByRole("button", { name: /DO Profiles & Rates/i });
+    expect(settingsTab.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(settingsTab);
+
+    // Verify Unified Calculation Rates Card
+    expect(screen.getByText(/Calculation Rates & Commission Schedule/i)).toBeTruthy();
+    expect(screen.getByText(/Jazz Load Addition \(ML\)/i)).toBeTruthy();
+    expect(screen.getByText(/Commission 1 \(Instant Margin\)/i)).toBeTruthy();
+    expect(screen.getByText(/Commission 2 \(Backend Payout\)/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Save Rate Schedule/i })).toBeTruthy();
+
+    // Verify Unified Distribution Officer Directory
+    expect(screen.getByText(/Distribution Officer \(DO\) Directory/i)).toBeTruthy();
+    expect(screen.getByPlaceholderText(/e\.g\. Ali Khan/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Add Officer/i })).toBeTruthy();
+  });
 });

@@ -94,6 +94,7 @@ export type JazzLoadDoProfile = {
   line?: string;
   active: boolean;
   notes?: string;
+  sortOrder?: number;
   createdAt: number;
   updatedAt: number;
 };
