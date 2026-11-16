@@ -254,7 +254,7 @@ describe("JazzLoadModule — Redesigned Navigation & Workflow", () => {
     expect(screen.getAllByText("Issuance Jazz Load").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Payments").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Latest In-Hand")).toBeTruthy();
-    expect(screen.getByText("Commission")).toBeTruthy();
+    expect(screen.getAllByText("Commission").length).toBeGreaterThanOrEqual(1);
 
     // Verify export buttons
     expect(screen.getByRole("button", { name: /Export Excel/i })).toBeTruthy();

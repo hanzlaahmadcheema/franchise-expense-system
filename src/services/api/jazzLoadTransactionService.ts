@@ -207,10 +207,10 @@ function activeRatesFromConfig(rates?: JazzLoadRateConfig[]): JazzLoadCalculatio
       : { id: "default_ml", name: "Default ML", type: "ml_addition", percentage: 2.4, active: true },
     commission1Rate: c1
       ? { id: c1.id, name: c1.name || "Comm1 Rate", type: "commission1_adjustment", percentage: c1.percentage, active: true }
-      : null,
+      : { id: "default_c1", name: "Default Comm1", type: "commission1_adjustment", percentage: 2.4, active: true },
     commission2Rate: c2
       ? { id: c2.id, name: c2.name || "Comm2 Rate", type: "commission2_payment", percentage: c2.percentage, active: true }
-      : null
+      : { id: "default_c2", name: "Default Comm2", type: "commission2_payment", percentage: 1.16, active: true }
   };
 }
 
@@ -358,13 +358,32 @@ export async function loadJazzLoadMonthPostgres(
 ): Promise<JazzLoadDay[]> {
   const periodData = await getAccountingPeriodWithDays(periodKey).catch(() => null);
   if (!periodData) return [];
+
+  let resolvedRates = rates;
+  if (!resolvedRates || resolvedRates.length === 0) {
+    try {
+      const res = await ledgerApiClient.catalogs.getJazzLoadRates();
+      const mappedRates: JazzLoadRateConfig[] = [];
+      for (const row of (res as any)?.data || []) {
+        mappedRates.push({ id: row.id + '_ml', type: 'ml_addition', percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + ' ML', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+        mappedRates.push({ id: row.id + '_c1', type: 'commission1_adjustment', percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + ' Comm1', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+        mappedRates.push({ id: row.id + '_c2', type: 'commission2_payment', percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + ' Comm2', createdBy: "system", createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      if (mappedRates.length > 0) {
+        resolvedRates = mappedRates;
+      }
+    } catch (e) {
+      console.warn("[jazzLoadTransactionService] Failed to fetch rates from DB:", e);
+    }
+  }
+
   const dayCount = periodData.days?.size || new Date(Number(periodKey.split("-")[0]), Number(periodKey.split("-")[1]), 0).getDate();
   const dayNumbers: number[] = [];
   for (let d = 1; d <= dayCount; d++) {
     dayNumbers.push(d);
   }
   const loadedDays = await runWithConcurrency(dayNumbers, 6, async (d) => {
-    return loadJazzLoadDayPostgres(periodKey, d, doProfiles, rates, periodData).catch((err) => {
+    return loadJazzLoadDayPostgres(periodKey, d, doProfiles, resolvedRates, periodData).catch((err) => {
       console.warn(`[jazzLoadTransactionService] Failed to load day ${d} for month ${periodKey}:`, err);
       return null;
     });

@@ -102,14 +102,28 @@ export function StockLiftingSummaryTable({
       .map((p) => p.id)
   );
 
+  const daysRangeSet = new Set(daysRange);
+  const totalIssuedByProduct: Record<string, number> = {};
+  for (const day of days) {
+    if (!daysRangeSet.has(day.dayNo)) continue;
+    for (const entry of day.entries ?? []) {
+      for (const prod of entry.products ?? []) {
+        totalIssuedByProduct[prod.productId] = (totalIssuedByProduct[prod.productId] ?? 0) + (prod.quantity ?? 0);
+      }
+    }
+  }
+
   activeProducts.forEach((product) => {
     const balanceRow = currentStockBalances.find((balance) => balance.productId === product.id);
     const rate = productRateById[product.id] ?? 0;
     const isSkipped = skippedProductIds.has(product.id);
 
+    const fromDays = totalIssuedByProduct[product.id] ?? 0;
+    const issued = fromDays > 0 ? fromDays : (balanceRow?.totalStockOut ?? 0);
+
     productOpening[product.id] = isSkipped ? 0 : (monthOpeningStock[product.id] ?? 0);
     productReceived[product.id] = isSkipped ? 0 : ((monthOpeningStock[product.id] ?? 0) + (balanceRow?.totalStockIn ?? 0));
-    productIssued[product.id] = isSkipped ? 0 : (balanceRow?.totalStockOut ?? 0);
+    productIssued[product.id] = isSkipped ? 0 : issued;
     productInHand[product.id] = isSkipped ? 0 : (balanceRow?.currentStock ?? 0);
     productValuation[product.id] = isSkipped ? 0 : ((balanceRow?.currentStock ?? 0) * rate);
   });

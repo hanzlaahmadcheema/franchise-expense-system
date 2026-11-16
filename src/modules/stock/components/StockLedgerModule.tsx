@@ -946,9 +946,10 @@ export function StockLedgerModule({
 
   const currentStockBalances = useMemo(() => {
     if (isPostgreSqlPeriod(monthId)) {
-      const targetDayRecord = section === "reportsHub"
-        ? ([...days].reverse().find((d) => d.stockProductProjections && d.stockProductProjections.length > 0) ?? selectedDayRecord)
-        : selectedDayRecord;
+      if (section === "reportsHub" || section === "stockIn") {
+        return calculateCurrentStock(products, monthOpeningStock, allStockInRecords, days);
+      }
+      const targetDayRecord = selectedDayRecord;
 
       if (targetDayRecord?.stockProductProjections && targetDayRecord.stockProductProjections.length > 0) {
         const projMap = new Map(targetDayRecord.stockProductProjections.map((p) => [p.product_id, p]));

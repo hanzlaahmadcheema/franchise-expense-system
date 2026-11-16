@@ -244,9 +244,19 @@ function doNameIdentityKey(input: { doNameId?: string; doName?: string }) {
 }
 
 function activeRateFor(rates: JazzLoadRateConfig[], primaryType: JazzLoadRateType, legacyTypes: JazzLoadRateType[] = []) {
-  return rates.find((rate) => rate.active && rate.type === primaryType) ??
-    rates.find((rate) => rate.active && legacyTypes.includes(rate.type)) ??
-    null;
+  const match = rates.find((rate) => rate.active && rate.type === primaryType) ??
+    rates.find((rate) => rate.active && legacyTypes.includes(rate.type));
+  if (match) return match;
+  if (primaryType === "ml_addition") {
+    return { id: "default_ml", name: "Default ML", type: "ml_addition" as const, percentage: 2.4, active: true, sortOrder: 1, createdBy: "system", createdAt: 0, updatedAt: 0 };
+  }
+  if (primaryType === "commission1_adjustment") {
+    return { id: "default_c1", name: "Default Comm1", type: "commission1_adjustment" as const, percentage: 2.4, active: true, sortOrder: 2, createdBy: "system", createdAt: 0, updatedAt: 0 };
+  }
+  if (primaryType === "commission2_payment") {
+    return { id: "default_c2", name: "Default Comm2", type: "commission2_payment" as const, percentage: 1.16, active: true, sortOrder: 3, createdBy: "system", createdAt: 0, updatedAt: 0 };
+  }
+  return null;
 }
 
 function NumberInput({
@@ -1012,6 +1022,28 @@ export function JazzLoadModule({
   }, [doProfiles, monthId, rates, selectedDay, user]);
 
   useEffect(() => {
+    if (days.length === 0) return;
+    const { commission1Rate, commission2Rate } = activeRates;
+    if (!commission1Rate && !commission2Rate) return;
+
+    const needsRecalc = days.some(
+      (d) => d.summary.paymentBase > 0 && d.summary.totalCommission === 0
+    );
+
+    if (needsRecalc) {
+      setDays((prevDays) =>
+        prevDays.map((d) => {
+          if (d.summary.paymentBase > 0 && d.summary.totalCommission === 0) {
+            const nextSummary = calculateDailySummary({ doEntries: d.doEntries }, activeRates, d.closedAt ?? Date.now());
+            return { ...d, summary: nextSummary };
+          }
+          return d;
+        })
+      );
+    }
+  }, [days, activeRates]);
+
+  useEffect(() => {
     const hydrationKey = `${monthId}-${selectedDay}`;
     if (selectedDayFuture) {
       applyRemoteDraftState({
@@ -1150,7 +1182,10 @@ export function JazzLoadModule({
   }, [days, drafts, previousMonthDays, selectedCalculationRates, selectedDay, selectedDayRecord?.doEntries, user.uid]);
   const previewSummary = calculateDailySummary({ doEntries: previewEntries }, selectedCalculationRates);
   const previewLifting = calculateDailyLifting({ openingBalance: liftingOpening, mlLifting }, previewSummary.issuanceMl);
-  const localSummary = summary ?? calculateMonthlySummary(monthId, days);
+  const localSummary = useMemo(() => {
+    if (days.length > 0) return calculateMonthlySummary(monthId, days);
+    return summary ?? calculateMonthlySummary(monthId, days);
+  }, [days, monthId, summary]);
   const unboundLineDrafts = useMemo(
     () => drafts.filter((draft) => draft.doLineId && !draft.doName.trim()),
     [drafts]
@@ -3110,9 +3145,23 @@ export function JazzLoadModule({
                   />
                   <ReportTable
                     title="Daily Trend"
-                    headers={["Day", "Issuance Jazz Load", "Payment", "Closing", "In-Hand"]}
-                    rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceMl), formatCurrency(row.paymentBase), formatCurrency(row.closingBase), formatCurrency(row.inHandBalance)])}
-                    totals={["Total", formatCurrency(localSummary.totalIssuanceMl), formatCurrency(localSummary.totalPaymentsBase), formatCurrency(localSummary.totalClosingBase), formatCurrency(localSummary.latestInHandBalance)]}
+                    headers={["Day", "Issuance Jazz Load", "Payment", "Commission", "Closing", "In-Hand"]}
+                    rows={localSummary.dayRows.map((row) => [
+                      String(row.dayNo),
+                      formatCurrency(row.issuanceMl),
+                      formatCurrency(row.paymentBase),
+                      formatCurrency(row.commission),
+                      formatCurrency(row.closingBase),
+                      formatCurrency(row.inHandBalance)
+                    ])}
+                    totals={[
+                      "Total",
+                      formatCurrency(localSummary.totalIssuanceMl),
+                      formatCurrency(localSummary.totalPaymentsBase),
+                      formatCurrency(localSummary.totalCommission),
+                      formatCurrency(localSummary.totalClosingBase),
+                      formatCurrency(localSummary.latestInHandBalance)
+                    ]}
                   />
                 </div>
 
