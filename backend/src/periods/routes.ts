@@ -24,6 +24,7 @@ import {
   CloseDaySchema,
   OpenDaySchema,
   ReopenDaySchema,
+  ReopenPeriodSchema,
   ClosePeriodSchema,
   RolloverSchema,
   SeedCorrectionSchema,
@@ -44,6 +45,7 @@ import {
   reopenAccountingDay,
   verifyPeriodFinalSettlement,
   closeAccountingPeriod,
+  reopenAccountingPeriod,
   initializeNextPeriodFromClosedPeriod,
   rolloverPeriod,
   getSeedDelta,
@@ -585,6 +587,35 @@ periodRouter.post(
       res.status(200).json(result);
     } catch (err) {
       handlePeriodError(res, "POST /api/v1/periods/:periodId/close", err);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/periods/:periodId/reopen
+ * Owner-only: Reopens a closed accounting period for governed corrections.
+ */
+periodRouter.post(
+  "/:periodId/reopen",
+  requireRole("owner"),
+  async (req: Request, res: Response) => {
+    try {
+      const franchiseId = getFranchiseId(req);
+      const periodId = UuidParam.parse(req.params.periodId);
+      const user = getServiceUser(req);
+      const parsedBody = ReopenPeriodSchema.parse(req.body ?? {});
+      const clientMutationId = getClientMutationId(req);
+
+      const result = await reopenAccountingPeriod(
+        franchiseId,
+        periodId,
+        parsedBody.reason,
+        user,
+        clientMutationId
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      handlePeriodError(res, "POST /api/v1/periods/:periodId/reopen", err);
     }
   }
 );

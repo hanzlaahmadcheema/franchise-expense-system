@@ -840,6 +840,21 @@ export const ledgerApiClient = {
           body: JSON.stringify({ notes: notes ?? null })
         }
       ),
+    reopenPeriod: (periodId: string, reason: string) =>
+      apiRequest<{
+        reopened: boolean;
+        periodId: string;
+        periodKey: string;
+        status: string;
+        period: AccountingPeriodRecord;
+        reopenedAt: string;
+      }>(
+        `/api/v1/periods/${periodId}/reopen`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason })
+        }
+      ),
     initializeNextPeriod: (periodId: string) =>
       apiRequest<{
         initialized: boolean;
@@ -921,6 +936,8 @@ export const ledgerApiClient = {
         method: "DELETE"
       }),
     getCreditParties: (includeInactive = true) =>
+      apiRequest<{ data: any[] }>(`/api/v1/catalogs/credit-parties${includeInactive ? "?includeInactive=true" : ""}`),
+    getExpenseCreditParties: (includeInactive = true) =>
       apiRequest<{ data: any[] }>(`/api/v1/catalogs/credit-parties${includeInactive ? "?includeInactive=true" : ""}`),
     createCreditParty: (payload: { slug?: string; name: string; type?: string; sort_order?: number; is_active?: boolean; notes?: string | null }) =>
       apiRequest<{ data: any }>(`/api/v1/catalogs/credit-parties`, {

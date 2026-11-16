@@ -16,7 +16,7 @@
 import { ledgerApiClient, ApiError, type AccountingDayRecord, type AccountingPeriodRecord } from "./ledgerApiClient";
 import { getMetadataCache } from "../offlineQueue/metadataCache";
 
-interface PeriodCacheEntry {
+export interface PeriodCacheEntry {
   period: AccountingPeriodRecord;
   days: Map<number, AccountingDayRecord>;
   fetchedAt: number;

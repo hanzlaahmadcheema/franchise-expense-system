@@ -28,7 +28,7 @@ import {
 } from "../../modules/stock/services/stockCalculations";
 import { dayDate, roundMoney } from "../../modules/stock/utils/stockFormatters";
 import { ledgerApiClient, type DayProjectionsResponse } from "./ledgerApiClient";
-import { getAccountingPeriodWithDays, resolveAccountingDayId } from "./periodDayService";
+import { getAccountingPeriodWithDays, resolveAccountingDayId, type PeriodCacheEntry } from "./periodDayService";
 
 export interface SaveStockDayResult {
   success: boolean;
@@ -63,17 +63,24 @@ export async function saveStockDayPostgres(
   // Fetch existing stock orders for this day and account
   const existingOrdersRes = await ledgerApiClient.stockOrders.list(dayId);
   const existingOrders = existingOrdersRes.data || [];
-  const existingOrderForAccount = existingOrders.find((o: any) => o.account_id === draft.accountId);
+  const existingOrdersForAccount = existingOrders.filter(
+    (o: any) => o.account_id === draft.accountId && o.direction === "outbound"
+  );
+  const primaryOrder = existingOrdersForAccount[0];
+  const duplicateOrders = existingOrdersForAccount.slice(1);
 
   if (orderLines.length > 0) {
-    if (existingOrderForAccount) {
-      await ledgerApiClient.stockOrders.update(existingOrderForAccount.id, {
-        baseRevision: existingOrderForAccount.revision ?? 1,
+    if (primaryOrder) {
+      await ledgerApiClient.stockOrders.update(primaryOrder.id, {
+        baseRevision: primaryOrder.revision ?? 1,
         direction: "outbound",
         account_id: draft.accountId,
         notes: draft.notes || null,
         lines: orderLines
       });
+      for (const dup of duplicateOrders) {
+        await ledgerApiClient.stockOrders.delete(dup.id).catch(() => {});
+      }
     } else {
       await ledgerApiClient.stockOrders.create({
         day_id: dayId,
@@ -83,24 +90,31 @@ export async function saveStockDayPostgres(
         lines: orderLines
       });
     }
-  } else if (existingOrderForAccount) {
-    await ledgerApiClient.stockOrders.delete(existingOrderForAccount.id);
+  } else if (existingOrdersForAccount.length > 0) {
+    for (const ord of existingOrdersForAccount) {
+      await ledgerApiClient.stockOrders.delete(ord.id).catch(() => {});
+    }
   }
 
   // 2. Sync payment if paymentReceived > 0
   const paymentAmount = Number(draft.paymentReceived ?? 0);
   const existingPaymentsRes = await ledgerApiClient.stockPayments.list(dayId);
   const existingPayments = existingPaymentsRes.data || [];
-  const existingPaymentForAccount = existingPayments.find((p: any) => p.account_id === draft.accountId);
+  const existingPaymentsForAccount = existingPayments.filter((p: any) => p.account_id === draft.accountId);
+  const primaryPayment = existingPaymentsForAccount[0];
+  const duplicatePayments = existingPaymentsForAccount.slice(1);
 
   if (paymentAmount > 0) {
-    if (existingPaymentForAccount) {
-      if (Number(existingPaymentForAccount.amount) !== paymentAmount) {
-        await ledgerApiClient.stockPayments.update(existingPaymentForAccount.id, {
-          baseRevision: existingPaymentForAccount.revision ?? 1,
+    if (primaryPayment) {
+      if (Number(primaryPayment.amount) !== paymentAmount) {
+        await ledgerApiClient.stockPayments.update(primaryPayment.id, {
+          baseRevision: primaryPayment.revision ?? 1,
           account_id: draft.accountId,
           amount: paymentAmount
         });
+      }
+      for (const dup of duplicatePayments) {
+        await ledgerApiClient.stockPayments.delete(dup.id).catch(() => {});
       }
     } else {
       await ledgerApiClient.stockPayments.create({
@@ -110,8 +124,10 @@ export async function saveStockDayPostgres(
         payment_method: "cash"
       });
     }
-  } else if (existingPaymentForAccount) {
-    await ledgerApiClient.stockPayments.delete(existingPaymentForAccount.id);
+  } else if (existingPaymentsForAccount.length > 0) {
+    for (const p of existingPaymentsForAccount) {
+      await ledgerApiClient.stockPayments.delete(p.id).catch(() => {});
+    }
   }
 
   // 3. Fetch latest day projections
@@ -340,17 +356,28 @@ export async function loadStockDayPostgres(
 
   const entries: StockDailyAccountEntry[] = Array.from(accountIds).map((accountId) => {
     const account = accounts.find((a) => a.id === accountId);
-    const order = outboundOrders.find((o: any) => o.account_id === accountId);
-    const payment = accountPayments.find((p: any) => p.account_id === accountId);
-    const totalPaymentReceived = roundMoney(Number(payment?.amount ?? 0));
+    const accountOrders = outboundOrders.filter((o: any) => o.account_id === accountId);
+    const order = accountOrders[0];
+    const accountPaymentsList = accountPayments.filter((p: any) => p.account_id === accountId);
+    const payment = accountPaymentsList[0];
+    const totalPaymentReceived = roundMoney(
+      accountPaymentsList.reduce((sum: number, p: any) => sum + Number(p.amount ?? 0), 0)
+    );
 
     const orderLinesMap = new Map<string, { quantity: number; rate: number }>();
-    if (order && order.lines) {
-      for (const line of order.lines) {
-        orderLinesMap.set(line.product_id, {
-          quantity: Number(line.quantity ?? 0),
-          rate: Number(line.unit_rate ?? 0)
-        });
+    for (const ord of accountOrders) {
+      if (ord && ord.lines) {
+        for (const line of ord.lines) {
+          const existing = orderLinesMap.get(line.product_id);
+          if (existing) {
+            existing.quantity += Number(line.quantity ?? 0);
+          } else {
+            orderLinesMap.set(line.product_id, {
+              quantity: Number(line.quantity ?? 0),
+              rate: Number(line.unit_rate ?? 0)
+            });
+          }
+        }
       }
     }
 

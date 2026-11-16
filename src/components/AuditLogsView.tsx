@@ -86,9 +86,9 @@ export function AuditLogsView({ months, onActivityChange }: Props) {
 
   const actionOptions = useMemo(() => {
     if (!module) {
-      return Object.values(AUDIT_LOG_ACTIONS).flat();
+      return Array.from(new Set(Object.values(AUDIT_LOG_ACTIONS).flat()));
     }
-    return [...AUDIT_LOG_ACTIONS[module]];
+    return Array.from(new Set(AUDIT_LOG_ACTIONS[module]));
   }, [module]);
 
   useEffect(() => {

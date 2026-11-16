@@ -33,8 +33,8 @@ export type UniversalDaySnapshot = {
 export type DayControlPermissions = {
   canCloseSelectedDay: boolean;
   canReopenSelectedDay: boolean;
-  canReopenAllDays: boolean;
-  canClosePreviousDaysExceptToday: boolean;
+  canReopenAllDays?: boolean;
+  canClosePreviousDaysExceptToday?: boolean;
   canRunMasterRefresh: boolean;
   closeDisabledReason?: string;
   reopenDisabledReason?: string;
@@ -55,8 +55,8 @@ export type UniversalDayControlBarProps = {
   density?: "regular" | "compact";
   onCloseSelectedDay: () => void | Promise<void>;
   onReopenSelectedDay: () => void | Promise<void>;
-  onReopenAllDays: () => void | Promise<void>;
-  onClosePreviousDaysExceptToday: () => void | Promise<void>;
+  onReopenAllDays?: () => void | Promise<void>;
+  onClosePreviousDaysExceptToday?: () => void | Promise<void>;
   onRunMasterRefresh: () => void | Promise<void>;
   closeDayLabel?: string;
   extraActions?: ReactNode;

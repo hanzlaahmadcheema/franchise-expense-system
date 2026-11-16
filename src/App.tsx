@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { signOut } from "firebase/auth";
 import { localAuthService, type LocalUser } from "./services/api/localAuthService";
 import type { LedgerUser } from "./types/ledger";
@@ -12,11 +12,14 @@ export interface AppUser {
   role: UserRole;
 }
 import {
+  ArrowUpRight,
+  BookOpen,
   Cloud,
   FileDown,
   FileSpreadsheet,
   LayoutDashboard,
   PackageOpen,
+  PlusCircle,
   ScrollText,
   LoaderCircle,
   Menu,
@@ -27,6 +30,7 @@ import {
   Bell,
   CalendarDays,
   CreditCard,
+  Settings,
   Shield,
   Sun,
   Tags,
@@ -34,8 +38,11 @@ import {
   Users,
   X,
   GripVertical,
-  AlertTriangle
+  AlertTriangle,
+  SlidersHorizontal,
+  Info
 } from "lucide-react";
+import { AppHeader } from "./components/AppHeader";
 import { AuditLogsView } from "./components/AuditLogsView";
 import { DailyEntryForm } from "./components/DailyEntryForm";
 import { HomeDashboard } from "./components/HomeDashboard";
@@ -55,6 +62,8 @@ import type {
 import type { JazzLoadMonth } from "./modules/jazzLoad/types/jazzLoad.types";
 import { computeMonth, resolveCreditClosingBalance } from "./lib/formulaEngine";
 import { resolveCreditDescriptions } from "./lib/creditDescriptions";
+import { useStickyTableHeaders } from "./shared/hooks/useStickyTableHeaders";
+import { useAppRouter, parseRoute, type ParsedRoute, type RouteState } from "./shared/router/useAppRouter";
 import {
   exportDailyPdf,
   exportDailyXlsx,
@@ -66,8 +75,8 @@ import {
 import { parseWorkbookFile } from "./lib/workbookImport";
 import { auth, isFirebaseConfigured } from "./lib/firebase";
 import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
-import { JazzLoadModule } from "./modules/jazzLoad/components/JazzLoadModule";
-import { StockLedgerModule } from "./modules/stock/components/StockLedgerModule";
+import { JazzLoadModule, type JazzLoadSection } from "./modules/jazzLoad/components/JazzLoadModule";
+import { StockLedgerModule, type StockSection } from "./modules/stock/components/StockLedgerModule";
 import { UniversalCalendar } from "./shared/calendar/UniversalCalendar";
 import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/context/SidebarDayControlsContext";
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
@@ -89,6 +98,7 @@ import {
   isGenesisPeriod,
   POSTGRESQL_GENESIS_PERIOD,
   getNextPeriodKey,
+  getPreviousPeriodKey,
   clearPeriodCache,
   registerPostgreSqlPeriod,
   registerInitializedPeriod,
@@ -142,11 +152,11 @@ import {
 } from "./lib/firestoreService";
 import { applySortOrder, changedSortOrderPatches, reorderItems } from "./shared/services/orderUtils";
 
-type View = "dashboard" | "records" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
-type ExpenseSection = "daily-entry" | "previous-records" | "expense-dashboard" | "expense-categories" | "credit-parties" | "commission-categories";
+export type View = "dashboard" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
+export type ExpenseSection = "daily-entry" | "previous-records" | "settings" | "expense-categories" | "credit-parties" | "commission-categories";
 
 const ownerOnlyViews = new Set<View>(["users", "import", "backup", "audit-logs"]);
-const ownerOnlyExpenseSections = new Set<ExpenseSection>(["expense-categories", "credit-parties", "commission-categories"]);
+const ownerOnlyExpenseSections = new Set<ExpenseSection>(["settings", "expense-categories", "credit-parties", "commission-categories"]);
 
 function canAccessView(role: UserRole | null, view: View) {
   if (!role) return false;
@@ -334,6 +344,39 @@ function LoadingPopup({ message }: { message: string }) {
           <div className="loading-bar h-full rounded-full bg-emerald-400" />
         </div>
       </div>
+    </div>
+  );
+}
+
+function ReopenNoticePopup({ dayNo, onDismiss }: { dayNo: number; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 8000);
+    return () => clearTimeout(timer);
+  }, [dayNo, onDismiss]);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed bottom-5 right-5 z-50 flex max-w-sm items-start gap-3 rounded-xl border border-emerald-500/40 bg-slate-900/95 p-4 text-slate-100 shadow-2xl shadow-black/50 backdrop-blur-md"
+    >
+      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+        <Info className="h-4 w-4" />
+      </div>
+      <div className="flex-1">
+        <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">Day Reopened</p>
+        <p className="mt-0.5 text-xs text-slate-200">
+          Day {dayNo} is reopened. You can edit it until the owner closes it again.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="btn-ghost -mr-1 -mt-1 !h-7 !w-7 !p-0 text-slate-400 hover:text-white"
+        onClick={onDismiss}
+        title="Dismiss notification"
+      >
+        <X className="h-4 w-4" />
+      </button>
     </div>
   );
 }
@@ -635,7 +678,7 @@ function CatalogItemEditor({
           </button>
         ) : null}
       </td>
-      <td>{item.id}</td>
+      <td className="font-mono text-xs text-slate-400">#{item.sortOrder}</td>
       <td>
         <input
           value={draft.name}
@@ -742,8 +785,8 @@ function CatalogItemCard({
     >
       <div className="mobile-card-head">
         <div>
-          <p className="mobile-label">ID</p>
-          <h3 className="mobile-card-title">{item.id}</h3>
+          <p className="mobile-label">#{item.sortOrder}</p>
+          <h3 className="mobile-card-title">{item.name}</h3>
         </div>
         {canEdit && (
           <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
@@ -871,7 +914,7 @@ function CatalogManager({
           <thead>
             <tr>
               {canEdit && <th>Move</th>}
-              <th>ID</th>
+              <th>#</th>
               <th>Name</th>
               <th>Order</th>
               <th>Status</th>
@@ -1312,31 +1355,58 @@ function RecordsView({
   selectedDay,
   days,
   computed,
-  loading
+  loading,
+  onExportDailyXlsx,
+  onExportDailyPdf,
+  onExportMonthlyXlsx,
+  onExportMonthlyPdf
 }: {
   monthId: string;
   selectedDay: number;
   days: DailyLedgerInput[];
   computed: MonthComputed | null;
   loading: boolean;
+  onExportDailyXlsx?: () => void;
+  onExportDailyPdf?: () => void;
+  onExportMonthlyXlsx?: () => void;
+  onExportMonthlyPdf?: () => void;
 }) {
   const [recordMode, setRecordMode] = useState<"month" | "day">("month");
   const dayInput = days.find((day) => day.dayNo === selectedDay);
   const dayComputed = computed?.days.find((day) => day.dayNo === selectedDay);
   const monthRows = computed?.homeSummary.dayRows ?? [];
-  const ownerMonthRows = computed?.days.map((day) => {
+  const ownerRowsData = computed?.days.map((day) => {
     const opening = day.ownerBalances[0]?.opening ?? day.ownerBalanceTotal ?? 0;
     const expense = day.ownerBalances.reduce((total, row) => total + (row.expense ?? Math.max(row.amount, 0)), 0);
     const received = day.ownerBalances.reduce((total, row) => total + (row.received ?? Math.max(-row.amount, 0)), 0);
-    return [
-      day.label ?? `Day ${day.dayNo}`,
-      currency(opening),
-      currency(expense),
-      currency(received),
-      currency(day.ownerBalanceTotal)
-    ];
+    return {
+      label: day.label ?? `Day ${day.dayNo}`,
+      opening,
+      expense,
+      received,
+      balance: day.ownerBalanceTotal
+    };
   }) ?? [];
-  const creditAgingRows = computed
+  const ownerMonthRows = ownerRowsData.map((d) => [
+    d.label,
+    currency(d.opening),
+    currency(d.expense),
+    currency(d.received),
+    currency(d.balance)
+  ]);
+  if (ownerMonthRows.length > 0) {
+    const totalExpense = ownerRowsData.reduce((total, row) => total + row.expense, 0);
+    const totalReceived = ownerRowsData.reduce((total, row) => total + row.received, 0);
+    const latestBalance = ownerRowsData[ownerRowsData.length - 1]?.balance ?? 0;
+    ownerMonthRows.push([
+      "Total",
+      "-",
+      currency(totalExpense),
+      currency(totalReceived),
+      currency(latestBalance)
+    ]);
+  }
+  const creditAgingData = computed
     ? [...computed.days
         .flatMap((day) => day.creditRows)
         .reduce((totals, row) => {
@@ -1354,14 +1424,27 @@ function RecordsView({
         }, new Map<string, { opening: number; debt: number; credit: number; balance: number }>())
         .entries()]
         .sort((a, b) => b[1].balance - a[1].balance)
-        .map(([partyName, row]) => [
-          partyName,
-          currency(row.opening),
-          currency(row.debt),
-          currency(row.credit),
-          currency(row.balance)
-        ])
     : [];
+  const creditAgingRows = creditAgingData.map(([partyName, row]) => [
+    partyName,
+    currency(row.opening),
+    currency(row.debt),
+    currency(row.credit),
+    currency(row.balance)
+  ]);
+  if (creditAgingRows.length > 0) {
+    const totalOpening = creditAgingData.reduce((total, [, row]) => total + row.opening, 0);
+    const totalDebt = creditAgingData.reduce((total, [, row]) => total + row.debt, 0);
+    const totalCredit = creditAgingData.reduce((total, [, row]) => total + row.credit, 0);
+    const totalBalance = creditAgingData.reduce((total, [, row]) => total + row.balance, 0);
+    creditAgingRows.push([
+      "Total",
+      currency(totalOpening),
+      currency(totalDebt),
+      currency(totalCredit),
+      currency(totalBalance)
+    ]);
+  }
 
   return (
     <section className="space-y-5">
@@ -1370,6 +1453,52 @@ function RecordsView({
           <div>
             <h2>Previous Records</h2>
             <p>Review a full month or drill into a single date without entering edit mode.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {recordMode === "day" && onExportDailyXlsx && onExportDailyPdf && (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                  disabled={!computed || !dayComputed}
+                  onClick={onExportDailyXlsx}
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  Export Daily Excel
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                  disabled={!computed || !dayComputed}
+                  onClick={onExportDailyPdf}
+                >
+                  <FileDown className="h-3.5 w-3.5" />
+                  Export Daily PDF
+                </button>
+              </>
+            )}
+            {recordMode === "month" && onExportMonthlyXlsx && onExportMonthlyPdf && (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                  disabled={!computed}
+                  onClick={onExportMonthlyXlsx}
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5" />
+                  Export Monthly Excel
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 !px-2.5 text-xs inline-flex items-center gap-1.5"
+                  disabled={!computed}
+                  onClick={onExportMonthlyPdf}
+                >
+                  <FileDown className="h-3.5 w-3.5" />
+                  Export Monthly PDF
+                </button>
+              </>
+            )}
           </div>
         </div>
         <div className="mb-4 flex flex-wrap gap-2">
@@ -1405,39 +1534,79 @@ function RecordsView({
 
       {recordMode === "month" && computed ? (
         <>
-          <HomeDashboard month={computed} />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+            {[
+              { label: "Opening Cash", value: computed.openingBalance, color: "text-slate-100" },
+              { label: "Commissions", value: computed.homeSummary.monthlyIssueTotal, color: "text-emerald-400" },
+              { label: "Expenses", value: computed.homeSummary.monthlyExpenseTotal, color: "text-rose-400" },
+              { label: "Return Cash", value: computed.homeSummary.monthlyReturnBalance, color: "text-sky-400" },
+              { label: "Credit Dues", value: computed.homeSummary.creditBalanceTotal, color: "text-amber-400" }
+            ].map(({ label, value, color }) => (
+              <div key={label} className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-sm">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+                <p className={`mt-1 font-mono text-xl font-bold tabular-nums ${color}`}>
+                  {currency(value)}
+                </p>
+              </div>
+            ))}
+          </div>
           <section className="grid gap-5 xl:grid-cols-2">
             <RecordTable
               title="Commission Categories"
               headers={["Category", "Amount"]}
-              rows={[...computed.homeSummary.commissionMatrix
-                .reduce((totals, row) => {
-                  for (const [category, amount] of Object.entries(row.byCategory)) {
-                    totals.set(category, (totals.get(category) ?? 0) + amount);
-                  }
-                  return totals;
-                }, new Map<string, number>())
-                .entries()]
-                .filter(([, amount]) => amount !== 0)
-                .sort((a, b) => b[1] - a[1])
-                .map(([category, amount]) => [category, currency(amount)])}
+              rows={(() => {
+                const rows = [...computed.homeSummary.commissionMatrix
+                  .reduce((totals, row) => {
+                    for (const [category, amount] of Object.entries(row.byCategory)) {
+                      totals.set(category, (totals.get(category) ?? 0) + amount);
+                    }
+                    return totals;
+                  }, new Map<string, number>())
+                  .entries()]
+                  .filter(([, amount]) => amount !== 0)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([category, amount]) => [category, currency(amount)]);
+                if (rows.length > 0) {
+                  rows.push(["Total", currency(computed.homeSummary.monthlyIssueTotal)]);
+                }
+                return rows;
+              })()}
             />
             <RecordTable
               title="Expense Categories"
               headers={["Category", "Amount"]}
-              rows={computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)])}
+              rows={(() => {
+                const rows = computed.homeSummary.expenseByCategory.map((row) => [row.category, currency(row.amount)]);
+                if (rows.length > 0) {
+                  rows.push(["Total", currency(computed.homeSummary.monthlyExpenseTotal)]);
+                }
+                return rows;
+              })()}
             />
             <RecordTable
               title="Month Day Records"
               headers={["Period", "Opening", "Issue", "Expense", "Balance", "Credit"]}
-              rows={monthRows.map((row) => [
-                row.label ?? `Day ${row.dayNo}`,
-                currency(row.openingBalance),
-                currency(row.issueBalance),
-                currency(row.expenseTotal),
-                currency(row.returnBalance),
-                currency(row.creditBalance)
-              ])}
+              rows={(() => {
+                const rows = monthRows.map((row) => [
+                  row.label ?? `Day ${row.dayNo}`,
+                  currency(row.openingBalance),
+                  currency(row.issueBalance),
+                  currency(row.expenseTotal),
+                  currency(row.returnBalance),
+                  currency(row.creditBalance)
+                ]);
+                if (rows.length > 0) {
+                  rows.push([
+                    "Total",
+                    "-",
+                    currency(computed.homeSummary.monthlyIssueTotal),
+                    currency(computed.homeSummary.monthlyExpenseTotal),
+                    currency(computed.homeSummary.monthlyReturnBalance),
+                    currency(computed.homeSummary.creditBalanceTotal)
+                  ]);
+                }
+                return rows;
+              })()}
             />
             <RecordTable
               title="Credit Party Aging"
@@ -1453,12 +1622,13 @@ function RecordsView({
         </>
       ) : recordMode === "day" && dayInput && dayComputed ? (
         <>
-          <section className="grid gap-3 md:grid-cols-5">
+          <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-6">
             {[
-              ["Opening", dayComputed.openingBalance],
+              ["Opening Balance", dayComputed.openingBalance],
               ["Commission", dayComputed.commissionTotal],
               ["Expense", dayComputed.expenseTotal],
               ["Balance", dayComputed.returnBalance],
+              ["Franchise Closing Balance", dayComputed.ownerBalanceTotal],
               ["Credit", dayComputed.creditTotals.balance]
             ].map(([label, value]) => (
               <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4" key={label}>
@@ -1556,51 +1726,85 @@ function RecordsView({
 }
 
 function RecordTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+  const isRowTotal = (row: string[]) => row.includes("Total");
+  const dataRowCount = rows.filter((r) => !isRowTotal(r)).length;
+
   return (
     <section className="panel">
       <div className="panel-title">
         <div>
           <h3>{title}</h3>
-          <p>{rows.length} saved rows</p>
+          <p>{dataRowCount} saved rows</p>
         </div>
       </div>
       <div className="mobile-card-list md:hidden">
-        {rows.map((row, index) => (
-          <article className="mobile-list-card" key={`${title}-mobile-${index}`}>
-            <div className="mobile-card-head">
-              <div>
-                <p className="mobile-label">{headers[0] ?? "Row"}</p>
-                <h3 className="mobile-card-title">{row[0] ?? "-"}</h3>
-              </div>
-            </div>
-            <dl className="mobile-kv-grid mt-3">
-              {row.slice(1).map((cell, cellIndex) => (
-                <div key={`${title}-mobile-${index}-${cellIndex}`}>
-                  <dt>{headers[cellIndex + 1] ?? `Value ${cellIndex + 1}`}</dt>
-                  <dd>{cell}</dd>
+        {rows.map((row, index) => {
+          const isTotal = isRowTotal(row);
+          return (
+            <article
+              className={`mobile-list-card ${isTotal ? "!border-emerald-500/40 !bg-emerald-950/20 font-bold" : ""}`}
+              key={`${title}-mobile-${index}`}
+            >
+              <div className="mobile-card-head">
+                <div>
+                  <p className="mobile-label">{headers[0] ?? "Row"}</p>
+                  <h3 className={`mobile-card-title ${isTotal ? "text-emerald-300 font-bold" : ""}`}>
+                    {row[0] ?? "-"}
+                  </h3>
                 </div>
-              ))}
-            </dl>
-          </article>
-        ))}
+              </div>
+              <dl className="mobile-kv-grid mt-3">
+                {row.slice(1).map((cell, cellIndex) => (
+                  <div key={`${title}-mobile-${index}-${cellIndex}`}>
+                    <dt>{headers[cellIndex + 1] ?? `Value ${cellIndex + 1}`}</dt>
+                    <dd className={isTotal ? "text-emerald-300 font-bold" : undefined}>{cell}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+          );
+        })}
         {rows.length === 0 && <p className="mobile-empty">No saved rows.</p>}
       </div>
       <div className="table-wrap hidden md:block">
         <table>
           <thead>
             <tr>
-              {headers.map((header) => <th key={header}>{header}</th>)}
+              {headers.map((header, idx) => (
+                <th key={header} className={idx > 0 ? "text-right" : "text-left"}>
+                  {header}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
-              <tr key={`${title}-${index}`}>
-                {row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}
-              </tr>
-            ))}
+            {rows.map((row, index) => {
+              const isTotal = isRowTotal(row);
+              return (
+                <tr
+                  key={`${title}-${index}`}
+                  className={isTotal ? "border-t-2 border-slate-700 bg-slate-900/90 font-bold" : undefined}
+                >
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={`${title}-${index}-${cellIndex}`}
+                      className={
+                        isTotal
+                          ? `${cellIndex > 0 ? "font-mono text-right tabular-nums" : ""} font-bold text-emerald-300 py-2.5`
+                          : cellIndex > 0
+                            ? "font-mono text-right tabular-nums font-bold text-white"
+                            : "font-bold text-white"
+                      }
+                    >
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={headers.length}>No saved rows.</td>
+                <td colSpan={headers.length} className="text-center text-slate-500 py-6">No saved rows.</td>
               </tr>
             )}
           </tbody>
@@ -1688,8 +1892,12 @@ function AuthPanel({
 }
 
 function App() {
+  useStickyTableHeaders(56);
   const [view, setView] = useState<View>("dashboard");
   const [expenseSection, setExpenseSection] = useState<ExpenseSection>("daily-entry");
+  const [expenseSettingsSubTab, setExpenseSettingsSubTab] = useState<"expense-categories" | "credit-parties" | "commission-categories">("expense-categories");
+  const [jazzLoadSection, setJazzLoadSection] = useState<JazzLoadSection>("daily");
+  const [stockSection, setStockSection] = useState<StockSection>("daily");
   const [user, setUser] = useState<AppUser | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [authStatus, setAuthStatus] = useState("Initializing local auth...");
@@ -1714,6 +1922,7 @@ function App() {
   const [monthEmailing, setMonthEmailing] = useState(false);
   const [bulkReopening, setBulkReopening] = useState<"selected" | "all" | null>(null);
   const [bulkClosingDays, setBulkClosingDays] = useState(false);
+  const [dismissedReopenDay, setDismissedReopenDay] = useState<number | null>(null);
   const [monthStatus, setMonthStatusState] = useState<"open" | "closed">("open");
   const [periodFinalSettlementStatus, setPeriodFinalSettlementStatus] = useState<string | null>(null);
   const [monthClosing, setMonthClosing] = useState(false);
@@ -1737,7 +1946,6 @@ function App() {
   const [expenseMismatchCount, setExpenseMismatchCount] = useState(0);
   const [theme, setTheme] = useState<"dark" | "light">(() => (localStorage.getItem("theme") === "light" ? "light" : "dark"));
   const [uiMode, setUiMode] = useState<UiMode>(() => (localStorage.getItem("uiMode") === "classic" ? "classic" : "modern"));
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [now, setNow] = useState(() => new Date());
   const [authReady, setAuthReady] = useState(false);
   const [calendarSelectionReady, setCalendarSelectionReady] = useState(false);
@@ -1747,6 +1955,22 @@ function App() {
   const expenseManualSaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [syncState, setSyncState] = useState<SyncState>(() => nextSyncState({ online: navigator.onLine, hasPendingWrites: false }));
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileMenuOpen(false);
+        mobileMenuTriggerRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [mobileMenuOpen]);
   const [masterRefreshModal, setMasterRefreshModal] = useState<MasterRefreshModalState>({
     open: false,
     title: "",
@@ -1812,6 +2036,30 @@ function App() {
     [ledgerReadModeConfig, monthId, role]
   );
 
+  const routeState: RouteState = useMemo(() => ({
+    view,
+    monthId,
+    selectedDay,
+    expenseSection,
+    jazzLoadSection,
+    stockSection
+  }), [expenseSection, jazzLoadSection, monthId, selectedDay, stockSection, view]);
+
+  const handleApplyRoute = useCallback((route: ParsedRoute) => {
+    if (route.view && route.view !== view) setView(route.view);
+    if (route.monthId && route.monthId !== monthId) setMonthId(route.monthId);
+    if (route.selectedDay && route.selectedDay !== selectedDay) setSelectedDay(route.selectedDay);
+    if (route.stockSection && route.stockSection !== stockSection) setStockSection(route.stockSection);
+    if (route.jazzLoadSection && route.jazzLoadSection !== jazzLoadSection) setJazzLoadSection(route.jazzLoadSection);
+    if (route.expenseSection && route.expenseSection !== expenseSection) setExpenseSection(route.expenseSection);
+  }, [expenseSection, jazzLoadSection, monthId, selectedDay, stockSection, view]);
+
+  useAppRouter({
+    state: routeState,
+    onApplyRoute: handleApplyRoute,
+    isReady: authReady && calendarSelectionReady && Boolean(user)
+  });
+
   function confirmLeavePendingChanges() {
     return window.confirm("There are unsaved daily-entry changes. Leave this screen anyway?");
   }
@@ -1872,9 +2120,18 @@ function App() {
             role: session.user.role
           };
           const restoredSelection = readStoredCalendarSelection(appUser.uid);
-          setMonthId(restoredSelection.monthId);
-          setSelectedDay(restoredSelection.dayNo);
-          setView(readStoredView(appUser.uid));
+          const initialRoute = parseRoute(window.location.pathname);
+          const effectiveMonth = initialRoute.monthId ?? restoredSelection.monthId;
+          const effectiveDay = initialRoute.selectedDay ?? restoredSelection.dayNo;
+          const effectiveView = initialRoute.view ?? readStoredView(appUser.uid);
+
+          setMonthId(effectiveMonth);
+          setSelectedDay(effectiveDay);
+          setView(effectiveView);
+          if (initialRoute.stockSection) setStockSection(initialRoute.stockSection);
+          if (initialRoute.jazzLoadSection) setJazzLoadSection(initialRoute.jazzLoadSection);
+          if (initialRoute.expenseSection) setExpenseSection(initialRoute.expenseSection);
+
           setCalendarSelectionReady(true);
           setUser(appUser);
           setRole(appUser.role);
@@ -1892,6 +2149,7 @@ function App() {
         setRole(null);
         setAuthStatus("Sign in required.");
         setAuthReady(true);
+        setLoading(false);
       }
     }
 
@@ -1986,9 +2244,18 @@ function App() {
         role: res.user.role
       };
       const restoredSelection = readStoredCalendarSelection(appUser.uid);
-      setMonthId(restoredSelection.monthId);
-      setSelectedDay(restoredSelection.dayNo);
-      setView(readStoredView(appUser.uid));
+      const initialRoute = parseRoute(window.location.pathname);
+      const effectiveMonth = initialRoute.monthId ?? restoredSelection.monthId;
+      const effectiveDay = initialRoute.selectedDay ?? restoredSelection.dayNo;
+      const effectiveView = initialRoute.view ?? readStoredView(appUser.uid);
+
+      setMonthId(effectiveMonth);
+      setSelectedDay(effectiveDay);
+      setView(effectiveView);
+      if (initialRoute.stockSection) setStockSection(initialRoute.stockSection);
+      if (initialRoute.jazzLoadSection) setJazzLoadSection(initialRoute.jazzLoadSection);
+      if (initialRoute.expenseSection) setExpenseSection(initialRoute.expenseSection);
+
       setCalendarSelectionReady(true);
       setUser(appUser);
       setRole(appUser.role);
@@ -2023,16 +2290,24 @@ function App() {
   async function refreshMonthList() {
     try {
       const res = await ledgerApiClient.periods.list();
-      const pgMonths = (res.periods || []).map((p) => ({
-        id: p.period_key,
-        label: p.label || p.period_key,
-        status: p.status as "open" | "closed",
-        openingBalance: 0,
-        createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
-        updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
-      }));
-      setMonths(pgMonths);
-      return pgMonths as unknown as MonthRecord[];
+      let updatedMonths: MonthRecord[] = [];
+      setMonths((currentMonths) => {
+        const currentMap = new Map(currentMonths.map((m) => [m.id, m]));
+        updatedMonths = (res.periods || []).map((p) => {
+          const existing = currentMap.get(p.period_key);
+          return {
+            id: p.period_key,
+            label: p.label || p.period_key,
+            status: p.status as "open" | "closed",
+            openingBalance: existing?.openingBalance ?? 0,
+            ownerOpeningBalance: existing?.ownerOpeningBalance ?? 0,
+            createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
+            updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
+          };
+        });
+        return updatedMonths;
+      });
+      return updatedMonths;
     } catch {
       return [];
     }
@@ -2061,15 +2336,21 @@ function App() {
     let cancelled = false;
     void ledgerApiClient.periods.list().then((res) => {
       if (cancelled) return;
-      const pgMonths = (res.periods || []).map((p) => ({
-        id: p.period_key,
-        label: p.label || p.period_key,
-        status: p.status as "open" | "closed",
-        openingBalance: 0,
-        createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
-        updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
-      }));
-      setMonths(pgMonths);
+      setMonths((currentMonths) => {
+        const currentMap = new Map(currentMonths.map((m) => [m.id, m]));
+        return (res.periods || []).map((p) => {
+          const existing = currentMap.get(p.period_key);
+          return {
+            id: p.period_key,
+            label: p.label || p.period_key,
+            status: p.status as "open" | "closed",
+            openingBalance: existing?.openingBalance ?? 0,
+            ownerOpeningBalance: existing?.ownerOpeningBalance ?? 0,
+            createdAt: p.created_at ? new Date(p.created_at).getTime() : undefined,
+            updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : undefined
+          };
+        });
+      });
       setJazzLoadMonths(
         (res.periods || []).map((p) => ({
           id: p.period_key,
@@ -2468,10 +2749,15 @@ function App() {
   );
 
   function currentMonthRecord(): MonthRecord {
-    return (
-      months.find((month) => month.id === monthId) ??
-      createMonth(monthId, calculatedOpeningBalance, calculatedOwnerOpeningBalance)
-    );
+    const existing = months.find((month) => month.id === monthId);
+    if (existing) {
+      return {
+        ...existing,
+        openingBalance: existing.openingBalance || calculatedOpeningBalance,
+        ownerOpeningBalance: existing.ownerOpeningBalance !== undefined ? existing.ownerOpeningBalance : calculatedOwnerOpeningBalance
+      };
+    }
+    return createMonth(monthId, calculatedOpeningBalance, calculatedOwnerOpeningBalance);
   }
 
   async function saveDay(day: DailyLedgerInput, options: SaveDayOptions = {}) {
@@ -2895,6 +3181,64 @@ function App() {
       canRun: roleCan(role, MASTER_REFRESH_ACCESS),
       disabledReason: "Only owner/admin can run Expense master refresh.",
       run: async (emit) => {
+        if (isPostgreSqlPeriod(monthId)) {
+          emit({ step: "Loading PostgreSQL month data and syncing balances..." });
+          try {
+            const periodData = await getAccountingPeriodWithDays(monthId);
+            if (periodData) {
+              const [seedsRes, creditPartiesCatalog] = await Promise.all([
+                ledgerApiClient.periods.getSeeds(periodData.period.id).catch(() => null),
+                ledgerApiClient.catalogs.getExpenseCreditParties().catch(() => ({ data: [] }))
+              ]);
+              if (seedsRes?.seeds?.financial) {
+                const fin = seedsRes.seeds.financial as any;
+                const cashOpening = Number(fin.opening_cash ?? fin.opening_cash_balance ?? 0);
+                const ownerOpening = Number(fin.opening_owner_balance ?? fin.owner_opening_balance ?? 0);
+                setOpeningBalance(cashOpening);
+                setOwnerOpeningBalance(ownerOpening);
+
+                setMonths((currentMonths) =>
+                  currentMonths.map((m) =>
+                    m.id === monthId
+                      ? { ...m, openingBalance: cashOpening, ownerOpeningBalance: ownerOpening }
+                      : m
+                  )
+                );
+
+                const partyNameMap = new Map((creditPartiesCatalog.data || []).map((cp: any) => [cp.id, cp.name]));
+                const creditBalances: ExpenseCarryForwardCreditBalance[] = (seedsRes.seeds.creditParties || []).map((cp: any) => ({
+                  partyId: cp.party_id,
+                  partyName: partyNameMap.get(cp.party_id) || cp.party_id,
+                  balance: Number(cp.opening_balance ?? 0)
+                }));
+
+                const isGenesis = isGenesisPeriod(monthId) || !fin.source_period_key;
+                const carrySeed: ExpenseCarryForwardSeed = {
+                  isGenesis,
+                  sourceMonthId: fin.source_period_key || (isGenesis ? "genesis" : ""),
+                  sourceDayNo: fin.source_day_no || 0,
+                  openingBalance: cashOpening,
+                  ownerOpeningBalance: ownerOpening,
+                  creditBalances
+                };
+                setExpenseCarryForwardSeed(carrySeed);
+                const nextComputed = computeMonth(days, cashOpening, monthId, ownerOpening, carrySeed);
+                setComputed(nextComputed);
+              }
+            }
+          } catch {
+            // ignore seed load errors
+          }
+          await refreshMonthList();
+          emit({ step: "Completed successfully." });
+          return {
+            daysChecked: days.length,
+            mismatchesCorrected: 0,
+            monthlySummariesUpdated: 1,
+            message: "Day openings now follow PostgreSQL ledger balances."
+          };
+        }
+
         emit({ step: "Loading month data and recalculating daily balances locally..." });
         await recalculateMonth(monthId);
         emit({ step: "Loading recalculated records..." });
@@ -3002,6 +3346,92 @@ function App() {
     }
   }
 
+  async function handleUniversalMasterRefresh() {
+    await recalc();
+  }
+
+  async function handleUniversalCloseDay() {
+    if (selectedDay === 32) {
+      if (role !== "owner") {
+        setStatus("Only owner can verify FINAL month-end settlement.");
+        return;
+      }
+      await closeDay(selectedDayInput);
+      return;
+    }
+    if (currentMonthStatus === "closed") {
+      setStatus("Reopen the month before closing days.");
+      return;
+    }
+    if (!window.confirm(`Close day ${selectedDay}? Inputs and saves will be locked until reopened.`)) {
+      return;
+    }
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        setLoading(true);
+        setLoadingMessage(`Closing day ${selectedDay}...`);
+        await closeOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          flushDraft: hasPendingDayChanges && expenseManualSaveRef.current
+            ? () => expenseManualSaveRef.current!()
+            : undefined
+        });
+        closedExpenseDayKeysRef.current.add(`${monthId}/${selectedDay}`);
+        setDays((currentDays) => {
+          const d = currentDays.find((entry) => entry.dayNo === selectedDay) ?? emptyDay(selectedDay);
+          return replaceDay(currentDays, { ...d, status: "closed" });
+        });
+        setStatus(`Day ${selectedDay} successfully closed across all ledgers.`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to close day.";
+        setStatus(`Error closing day: ${msg}`);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+    await closeDay(selectedDayInput);
+  }
+
+  async function handleUniversalReopenDay() {
+    if (selectedDay === 32) {
+      setStatus("FINAL is a month-end closing snapshot and cannot be reopened.");
+      return;
+    }
+    if (role !== "owner") {
+      setStatus("Only owner can reopen days.");
+      return;
+    }
+    if (!window.confirm(`Reopen day ${selectedDay}?`)) {
+      return;
+    }
+    if (isPostgreSqlPeriod(monthId)) {
+      try {
+        setLoading(true);
+        setLoadingMessage(`Reopening day ${selectedDay}...`);
+        await reopenOperationalDayUnified({
+          monthId,
+          dayNo: selectedDay,
+          reason: "Reopened by owner"
+        });
+        closedExpenseDayKeysRef.current.delete(`${monthId}/${selectedDay}`);
+        setDays((currentDays) => {
+          const d = currentDays.find((entry) => entry.dayNo === selectedDay) ?? emptyDay(selectedDay);
+          return replaceDay(currentDays, { ...d, status: "reopen" });
+        });
+        setStatus(`Day ${selectedDay} successfully reopened across all ledgers.`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Failed to reopen day.";
+        setStatus(`Error reopening day: ${msg}`);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+    await reopenDay(selectedDay);
+  }
+
   async function handleGuidedCloseMonth() {
     if (!isPostgreSqlPeriod(monthId)) {
       setStatus("Guided month close is only supported for PostgreSQL periods.");
@@ -3009,6 +3439,19 @@ function App() {
     }
     if (!roleCan(role, "ownerControls")) {
       const msg = "Closing periods is restricted to owner access.";
+      setStatus(msg);
+      setMonthCloseModal((prev) => ({
+        ...prev,
+        isOpen: true,
+        step: "prompt",
+        errorMessage: msg
+      }));
+      return;
+    }
+
+    const unclosedDays = days.filter((d) => d.dayNo !== 32 && d.status !== "closed");
+    if (unclosedDays.length > 0) {
+      const msg = `Cannot close ${formatMonth(monthId)}: ${unclosedDays.length} day(s) remain open or unclosed (${unclosedDays.map((d) => `Day ${d.dayNo}`).join(", ")}). Please close all operational days first.`;
       setStatus(msg);
       setMonthCloseModal((prev) => ({
         ...prev,
@@ -3080,8 +3523,20 @@ function App() {
       return;
     }
 
-    const sourceKey = sourceMonthKey || (isPeriodUninitialized ? "2026-08" : monthId);
+    const prevKey = getPreviousPeriodKey(monthId);
+    const sourceKey = sourceMonthKey || (isPeriodUninitialized && prevKey ? prevKey : monthId);
     const targetKey = getNextPeriodKey(sourceKey).nextPeriodKey;
+
+    const currentLive = currentDateState(now);
+    const targetStartDate = `${targetKey}-01`;
+    const currentLiveDateStr = `${currentLive.monthId}-${pad2(currentLive.dayNo)}`;
+
+    if (targetStartDate > currentLiveDateStr) {
+      const msg = `Cannot open future month ${formatMonth(targetKey)}. Next month can only proceed on or after ${targetStartDate}.`;
+      setStatus(msg);
+      alert(msg);
+      return;
+    }
 
     setInitializingNextPeriod(true);
     setLoadingMessage(`Initializing ${formatMonth(targetKey)} from ${formatMonth(sourceKey)} FINAL...`);
@@ -3117,6 +3572,62 @@ function App() {
     }
   }
 
+  async function handleReopenMonth() {
+    if (!isPostgreSqlPeriod(monthId)) {
+      setStatus("Reopening is only supported for PostgreSQL periods.");
+      return;
+    }
+    if (!roleCan(role, "ownerControls")) {
+      setStatus("Reopening periods is restricted to owner access.");
+      return;
+    }
+
+    const defaultReason = `Governed revision of ${formatMonth(monthId)} transactions`;
+    const reason = window.prompt(
+      `Reopen ${formatMonth(monthId)} for revisions and corrections?\n\nEnter audit reason (required):`,
+      defaultReason
+    );
+
+    if (reason === null) {
+      // User cancelled
+      return;
+    }
+
+    const trimmedReason = reason.trim();
+    if (!trimmedReason) {
+      alert("An audit reason is required to reopen an accounting period.");
+      return;
+    }
+
+    setLoadingMessage(`Reopening ${formatMonth(monthId)}...`);
+    setLoading(true);
+
+    try {
+      const periodData = await getAccountingPeriodWithDays(monthId);
+      if (!periodData) {
+        throw new Error(`Period ${monthId} not found in PostgreSQL.`);
+      }
+
+      await ledgerApiClient.periods.reopenPeriod(periodData.period.id, trimmedReason);
+
+      // Invalidate caches and refresh state
+      clearPeriodCache();
+      setMonthStatusState("open");
+      await refreshMonthList();
+      await getAccountingPeriodWithDays(monthId, true);
+
+      const msg = `Period ${formatMonth(monthId)} is now OPEN. You can reopen closed days to make edits. When finished, click 'Close Month' to automatically re-rollover updated balances.`;
+      setStatus(msg);
+      alert(msg);
+    } catch (err: any) {
+      const errorMsg = err instanceof Error ? err.message : (err?.message || "Failed to reopen accounting period.");
+      setStatus(`Cannot reopen month: ${errorMsg}`);
+      alert(`Cannot reopen month: ${errorMsg}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function toggleClosed() {
     if (isPostgreSqlPeriod(monthId)) {
       if (!roleCan(role, "ownerControls")) {
@@ -3126,13 +3637,7 @@ function App() {
       if (monthStatus === "open") {
         await handleGuidedCloseMonth();
       } else {
-        const { nextPeriodKey } = getNextPeriodKey(monthId);
-        const nextPeriodUninitialized = !months.some((m) => m.id === nextPeriodKey);
-        if (nextPeriodUninitialized) {
-          await handleInitializeNextPeriod(monthId);
-        } else {
-          setStatus("Reopening a closed PostgreSQL period requires governed correction/rollover workflows.");
-        }
+        await handleReopenMonth();
       }
       return;
     }
@@ -3341,7 +3846,7 @@ function App() {
     );
   }
 
-  const currentExpenseMonth = months.find((month) => month.id === monthId);
+  const currentExpenseMonth = currentMonthRecord();
   const expenseCarryForwardWarningList = expenseCarryForwardWarnings(currentExpenseMonth, days, expenseCarryForwardSeed, { day1LoadError });
   const expenseOpeningMismatchCount = expenseCarryForwardWarningList.length;
   const isPeriodRoutingPending = isPostgreSqlPeriod(monthId) && (!pgPeriodRouting.checked || loading);
@@ -3415,21 +3920,39 @@ function App() {
   const canToggleCurrentMonth = roleCan(role, "ownerControls") && canAccessView(role, "expense") && !isPeriodUninitialized;
   const currentMonthStatus = months.find((month) => month.id === monthId)?.status ?? (isPeriodUninitialized ? "uninitialized" : monthStatus);
   const finalDayEntry = days.find((d) => d.dayNo === 32);
-  const isFinalClosed = finalDayEntry?.status === "closed" || periodFinalSettlementStatus === "VERIFIED" || periodFinalSettlementStatus === "CLOSED";
-  const isMonthCloseRequired = isPostgreSqlPeriod(monthId) && isFinalClosed && currentMonthStatus === "open";
   const { nextPeriodKey } = getNextPeriodKey(monthId);
+  const currentLive = currentDateState(now);
+  const nextMonthStartDate = `${nextPeriodKey}-01`;
+  const currentLiveDateStr = `${currentLive.monthId}-${pad2(currentLive.dayNo)}`;
+  const isNextMonthArrived = nextMonthStartDate <= currentLiveDateStr;
+
+  const allOperationalDaysClosed =
+    days.length > 0 && !days.some((d) => d.dayNo !== 32 && d.status !== "closed");
+
+  // Closure of FINAL is temporary and only genuine if all operational days are closed
+  const isFinalClosed =
+    allOperationalDaysClosed &&
+    (finalDayEntry?.status === "closed" ||
+      periodFinalSettlementStatus === "VERIFIED" ||
+      periodFinalSettlementStatus === "CLOSED");
+
+  // Month close is NEVER required for an active month in progress, nor when operational days remain open
+  const isMonthCloseRequired =
+    isPostgreSqlPeriod(monthId) &&
+    currentMonthStatus === "open" &&
+    isNextMonthArrived &&
+    allOperationalDaysClosed &&
+    isFinalClosed;
+
   const isNextPeriodUninitialized =
     isPostgreSqlPeriod(monthId) &&
     currentMonthStatus === "closed" &&
     isFinalClosed &&
+    isNextMonthArrived &&
     !months.some((m) => m.id === nextPeriodKey);
   const isMonthCloseAction = currentMonthStatus === "open";
   const handleMonthToggle = view === "jazz-load" ? toggleJazzLoadClosed : toggleClosed;
-  const monthToggleLabel = isMonthCloseAction
-    ? "Close Month"
-    : isNextPeriodUninitialized
-    ? `Initialize ${formatMonth(nextPeriodKey)}`
-    : "Reopen Month";
+  const monthToggleLabel = isMonthCloseAction ? "Close Month" : "Reopen Month";
   const dateLabel = dateLabelFor(monthId, selectedDay);
   const liveClock = liveClockText(now);
   const selectedDateParts = dateParts(monthId, selectedDay);
@@ -3453,7 +3976,7 @@ function App() {
     ledgerReadModeConfig.hardV2Allowed !== true &&
     shadowAllowedRoles.includes(role as UserRole) &&
     (ledgerReadModeConfig.monthId ?? monthId) === monthId;
-  const shellGrid = sidebarOpen ? "lg:grid-cols-[20rem_minmax(0,1fr)]" : "lg:grid-cols-[6rem_minmax(0,1fr)]";
+
   const shellTone =
     theme === "dark"
       ? "bg-[radial-gradient(circle_at_top_left,#064e3b33,transparent_32rem),linear-gradient(180deg,#020617,#0f172a)] text-slate-100"
@@ -3472,7 +3995,6 @@ function App() {
   const showOfflineOwnerWarning = syncState === "offline";
   const currentViewLabel = navItems.find((item) => item.id === view)?.label ?? "Dashboard";
   const mobilePrimaryNav = navItems.filter((item) => item.show).filter((item) => ["dashboard", "expense", "jazz-load", "stock-ledger"].includes(item.id)).slice(0, 4);
-  const showRegisteredSidebarControls = view === "jazz-load" || view === "stock-ledger";
 
   function navigateTo(nextView: View) {
     if (hasPendingDayChanges && nextView !== view && !confirmLeavePendingChanges()) {
@@ -3481,6 +4003,43 @@ function App() {
     }
     setView(nextView);
     setMobileMenuOpen(false);
+  }
+
+  function handleSelectExpenseSection(section: ExpenseSection) {
+    if (role !== "owner" && ownerOnlyExpenseSections.has(section)) {
+      setStatus("Only owner can manage this section.");
+      return;
+    }
+    if (hasPendingDayChanges && section !== expenseSection && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on Daily Entry because changes are still pending save.");
+      return;
+    }
+    setExpenseSection(section);
+    if (view !== "expense") {
+      setView("expense");
+    }
+  }
+
+  function handleSelectJazzLoadSection(section: JazzLoadSection) {
+    if (section === "settings" && role !== "owner") {
+      setStatus("Owner only. Jazz Load Settings are restricted to owner access.");
+      return;
+    }
+    setJazzLoadSection(section);
+    if (view !== "jazz-load") {
+      setView("jazz-load");
+    }
+  }
+
+  function handleSelectStockSection(section: StockSection) {
+    if (section === "settings" && role !== "owner" && role !== "admin") {
+      setStatus("Owner and Admin only. Stock Settings are restricted.");
+      return;
+    }
+    setStockSection(section);
+    if (view !== "stock-ledger") {
+      setView("stock-ledger");
+    }
   }
 
   async function saveCatalog(
@@ -3792,105 +4351,13 @@ function App() {
     }
   }
 
-  const showExpenseSidebarControls = view === "expense" && (expenseSection === "daily-entry" || expenseSection === "previous-records");
-  const expenseSidebarControls = showExpenseSidebarControls ? (
-    <>
-      <p className="text-xs font-semibold uppercase text-slate-500">Day Controls</p>
-      {/* <p className="mt-1 text-sm font-semibold text-white">{dateLabel}</p> */}
-      <UniversalCalendar
-        moduleKey="expense"
-        monthId={monthId}
-        selectedDay={selectedDay}
-        days={expenseCalendarDays}
-        now={now}
-        disabled={expenseSection === "daily-entry" ? !canSelectDailyDate : false}
-        showFinal
-        canSelectFinal={canUseFinalPeriod(monthId, now)}
-        variant="mini"
-        onSelect={(nextDay) => {
-          if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
-            setStatus("Stayed on the current day because changes are still pending save.");
-            return;
-          }
-          setSelectedDay(nextDay);
-        }}
-      />
-      <UniversalDayControlBar
-        moduleKey="expense"
-        selectedDateLabel={dateLabel}
-        selectedMonthLabel={formatMonth(monthId)}
-        selectedStatus={selectedExpenseStatus}
-        role={role}
-        density="compact"
-        busy={loading || bulkReopening !== null || bulkClosingDays}
-        autoSaveStatus={
-          selectedDayLocked
-            ? "closed"
-            : syncState === "offline" || syncState === "syncing"
-              ? "pendingSync"
-              : hasPendingDayChanges
-                ? "typing"
-                : expenseMismatchCount + expenseOpeningMismatchCount > 0
-                  ? "pendingRecalculation"
-                  : "saved"
-        }
-        permissions={{
-          canCloseSelectedDay: expenseSection === "daily-entry" && (selectedDay === 32 ? role === "owner" : canCloseSelectedDay) && Boolean(user),
-          canReopenSelectedDay: selectedDay !== 32 && expenseSection === "daily-entry" && Boolean(user) && (canReopenSelectedDay || canOwnerBulkReopenSelected),
-          canReopenAllDays: expenseSection === "daily-entry" && Boolean(user) && canOwnerBulkReopenAll,
-          canClosePreviousDaysExceptToday: expenseSection === "daily-entry" && Boolean(user) && canOwnerCloseAllExceptToday,
-          canRunMasterRefresh: Boolean(user) && roleCan(role, MASTER_REFRESH_ACCESS),
-          closeDisabledReason:
-            selectedDayLocked
-              ? (selectedDay === 32 ? "FINAL is verified and closed." : "This day is already closed.")
-              : (selectedDay === 32 && role !== "owner")
-                ? "Only owner can verify FINAL month-end settlement."
-                : "This day cannot be closed for your role.",
-          reopenDisabledReason:
-            selectedDay === 32
-              ? "FINAL is a month-end closing snapshot and cannot be reopened. Reopen an operational day (such as Day 31) to make corrections."
-              : "Only owner can reopen days.",
-          reopenAllDisabledReason: "Only owner can reopen all days.",
-          closePreviousDisabledReason: "Only owner can close previous days.",
-          masterRefreshDisabledReason: "Only owner/admin can run master refresh."
-        }}
-        closeDayLabel={selectedDay === 32 ? "Verify & Close FINAL" : "Close Day"}
-        onCloseSelectedDay={() => {
-          const confirmMsg = selectedDay === 32
-            ? "Verify and close FINAL month-end settlement?"
-            : `Close ${selectedDayInput.label ?? `Day ${selectedDay}`}?`;
-          if (!window.confirm(confirmMsg)) return;
-          void closeDay(selectedDayInput);
-        }}
-        onReopenSelectedDay={() => {
-          void reopenDay(selectedDay);
-        }}
-        onReopenAllDays={() => void reopenMonthDays("all")}
-        onClosePreviousDaysExceptToday={closeAllDaysExceptToday}
-        onRunMasterRefresh={recalc}
-        extraActions={
-          <>
-            <button
-              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
-              disabled={!computed || !selectedDayComputed}
-              onClick={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
-            >
-              <FileSpreadsheet />
-              Export Daily Excel
-            </button>
-            <button
-              className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
-              disabled={!computed || !selectedDayComputed}
-              onClick={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
-            >
-              <FileDown />
-              Export Daily PDF
-            </button>
-          </>
-        }
-      />
-    </>
-  ) : null;
+  function handleSelectDayProtected(nextDay: number) {
+    if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
+      setStatus("Stayed on the current day because changes are still pending save.");
+      return;
+    }
+    setSelectedDay(nextDay);
+  }
 
   return (
     <SelectedDateProvider
@@ -3902,7 +4369,7 @@ function App() {
       }}
     >
     <SidebarDayControlsProvider>
-    <main className={`flex min-h-screen flex-col overflow-x-auto ${shellTone}`}>
+    <main className={`flex min-h-screen flex-col overflow-x-clip ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
       <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
       <MasterCalculationRefreshModal
@@ -3913,223 +4380,260 @@ function App() {
         isOpen={monthCloseModal.isOpen}
         step={monthCloseModal.step}
         monthId={monthId}
-        nextMonthId={getNextPeriodKey(monthId).nextPeriodKey}
+        nextMonthId={nextPeriodKey}
         isClosing={monthClosing}
         errorMessage={monthCloseModal.errorMessage}
         onCloseMonth={handleGuidedCloseMonth}
         onNotNow={handleNotNowMonthClose}
-        onProceedToNextMonth={handleProceedToNextMonth}
+        onProceedToNextMonth={isNextMonthArrived ? handleProceedToNextMonth : undefined}
         onDismiss={handleNotNowMonthClose}
+        isNextMonthArrived={isNextMonthArrived}
       />
-      <header className="mobile-topbar lg:hidden">
-        <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-300">{currentViewLabel}</p>
-          <h1 className="truncate text-base font-semibold text-white">
-            {formatMonth(monthId)} · {currentMonthStatus}
-            {isMonthCloseRequired && (
-              <span className="ml-2 rounded border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
-                Month Close Required
-              </span>
-            )}
-          </h1>
-          <p className="truncate text-xs text-slate-400">{syncLabel}</p>
-        </div>
-        <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setMobileMenuOpen((open) => !open)} title="Open menu">
-          {mobileMenuOpen ? <X /> : <Menu />}
-        </button>
-      </header>
+      <AppHeader
+        franchiseName="Jazz Franchise - 7301"
+        monthId={monthId}
+        monthChoices={monthChoices}
+        currentMonthStatus={currentMonthStatus}
+        isMonthCloseRequired={isMonthCloseRequired}
+        onMonthChange={(nextMonthId) => void loadMonth(nextMonthId)}
+        selectedDay={selectedDay}
+        selectedDayStatus={selectedExpenseStatus}
+        isDayView={["expense", "jazz-load", "stock-ledger"].includes(view)}
+        onDaySelect={handleSelectDayProtected}
+        totalDaysInMonth={daysInMonth(monthId)}
+        daysState={expenseCalendarDays.map((d) => ({ dayNo: d.dayNo, status: d.status }))}
+        syncState={syncState}
+        syncLabel={syncLabel}
+        theme={theme}
+        onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        userEmail={user?.email || undefined}
+        displayName={displayName}
+        role={role}
+        onSignOut={() => void handleSignOut()}
+        mobileMenuOpen={mobileMenuOpen}
+        onToggleMobileMenu={() => setMobileMenuOpen((open) => !open)}
+        mobileMenuTriggerRef={mobileMenuTriggerRef}
+        currentView={view}
+        onNavigate={(nextView) => navigateTo(nextView as View)}
+        expenseSection={expenseSection}
+        onSelectExpenseSection={handleSelectExpenseSection}
+        canManageExpenseSettings={canManageCatalogs}
+        jazzLoadSection={jazzLoadSection}
+        onSelectJazzLoadSection={handleSelectJazzLoadSection}
+        canManageJazzLoadSettings={role === "owner"}
+        stockSection={stockSection}
+        onSelectStockSection={handleSelectStockSection}
+        canManageStockSettings={role === "owner" || role === "admin"}
+        onOpenUsers={() => navigateTo("users")}
+        canManageUsers={canManageUsers}
+        onOpenAuditLogs={() => navigateTo("audit-logs")}
+        canViewAuditLogs={role === "owner"}
+        onOpenImport={() => navigateTo("import")}
+        canUseExcelImport={canUseExcelImport}
+        onOpenBackup={() => navigateTo("backup")}
+        canUseBackup={canUseBackup}
+        onTriggerMasterRefresh={handleUniversalMasterRefresh}
+        canRunMasterRefresh={Boolean(user) && roleCan(role, MASTER_REFRESH_ACCESS)}
+        isRefreshing={loading}
+        onCloseSelectedDay={handleUniversalCloseDay}
+        canCloseSelectedDay={
+          Boolean(user) &&
+          (role === "owner" || role === "admin") &&
+          currentMonthStatus !== "closed" &&
+          selectedDay !== 32 &&
+          availableDayNumbers(monthId, now).includes(selectedDay) &&
+          selectedExpenseStatus !== "closed" &&
+          !loading
+        }
+        closeDisabledReason={
+          !user
+            ? "Sign in to close days."
+            : role !== "owner" && role !== "admin"
+            ? "Only owner/admin can close days."
+            : currentMonthStatus === "closed"
+            ? "Reopen month before closing days."
+            : selectedDay === 32
+            ? "FINAL is closed by month-end verification."
+            : !availableDayNumbers(monthId, now).includes(selectedDay)
+            ? "Future days cannot be closed."
+            : selectedExpenseStatus === "closed"
+            ? "Day is already closed."
+            : undefined
+        }
+        onReopenSelectedDay={handleUniversalReopenDay}
+        canReopenSelectedDay={
+          Boolean(user) &&
+          role === "owner" &&
+          currentMonthStatus !== "closed" &&
+          selectedDay !== 32 &&
+          selectedExpenseStatus === "closed" &&
+          !loading
+        }
+        reopenDisabledReason={
+          !user
+            ? "Sign in to reopen days."
+            : role !== "owner"
+            ? "Only owner can reopen days."
+            : currentMonthStatus === "closed"
+            ? "Reopen month before reopening days."
+            : selectedDay === 32
+            ? "FINAL snapshot cannot be reopened."
+            : selectedExpenseStatus !== "closed"
+            ? "Day is already open."
+            : undefined
+        }
+        monthToggleLabel={monthToggleLabel}
+        onToggleMonth={handleMonthToggle}
+        canToggleMonth={
+          Boolean(user) &&
+          (view === "jazz-load" ? roleCanJazzLoad(role, "monthControls") : roleCan(role, "ownerControls")) &&
+          !loading
+        }
+        monthToggleDisabledReason={
+          !user
+            ? "Sign in to manage month status."
+            : !roleCan(role, "ownerControls")
+            ? "Only owner can manage month status."
+            : undefined
+        }
+        onInitializeNextMonth={() => void handleInitializeNextPeriod(monthId)}
+        canInitializeNextMonth={
+          Boolean(user) &&
+          roleCan(role, "ownerControls") &&
+          isNextMonthArrived &&
+          !months.some((m) => m.id === nextPeriodKey) &&
+          !loading
+        }
+        nextMonthLabel={formatMonth(nextPeriodKey)}
+      />
       {mobileMenuOpen && (
-        <section className="mobile-menu-panel lg:hidden">
-          <div className="grid grid-cols-1 gap-3">
-            <label>
-              Active Month
-              <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
-                {monthChoices.map(([id, status]) => (
-                  <option key={id} value={id}>
-                    {formatMonth(id)} · {status}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Opening Balance
-              <input type="text" value={calculatedOpeningBalance.toLocaleString()} disabled readOnly />
-            </label>
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-label="Mobile Navigation Drawer"
+          className="mobile-menu-panel lg:hidden border-b border-slate-800 bg-slate-950 p-4 shadow-2xl"
+        >
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Navigation</span>
+            <span className="text-xs text-slate-400">{formatMonth(monthId)} · {currentMonthStatus}</span>
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <button className="btn-primary" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
-              {loading && <LoadingIcon label="Loading month" />}
-              Load
-            </button>
-            <button className="btn-secondary" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
-              {loading && <LoadingIcon label="Updating month status" />}
-              {monthToggleLabel}
-            </button>
-            <button className="btn-secondary" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-              {theme === "dark" ? <Sun /> : <Moon />}
-              Theme
-            </button>
-            <label className="display-mode-control col-span-2">
-              Display Mode
-              <select value={uiMode} onChange={(event) => setUiMode(event.target.value as UiMode)}>
-                <option value="modern">Modern</option>
-                <option value="classic">Classic</option>
-              </select>
-            </label>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {navItems.filter((item) => item.show && !mobilePrimaryNav.some((primary) => primary.id === item.id)).map((item) => {
-              const Icon = item.icon;
-              return (
-                <button key={item.id} className={view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} onClick={() => navigateTo(item.id)}>
-                  <Icon />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-3">
-            <p className="text-sm font-semibold text-white">{displayName}</p>
-            <p className="mt-1 text-xs text-slate-400">ID {displayId} · {accessLabel}</p>
-            <p className="mt-2 flex items-center gap-2 text-xs text-slate-400"><Cloud /> {authStatus}</p>
-            <button className="btn-secondary mt-3 !w-full" onClick={() => void handleSignOut()}>Sign Out</button>
-          </div>
-        </section>
-      )}
-      <div className={`flex-1 lg:grid ${shellGrid}`}>
-        <aside className="hidden min-w-0 border-b border-slate-800 bg-slate-950/95 p-3 text-slate-100 sm:p-4 lg:block lg:border-b-0 lg:border-r">
-          <div className={`mb-6 flex gap-3 ${sidebarOpen ? "items-start justify-between" : "flex-col items-center"}`}>
-            {sidebarOpen && (
-              <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase text-emerald-300">Software</p>
-                <h1 className="text-xl font-semibold leading-tight">Jazz Franchise - 7301</h1>
-              </div>
-            )}
-            <div className={`${sidebarOpen ? "flex shrink-0 items-center gap-2" : "flex flex-col items-center gap-2"}`}>
-              <button
-                className="btn-ghost !h-11 !w-11 !px-0"
-                onClick={() => setSidebarOpen((open) => !open)}
-                title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-              >
-                {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
-              </button>
-              <button className="btn-ghost !h-11 !w-11 !px-0" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
-                {theme === "dark" ? <Sun /> : <Moon />}
-              </button>
-              {!sidebarOpen && (
-                <button
-                  className="btn-ghost !h-11 !w-11 !px-0"
-                  onClick={() => setUiMode((mode) => mode === "modern" ? "classic" : "modern")}
-                  title={`Display mode: ${uiMode === "modern" ? "Modern" : "Classic"}`}
-                >
-                  <MonitorCog />
-                </button>
-              )}
-            </div>
-          </div>
-          <nav className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+          <div className="mt-3 grid grid-cols-2 gap-2">
             {navItems.filter((item) => item.show).map((item) => {
               const Icon = item.icon;
               return (
                 <button
                   key={item.id}
-                  className={`${view === item.id ? "btn-tab btn-tab-active" : "btn-tab"} ${sidebarOpen ? "!h-12 justify-start" : "!h-14 !w-14 !px-0 justify-center [&_svg]:!h-6 [&_svg]:!w-6"}`}
-                  onClick={() => navigateTo(item.id)}
-                  title={item.label}
+                  className={`btn-tab flex items-center gap-2 !h-10 !px-3 text-xs ${view === item.id ? "btn-tab-active font-semibold" : ""}`}
+                  onClick={() => {
+                    navigateTo(item.id);
+                    setMobileMenuOpen(false);
+                  }}
                 >
-                  <Icon />
-                  {sidebarOpen && item.label}
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{item.label}</span>
                 </button>
               );
             })}
-          </nav>
-          {sidebarOpen && (
-            <>
-                            {(expenseSidebarControls || showRegisteredSidebarControls) && (
-                  <div className="mt-4 border-t border-slate-800 pt-4">
-                    {expenseSidebarControls}
-                    {showRegisteredSidebarControls && <SidebarDayControlsSlot />}
-                  </div>
-                )}
-              <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-4">
-                <p className="text-sm font-semibold uppercase text-emerald-300">Operations</p>
-                <p className="mt-2 text-lg font-semibold text-white">{liveClock}</p>
-                <div className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-slate-500">Access</span>
-                    <span className="font-medium text-slate-100">{accessLabel}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-slate-500">Month Status</span>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium capitalize text-slate-100">{currentMonthStatus}</span>
-                      {isMonthCloseRequired && (
-                        <span className="rounded border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
-                          Close Required
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-4 border-t border-slate-800 pt-4">
-                  <p className="text-xs font-semibold uppercase text-slate-500">Month Selection</p>
-                  <label className="display-mode-control mt-3">
-                    Display Mode
-                    <select value={uiMode} onChange={(event) => setUiMode(event.target.value as UiMode)}>
-                      <option value="modern">Modern</option>
-                      <option value="classic">Classic</option>
-                    </select>
-                  </label>
-                  <label className="mt-3">
-                    Active Month
-                    <select value={monthId} disabled={loading || monthChoices.length === 0} onChange={(event) => void loadMonth(event.target.value)}>
-                      {monthChoices.map(([id, status]) => (
-                        <option key={id} value={id}>
-                          {formatMonth(id)} · {status}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {/* <label className="mt-3">
-                    Opening Balance
-                    <input type="text" value={calculatedOpeningBalance.toLocaleString()} disabled readOnly />
-                  </label> */}
-                  <div className="mt-4 flex flex-col gap-2">
-                    <button className="btn-primary !h-11 !w-full" disabled={loading || !user} onClick={() => void loadMonth(monthId)}>
-                      {loading && <LoadingIcon label="Loading month" />}
-                      Load
-                    </button>
-                    <button className="btn-secondary !h-11 !w-full" disabled={loading || !user || !canToggleCurrentMonth} onClick={handleMonthToggle}>
-                      {loading && <LoadingIcon label="Updating month status" />}
-                      {monthToggleLabel}
-                    </button>
-                  </div>
-                </div>
-                {/* {months.length > 0 && (
-                  <div className="mt-4 flex flex-col gap-2">
-                    {months.slice(0, 8).map((month) => (
-                      <button className={month.id === monthId ? "btn-chip btn-chip-active !h-10 !w-full !justify-start" : "btn-chip !h-10 !w-full !justify-start"} key={month.id} onClick={() => loadMonth(month.id)}>
-                        {formatMonth(month.id)} · {month.status}
-                      </button>
-                    ))}
-                  </div>
-                )} */}
-                </div>
-              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-4">
-                <p className="text-xs font-semibold uppercase text-slate-500">User</p>
-                <p className="mt-2 text-sm font-semibold text-white">{displayName}</p>
-                <p className="mt-1 text-sm text-slate-400">ID {displayId} · {accessLabel}</p>
-                <p className="mt-4 flex items-center gap-2 text-sm text-slate-400"><Cloud /> {authStatus}</p>
-                <p className="mt-3 flex items-center gap-2 text-sm text-slate-400">
-                  <Shield /> {syncLabel}
-                </p>
-                <button className="btn-secondary mt-4 !w-full" onClick={() => void handleSignOut()}>Sign Out</button>
+          </div>
+          {view === "expense" && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Expense Sections</span>
+              <div className="mt-2 flex flex-col gap-1.5">
+                {[
+                  { id: "daily-entry" as const, label: "Daily Entry", icon: CalendarDays },
+                  { id: "previous-records" as const, label: "Monthly Summary & Ledger", icon: ScrollText },
+                  { id: "settings" as const, label: "Settings", icon: SlidersHorizontal }
+                ].map((sec) => (
+                  <button
+                    key={sec.id}
+                    type="button"
+                    className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                      expenseSection === sec.id ? "bg-emerald-500/20 text-emerald-300" : "text-slate-300 hover:bg-slate-800"
+                    }`}
+                    onClick={() => {
+                      handleSelectExpenseSection(sec.id);
+                      setMobileMenuOpen(false);
+                    }}
+                  >
+                    <sec.icon className="h-3.5 w-3.5" />
+                    <span>{sec.label}</span>
+                  </button>
+                ))}
               </div>
-            </>
+            </div>
           )}
-        </aside>
-
-        <div className="min-w-0 px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8">
+          {view === "jazz-load" && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Jazz Load Sections</span>
+              <div className="mt-2 flex flex-col gap-1.5">
+                {[
+                  { id: "daily" as const, label: "Daily Lifting & Issuance", icon: CalendarDays },
+                  { id: "reports" as const, label: "Monthly Reports & Summaries", icon: FileSpreadsheet },
+                  { id: "settings" as const, label: "DO Profiles & Rates", icon: Settings },
+                  { id: "formulas" as const, label: "Formulas & Reference", icon: BookOpen }
+                ].map((sec) => (
+                  <button
+                    key={sec.id}
+                    type="button"
+                    className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                      jazzLoadSection === sec.id ? "bg-emerald-500/20 text-emerald-300" : "text-slate-300 hover:bg-slate-800"
+                    }`}
+                    onClick={() => {
+                      handleSelectJazzLoadSection(sec.id);
+                      setMobileMenuOpen(false);
+                    }}
+                  >
+                    <sec.icon className="h-3.5 w-3.5" />
+                    <span>{sec.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {view === "stock-ledger" && (
+            <div className="mt-3 pt-3 border-t border-slate-800">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Stock Ledger Sections</span>
+              <div className="mt-2 flex flex-col gap-1.5">
+                {[
+                  { id: "daily" as const, label: "Daily Stock Issuance", icon: ArrowUpRight },
+                  { id: "stockIn" as const, label: "Stock Lifting (Stock In)", icon: PlusCircle },
+                  { id: "reportsHub" as const, label: "Reports & Summaries", icon: FileSpreadsheet },
+                  { id: "settings" as const, label: "Products & Accounts", icon: Settings }
+                ].map((sec) => (
+                  <button
+                    key={sec.id}
+                    type="button"
+                    className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                      stockSection === sec.id ? "bg-emerald-500/20 text-emerald-300" : "text-slate-300 hover:bg-slate-800"
+                    }`}
+                    onClick={() => {
+                      handleSelectStockSection(sec.id);
+                      setMobileMenuOpen(false);
+                    }}
+                  >
+                    <sec.icon className="h-3.5 w-3.5" />
+                    <span>{sec.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+            <span className="truncate max-w-[200px]">{displayName} ({accessLabel})</span>
+            <button className="btn-secondary !h-8 !px-3 text-xs shrink-0" onClick={() => void handleSignOut()}>
+              Sign Out
+            </button>
+          </div>
+        </section>
+      )}
+      <div className="flex-1 w-full min-w-0">
+        <div
+          className={
+            view === "stock-ledger"
+              ? "w-full min-w-0 px-2 sm:px-4 pb-28 pt-3 lg:pb-8"
+              : "w-full min-w-0 max-w-7xl mx-auto px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8"
+          }
+        >
           {status && <p className="status">{status}</p>}
           {isMonthCloseRequired && (
             <div
@@ -4188,39 +4692,46 @@ function App() {
             </div>
           )}
           {showOfflineOwnerWarning && <p className="warning">Owner will see updates after this machine reconnects.</p>}
-          {isPeriodUninitialized && (
-            <div
-              data-testid="period-uninitialized-banner"
-              className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-200"
-            >
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
-                  <div>
-                    <h3 className="font-semibold text-amber-300">{formatMonth(monthId)} is not initialized</h3>
-                    <p className="mt-0.5 text-sm text-amber-200/90">
-                      Accounting period {formatMonth(monthId)} has not been initialized in the PostgreSQL authoritative ledger.
-                      {(monthId === "2026-09" || months.find((m) => m.id === "2026-08")?.status === "closed") && (
-                        <span> It will be initialized from {formatMonth("2026-08")} FINAL closing balances and Day 1 will be opened.</span>
-                      )}
-                    </p>
+          {isPeriodUninitialized && (() => {
+            const uninitializedPrevKey = getPreviousPeriodKey(monthId);
+            const isUninitializedPrevClosed = uninitializedPrevKey
+              ? (months.find((m) => m.id === uninitializedPrevKey)?.status === "closed" || uninitializedPrevKey === "2026-08")
+              : false;
+
+            return (
+              <div
+                data-testid="period-uninitialized-banner"
+                className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-amber-200"
+              >
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+                    <div>
+                      <h3 className="font-semibold text-amber-300">{formatMonth(monthId)} is not initialized</h3>
+                      <p className="mt-0.5 text-sm text-amber-200/90">
+                        Accounting period {formatMonth(monthId)} has not been initialized in the PostgreSQL authoritative ledger.
+                        {uninitializedPrevKey && isUninitializedPrevClosed && (
+                          <span> It will be initialized from {formatMonth(uninitializedPrevKey)} FINAL closing balances and Day 1 will be opened.</span>
+                        )}
+                      </p>
+                    </div>
                   </div>
+                  {uninitializedPrevKey && isUninitializedPrevClosed && (
+                    <button
+                      type="button"
+                      data-testid="btn-initialize-uninitialized-period"
+                      className="btn-primary shrink-0 self-start sm:self-center"
+                      disabled={loading || initializingNextPeriod}
+                      onClick={() => void handleInitializeNextPeriod(uninitializedPrevKey)}
+                    >
+                      {initializingNextPeriod && <LoadingIcon label="Initializing..." />}
+                      Initialize &amp; Open {formatMonth(monthId)} Day 1
+                    </button>
+                  )}
                 </div>
-                {(monthId === "2026-09" || months.find((m) => m.id === "2026-08")?.status === "closed") && (
-                  <button
-                    type="button"
-                    data-testid="btn-initialize-uninitialized-period"
-                    className="btn-primary shrink-0 self-start sm:self-center"
-                    disabled={loading || initializingNextPeriod}
-                    onClick={() => void handleInitializeNextPeriod("2026-08")}
-                  >
-                    {initializingNextPeriod && <LoadingIcon label="Initializing..." />}
-                    Initialize &amp; Open {formatMonth(monthId)} Day 1
-                  </button>
-                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
           {isPostgreSqlPeriod(monthId) && pgPeriodRouting.checked && (pgPeriodRouting.status === "AUTH_REQUIRED" || pgPeriodRouting.status === "UNAUTHORIZED") && (
             <div className="mb-4 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-rose-200">
               <div className="flex items-center gap-2 font-semibold text-rose-300">
@@ -4274,21 +4785,8 @@ function App() {
                   : `Day ${selectedDay} is closed. Reopen it to edit until it is manually closed.`}
             </p>
           )}
-          {isSelectedCanonicalReopen && (
-            <p className="status">Day {selectedDay} is reopened. You can edit it until the owner closes it again.</p>
-          )}
-
-          {view === "expense" && (
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-              <div>
-                <h2 className="text-2xl font-semibold text-white">Expense Ledger</h2>
-                <p className="mt-1 text-sm text-slate-400">{formatMonth(monthId)} · {monthStatus} · {syncLabel}</p>
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Active Month</p>
-                <p className="mt-1 text-sm font-medium text-white">{formatMonth(monthId)}</p>
-              </div>
-            </div>
+          {isSelectedCanonicalReopen && dismissedReopenDay !== selectedDay && (
+            <ReopenNoticePopup dayNo={selectedDay} onDismiss={() => setDismissedReopenDay(selectedDay)} />
           )}
 
           {view === "dashboard" && (
@@ -4303,67 +4801,12 @@ function App() {
                   <FileDown />
                   Export Monthly PDF
                 </button>
-                {canUseOwnerControls && (
-                  <button
-                    className="btn-secondary w-full sm:w-auto"
-                    disabled
-                    title="Email sending is disabled until Firebase Functions deployment is available."
-                    onClick={() => void sendMonthEmail()}
-                  >
-                    {monthEmailing && <LoaderCircle className="h-4 w-4 animate-spin" />}
-                    {monthEmailing ? "Sending Email..." : "Send Email"}
-                  </button>
-                )}
               </div>
             </>
           )}
 
-          {view === "records" && (
-            <RecordsView
-              monthId={monthId}
-              selectedDay={selectedDay}
-              days={days}
-              computed={computed}
-              loading={loading}
-            />
-          )}
-
           {view === "expense" && (
-            <section className="mt-4">
-              <nav className="mb-5 flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2 text-slate-100 shadow-xl shadow-black/20">
-                {(
-                  [
-                    { id: "daily-entry", label: "Daily Entry", locked: false, icon: CalendarDays },
-                    { id: "previous-records", label: "Previous Records", locked: false, icon: ScrollText },
-                    { id: "expense-dashboard", label: "Dashboard", locked: false, icon: LayoutDashboard },
-                    { id: "expense-categories", label: "Expense Categories", locked: !canManageCatalogs, icon: Tags },
-                    { id: "credit-parties", label: "Credit Parties", locked: !canManageCatalogs, icon: CreditCard },
-                    { id: "commission-categories", label: "Commission/Application Categories", locked: !canManageCatalogs, icon: FileSpreadsheet }
-                  ] as Array<{ id: ExpenseSection; label: string; locked: boolean; icon: typeof CalendarDays }>
-                ).map(({ id, label, locked, icon: Icon }) => (
-                  <button
-                    className={`${expenseSection === id ? "btn-tab btn-tab-active" : "btn-tab"} ${locked ? "cursor-not-allowed opacity-60" : ""}`}
-                    disabled={locked}
-                    key={id}
-                    title={locked ? "Only owner can manage this section." : label}
-                    onClick={() => {
-                      if (locked) {
-                        setStatus("Only owner can manage this section.");
-                        return;
-                      }
-                      if (hasPendingDayChanges && id !== expenseSection && !confirmLeavePendingChanges()) {
-                        setStatus("Stayed on Daily Entry because changes are still pending save.");
-                        return;
-                      }
-                      setExpenseSection(id);
-                    }}
-                  >
-                    <Icon />
-                    {label}
-                  </button>
-                ))}
-              </nav>
-
+            <section className="space-y-4">
               {expenseSection === "daily-entry" && (
                 <>
                   <DailyEntryForm
@@ -4422,41 +4865,96 @@ function App() {
                   days={days}
                   computed={computed}
                   loading={loading}
+                  onExportDailyXlsx={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
+                  onExportDailyPdf={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
+                  onExportMonthlyXlsx={() => computed && runReportExport(() => exportMonthlyXlsx(computed))}
+                  onExportMonthlyPdf={() => computed && runReportExport(() => exportMonthlyPdf(computed))}
                 />
               )}
-              {expenseSection === "expense-dashboard" && <HomeDashboard month={computed} monthId={monthId} />}
-              {expenseSection === "expense-categories" && (
-                <CatalogManager
-                  title="Expense Categories"
-                  items={expenseCategories}
-                  canEdit={canManageCatalogs}
-                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
-                  onSave={(item) => saveCatalog("expenseCategories", item)}
-                  onDelete={(itemId) => removeCatalogItem("expenseCategories", itemId)}
-                  onReorder={(before, after) => handleReorderCatalog("expenseCategories", before, after)}
-                />
-              )}
-              {expenseSection === "credit-parties" && (
-                <CatalogManager
-                  title="Credit Parties"
-                  items={creditParties}
-                  canEdit={canManageCatalogs}
-                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
-                  onSave={(item) => saveCatalog("creditParties", item)}
-                  onDelete={(itemId) => removeCatalogItem("creditParties", itemId)}
-                  onReorder={(before, after) => handleReorderCatalog("creditParties", before, after)}
-                />
-              )}
-              {expenseSection === "commission-categories" && (
-                <CatalogManager
-                  title="Commission/Application Categories"
-                  items={commissionCategories}
-                  canEdit={canManageCatalogs}
-                  lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
-                  onSave={(item) => saveCatalog("commissionCategories", item)}
-                  onDelete={(itemId) => removeCatalogItem("commissionCategories", itemId)}
-                  onReorder={(before, after) => handleReorderCatalog("commissionCategories", before, after)}
-                />
+              {(expenseSection === "settings" || expenseSection === "expense-categories" || expenseSection === "credit-parties" || expenseSection === "commission-categories") && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-3">
+                    <div>
+                      <h2 className="text-sm font-semibold text-white">Expense Module Settings</h2>
+                      <p className="text-xs text-slate-400">Configure expense categories, credit parties, and commission definitions</p>
+                    </div>
+                    <div role="tablist" aria-label="Settings sub-tabs" className="inline-flex rounded-lg border border-slate-800 bg-slate-950/80 p-1">
+                      <button
+                        role="tab"
+                        aria-selected={expenseSettingsSubTab === "expense-categories"}
+                        onClick={() => setExpenseSettingsSubTab("expense-categories")}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                          expenseSettingsSubTab === "expense-categories"
+                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <Tags className="h-3.5 w-3.5" />
+                        <span>Expense Categories</span>
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={expenseSettingsSubTab === "credit-parties"}
+                        onClick={() => setExpenseSettingsSubTab("credit-parties")}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                          expenseSettingsSubTab === "credit-parties"
+                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <CreditCard className="h-3.5 w-3.5" />
+                        <span>Credit Parties</span>
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={expenseSettingsSubTab === "commission-categories"}
+                        onClick={() => setExpenseSettingsSubTab("commission-categories")}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                          expenseSettingsSubTab === "commission-categories"
+                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <FileSpreadsheet className="h-3.5 w-3.5" />
+                        <span>Commission Catalog</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {expenseSettingsSubTab === "expense-categories" && (
+                    <CatalogManager
+                      title="Expense Categories"
+                      items={expenseCategories}
+                      canEdit={canManageCatalogs}
+                      lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                      onSave={(item) => saveCatalog("expenseCategories", item)}
+                      onDelete={(itemId) => removeCatalogItem("expenseCategories", itemId)}
+                      onReorder={(before, after) => handleReorderCatalog("expenseCategories", before, after)}
+                    />
+                  )}
+                  {expenseSettingsSubTab === "credit-parties" && (
+                    <CatalogManager
+                      title="Credit Parties"
+                      items={creditParties}
+                      canEdit={canManageCatalogs}
+                      lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                      onSave={(item) => saveCatalog("creditParties", item)}
+                      onDelete={(itemId) => removeCatalogItem("creditParties", itemId)}
+                      onReorder={(before, after) => handleReorderCatalog("creditParties", before, after)}
+                    />
+                  )}
+                  {expenseSettingsSubTab === "commission-categories" && (
+                    <CatalogManager
+                      title="Commission/Application Categories"
+                      items={commissionCategories}
+                      canEdit={canManageCatalogs}
+                      lockedMessage={!canManageCatalogs ? "Only owner can manage this section." : undefined}
+                      onSave={(item) => saveCatalog("commissionCategories", item)}
+                      onDelete={(itemId) => removeCatalogItem("commissionCategories", itemId)}
+                      onReorder={(before, after) => handleReorderCatalog("commissionCategories", before, after)}
+                    />
+                  )}
+                </div>
               )}
             </section>
           )}
@@ -4478,6 +4976,9 @@ function App() {
               onTriggerMasterRefresh={triggerMasterRefresh}
               ledgerReadModeConfig={ledgerReadModeConfig}
               onPendingStateChange={setHasPendingDayChanges}
+              section={jazzLoadSection}
+              onSectionChange={setJazzLoadSection}
+              hideOnPageTabs={true}
             />
           )}
 
@@ -4496,6 +4997,9 @@ function App() {
               onTriggerMasterRefresh={triggerMasterRefresh}
               ledgerReadModeConfig={ledgerReadModeConfig}
               onPendingStateChange={setHasPendingDayChanges}
+              section={stockSection}
+              onSectionChange={setStockSection}
+              hideOnPageTabs={true}
             />
           )}
 
@@ -4657,7 +5161,15 @@ function App() {
             </button>
           );
         })}
-        <button className={mobileMenuOpen ? "mobile-bottom-item mobile-bottom-item-active" : "mobile-bottom-item"} onClick={() => setMobileMenuOpen((open) => !open)}>
+        <button
+          className={mobileMenuOpen ? "mobile-bottom-item mobile-bottom-item-active" : "mobile-bottom-item"}
+          onClick={(e) => {
+            mobileMenuTriggerRef.current = e.currentTarget;
+            setMobileMenuOpen((open) => !open);
+          }}
+          aria-expanded={mobileMenuOpen}
+          aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+        >
           <Menu />
           <span>More</span>
         </button>

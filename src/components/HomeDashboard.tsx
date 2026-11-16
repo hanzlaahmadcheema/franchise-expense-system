@@ -35,8 +35,14 @@ import {
   YAxis
 } from "recharts";
 import type { MonthComputed } from "../types/ledger";
-import type { JazzLoadMonthlySummary } from "../modules/jazzLoad/types/jazzLoad.types";
-import type { StockMonthlySummary } from "../modules/stock/types/stock.types";
+import type { JazzLoadDoProfile, JazzLoadMonthlySummary, JazzLoadRateConfig } from "../modules/jazzLoad/types/jazzLoad.types";
+import type { StockAccountProfile, StockAccountType, StockMonthlySummary, StockProduct } from "../modules/stock/types/stock.types";
+import { isPostgreSqlPeriod } from "../services/api/periodDayService";
+import { ledgerApiClient } from "../services/api/ledgerApiClient";
+import { loadJazzLoadMonthPostgres } from "../services/api/jazzLoadTransactionService";
+import { loadStockMonthPostgres } from "../services/api/stockTransactionService";
+import { calculateMonthlySummary as calculateJazzMonthlySummary } from "../modules/jazzLoad/services/jazzLoadCalculations";
+import { calculateMonthlySummary as calculateStockMonthlySummary } from "../modules/stock/services/stockCalculations";
 
 type Props = {
   month: MonthComputed | null;
@@ -106,10 +112,121 @@ export function HomeDashboard({ month, monthId }: Props) {
   const [stockSummary, setStockSummary] = useState<StockMonthlySummary | null>(null);
 
   const [chartsReady, setChartsReady] = useState(false);
-  // In pure PostgreSQL mode, summaries are server-calculated; no legacy Firestore summary subscriptions
   useEffect(() => {
-    setJazzLoadSummary(null);
-    setStockSummary(null);
+    let cancelled = false;
+
+    if (!activeMonthId) {
+      setJazzLoadSummary(null);
+      setStockSummary(null);
+      return;
+    }
+
+    if (isPostgreSqlPeriod(activeMonthId)) {
+      // 1. Fetch Jazz Load month summary
+      void (async () => {
+        try {
+          const [profilesRes, ratesRes] = await Promise.all([
+            ledgerApiClient.catalogs.getJazzLoadDoProfiles().catch(() => ({ data: [] })),
+            ledgerApiClient.catalogs.getJazzLoadRates().catch(() => ({ data: [] }))
+          ]);
+          if (cancelled) return;
+
+          const now = Date.now();
+          const mappedProfiles: JazzLoadDoProfile[] = (profilesRes.data || []).map((p: any) => ({
+            id: p.id,
+            name: p.do_name,
+            line: p.do_line,
+            active: p.is_active,
+            sortOrder: p.sort_order,
+            createdAt: p.created_at ? new Date(p.created_at).getTime() : now,
+            updatedAt: p.updated_at ? new Date(p.updated_at).getTime() : now
+          }));
+
+          const mappedRates: JazzLoadRateConfig[] = [];
+          for (const row of ratesRes.data || []) {
+            mappedRates.push({ id: row.id + '_ml', type: 'ml_addition', percentage: Number(row.ml_rate), active: row.is_active, sortOrder: 1, name: row.name + ' ML', createdBy: "system", createdAt: now, updatedAt: now });
+            mappedRates.push({ id: row.id + '_c1', type: 'commission1_adjustment', percentage: Number(row.comm1_rate), active: row.is_active, sortOrder: 2, name: row.name + ' Comm1', createdBy: "system", createdAt: now, updatedAt: now });
+            mappedRates.push({ id: row.id + '_c2', type: 'commission2_payment', percentage: Number(row.comm2_rate), active: row.is_active, sortOrder: 3, name: row.name + ' Comm2', createdBy: "system", createdAt: now, updatedAt: now });
+          }
+
+          const monthDays = await loadJazzLoadMonthPostgres(activeMonthId, mappedProfiles, mappedRates);
+          if (cancelled) return;
+
+          if (monthDays && monthDays.length > 0) {
+            setJazzLoadSummary(calculateJazzMonthlySummary(activeMonthId, monthDays));
+          } else {
+            setJazzLoadSummary(null);
+          }
+        } catch (err) {
+          if (!cancelled) {
+            console.warn("[HomeDashboard] Could not load Jazz Load PostgreSQL summary:", err);
+            setJazzLoadSummary(null);
+          }
+        }
+      })();
+
+      // 2. Fetch Stock Ledger month summary
+      void (async () => {
+        try {
+          const [productsRes, accountsRes] = await Promise.all([
+            ledgerApiClient.catalogs.getStockProducts().catch(() => ({ data: [] })),
+            ledgerApiClient.catalogs.getStockAccounts().catch(() => ({ data: [] }))
+          ]);
+          if (cancelled) return;
+
+          const now = Date.now();
+          const mappedProducts: StockProduct[] = (productsRes.data || []).map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            rate: Number(p.rate ?? 0),
+            active: p.is_active,
+            displayOrder: Number(p.sort_order ?? 0),
+            sortOrder: p.sort_order,
+            category: "sim",
+            paymentTrackingEnabled: true,
+            createdBy: "system",
+            createdAt: now,
+            updatedAt: now
+          }));
+
+          const mappedAccounts: StockAccountProfile[] = (accountsRes.data || []).map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            slug: a.slug,
+            type: a.type as StockAccountType,
+            openingBalance: Number(a.opening_balance ?? 0),
+            active: a.is_active,
+            displayOrder: Number(a.sort_order ?? 0),
+            sortOrder: a.sort_order,
+            createdBy: "system",
+            createdAt: now,
+            updatedAt: now
+          }));
+
+          const stockMonthDays = await loadStockMonthPostgres(activeMonthId, mappedProducts, mappedAccounts);
+          if (cancelled) return;
+
+          if (stockMonthDays && stockMonthDays.length > 0) {
+            setStockSummary(calculateStockMonthlySummary(activeMonthId, stockMonthDays));
+          } else {
+            setStockSummary(null);
+          }
+        } catch (err) {
+          if (!cancelled) {
+            console.warn("[HomeDashboard] Could not load Stock Ledger PostgreSQL summary:", err);
+            setStockSummary(null);
+          }
+        }
+      })();
+    } else {
+      setJazzLoadSummary(null);
+      setStockSummary(null);
+    }
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeMonthId]);
 
   useEffect(() => {
@@ -835,6 +952,25 @@ export function HomeDashboard({ month, monthId }: Props) {
                         </tr>
                       ))}
                     </tbody>
+                    {jazzLoadSummary.doBalances.length > 0 && (
+                      <tfoot>
+                        <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
+                          <td className="py-2.5 font-bold">Total</td>
+                          <td className="py-2.5 font-mono">
+                            {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.openingBase || 0), 0))}
+                          </td>
+                          <td className="py-2.5 font-mono text-cyan-300">
+                            {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.issuanceBase || 0), 0))}
+                          </td>
+                          <td className="py-2.5 font-mono text-emerald-300">
+                            {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.paymentBase || 0), 0))}
+                          </td>
+                          <td className="py-2.5 font-mono text-amber-400">
+                            {money(jazzLoadSummary.doBalances.reduce((acc, r) => acc + (r.closingBase || 0), 0))}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
                   </table>
                 </div>
               </div>
@@ -992,6 +1128,20 @@ export function HomeDashboard({ month, monthId }: Props) {
                           </tr>
                         ))}
                       </tbody>
+                      {stockSummary.accountTotals.length > 0 && (
+                        <tfoot>
+                          <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
+                            <td className="py-2.5 font-bold">Total (Top Accounts)</td>
+                            <td className="py-2.5">-</td>
+                            <td className="py-2.5 font-mono text-slate-200">
+                              {stockSummary.accountTotals.slice(0, 6).reduce((acc, r) => acc + (r.totalQty || 0), 0).toLocaleString()} units
+                            </td>
+                            <td className="py-2.5 font-mono text-rose-400">
+                              {money(stockSummary.accountTotals.slice(0, 6).reduce((acc, r) => acc + (r.dueBalance || 0), 0))}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
                     </table>
                   </div>
                 </div>

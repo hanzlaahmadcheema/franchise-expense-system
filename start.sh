@@ -52,7 +52,8 @@ fi
 cleanup() {
   echo ""
   echo "Shutting down Franchise services..."
-  kill $(jobs -p) 2>/dev/null || true
+  kill -TERM "${BACKEND_PID:-}" "${FRONTEND_PID:-}" $(jobs -p) 2>/dev/null || true
+  fuser -k 4000/tcp 5173/tcp 2>/dev/null || true
   wait 2>/dev/null || true
   echo "All services stopped."
 }

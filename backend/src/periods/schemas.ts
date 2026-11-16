@@ -224,6 +224,12 @@ export const ReopenDaySchema = z
   })
   .strict();
 
+export const ReopenPeriodSchema = z
+  .object({
+    reason: z.string().min(5, "Reopen reason must be at least 5 characters")
+  })
+  .strict();
+
 export const ClosePeriodSchema = z
   .object({
     notes: z.string().nullable().optional()

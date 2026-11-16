@@ -148,6 +148,28 @@ describe("Guided FINAL → Month Close Workflow", () => {
       expect(onDismiss).toHaveBeenCalledTimes(1);
     });
 
+    it("4B. when isNextMonthArrived is false (future month), hides Proceed button and informs user", async () => {
+      render(
+        <GuidedMonthCloseModal
+          isOpen={true}
+          step="success"
+          monthId="2026-11"
+          nextMonthId="2026-12"
+          isNextMonthArrived={false}
+          onCloseMonth={vi.fn()}
+          onNotNow={vi.fn()}
+        />
+      );
+
+      const successMsg = screen.getByTestId("month-close-success-message");
+      expect(successMsg.textContent).toContain("November 2026 is now closed.");
+      expect(successMsg.textContent).not.toContain("Proceed to December Day 1");
+
+      expect(screen.queryByTestId("btn-proceed-next-month")).toBeNull();
+      expect(screen.getByText(/December will not open automatically until December 1st arrives/i)).toBeDefined();
+      expect(screen.getByTestId("btn-done")).toBeDefined();
+    });
+
     it("5. does not render anything when isOpen is false", () => {
       const { container } = render(
         <GuidedMonthCloseModal

@@ -531,15 +531,24 @@ export async function stageSeeds(
       .execute();
 
     for (const sp of bundle.stockProducts) {
+      const rawQty = sp.openingQuantity !== undefined && sp.openingQuantity !== null
+        ? Number(sp.openingQuantity)
+        : 0;
+      const sanitizedQty = sp.status === "skipped"
+        ? null
+        : Math.max(0, Math.round(rawQty));
+      const deficitNote = rawQty < 0 ? `PREVIOUS_PERIOD_DEFICIT_${rawQty}` : null;
+      const finalNotes = sp.notes ?? deficitNote ?? (sp.status === "skipped" ? "INTENTIONAL_GENESIS_EXCLUSION" : null);
+
       await trx
         .insertInto("period_stock_product_seeds")
         .values({
           franchise_id: franchiseId,
           period_id: periodId,
           product_id: sp.productId,
-          opening_quantity: sp.status === "skipped" ? null : sp.openingQuantity,
+          opening_quantity: sanitizedQty,
           status: sp.status ?? "active",
-          notes: sp.notes ?? (sp.status === "skipped" ? "INTENTIONAL_GENESIS_EXCLUSION" : null),
+          notes: finalNotes,
           source_period_key: sp.sourcePeriodKey,
           source_day_no: sp.sourceDayNo
         })
@@ -1624,6 +1633,17 @@ export async function reopenAccountingDay(
       .where("id", "=", targetDay.id)
       .execute();
 
+    // When an operational day is reopened, any prior temporary verification of FINAL is invalidated
+    await trx
+      .updateTable("accounting_periods")
+      .set({
+        final_settlement_status: "PENDING_SETTLEMENT",
+        updated_at: sql`clock_timestamp()`
+      })
+      .where("id", "=", periodId)
+      .where("final_settlement_status", "=", "VERIFIED")
+      .execute();
+
     await recordAuditLog(trx, {
       franchiseId,
       userId: user.id,
@@ -1834,6 +1854,13 @@ export async function initializeNextPeriodFromClosedPeriod(
     }
 
     const { nextPeriodKey, daysInNextMonth } = getNextPeriodKey(sourcePeriod.period_key);
+    const todayDateStr = new Date().toISOString().slice(0, 10);
+    const nextPeriodStartDate = `${nextPeriodKey}-01`;
+    if (nextPeriodStartDate > todayDateStr) {
+      throw new PeriodNotReadyError(
+        `Cannot open future month '${nextPeriodKey}'. Next period can only proceed on or after '${nextPeriodStartDate}'.`
+      );
+    }
 
     // Check if next period already exists
     const existingNextPeriod = await trx
@@ -1966,6 +1993,22 @@ export async function initializeNextPeriodFromClosedPeriod(
           timestamp: new Date().toISOString()
         }
       });
+
+      // If the successor period was already closed, cascade the updated seeds forward into its successor
+      // ONLY if the successor's successor has arrived in actual calendar time!
+      if (existingNextPeriod.status === "closed") {
+        const { nextPeriodKey: futureKey } = getNextPeriodKey(existingNextPeriod.period_key);
+        const futureStartDate = `${futureKey}-01`;
+        if (futureStartDate <= todayDateStr) {
+          await initializeNextPeriodFromClosedPeriod(
+            franchiseId,
+            existingNextPeriod.id,
+            user,
+            undefined,
+            trx
+          );
+        }
+      }
 
       const res = {
         initialized: true,
@@ -2229,13 +2272,34 @@ export async function closeAccountingPeriod(
     });
 
     // 5. ATOMIC TRANSITION: Initialize and activate next period from now-closed period
-    const recoveryResult = await initializeNextPeriodFromClosedPeriod(
-      franchiseId,
-      period.id,
-      user,
-      undefined,
-      trx
-    );
+    // ONLY if the next period's start date has arrived in actual calendar time.
+    // If next period is in the future (e.g. closing November when today is mid-November),
+    // do NOT auto-initialize or auto-open the next future period until that month actually arrives!
+    const { nextPeriodKey } = getNextPeriodKey(period.period_key);
+    const todayDateStr = new Date().toISOString().slice(0, 10);
+    const nextPeriodStartDate = `${nextPeriodKey}-01`;
+    const isNextPeriodArrived = nextPeriodStartDate <= todayDateStr;
+
+    let recoveryResult: {
+      targetPeriod?: { id: string; periodKey: string; daysCount: number; status: string };
+      targetDayNo?: number;
+      activatedDay?: { id: string; dayNo: number; status: string; calendarDate?: string };
+    } | undefined = undefined;
+
+    if (isNextPeriodArrived) {
+      const initRes = await initializeNextPeriodFromClosedPeriod(
+        franchiseId,
+        period.id,
+        user,
+        undefined,
+        trx
+      );
+      recoveryResult = {
+        targetPeriod: initRes.targetPeriod,
+        targetDayNo: initRes.targetDayNo,
+        activatedDay: initRes.activatedDay
+      };
+    }
 
     const result = {
       closed: true,
@@ -2248,9 +2312,10 @@ export async function closeAccountingPeriod(
         status: "closed"
       },
       closedAt: new Date().toISOString(),
-      targetPeriod: recoveryResult.targetPeriod,
-      targetDayNo: recoveryResult.targetDayNo,
-      activatedDay: recoveryResult.activatedDay
+      targetPeriod: recoveryResult?.targetPeriod,
+      targetDayNo: recoveryResult?.targetDayNo,
+      activatedDay: recoveryResult?.activatedDay,
+      nextPeriodAutoOpened: Boolean(recoveryResult?.targetPeriod)
     };
 
     if (clientMutationId && !customTrx) {
@@ -2259,6 +2324,132 @@ export async function closeAccountingPeriod(
         clientMutationId,
         userId: user.id,
         endpoint: `POST /api/v1/periods/${periodId}/close`,
+        payloadHash,
+        responseStatus: 200,
+        responseBody: result
+      });
+    }
+
+    return result;
+  };
+
+  if (customTrx) {
+    return runInTrx(customTrx);
+  }
+  return db.transaction().execute(runInTrx);
+}
+
+/**
+ * 11B. Reopen a Closed Accounting Period (Owner Only).
+ * Allows reopening a closed historical period for governed corrections.
+ * Records an immutable audit log entry with the owner's justification reason.
+ */
+export async function reopenAccountingPeriod(
+  franchiseId: string,
+  periodId: string,
+  reason: string,
+  user: PeriodServiceUser,
+  clientMutationId?: string,
+  customTrx?: Transaction<Database>
+) {
+  const payloadHash = computePayloadHash({ periodId, reason, action: "reopenAccountingPeriod" });
+
+  if (clientMutationId && !customTrx) {
+    const idemp = await checkIdempotency(db, franchiseId, clientMutationId, payloadHash);
+    if (idemp.isDuplicate) {
+      return idemp.body as any;
+    }
+  }
+
+  const runInTrx = async (trx: Transaction<Database>) => {
+    const period = await trx
+      .selectFrom("accounting_periods")
+      .selectAll()
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", periodId)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!period) {
+      throw new PeriodNotFoundError(periodId);
+    }
+
+    if (period.status === "open") {
+      return {
+        reopened: true,
+        alreadyOpen: true,
+        periodId: period.id,
+        periodKey: period.period_key,
+        status: "open",
+        period: {
+          id: period.id,
+          periodKey: period.period_key,
+          status: "open"
+        }
+      };
+    }
+
+    // Check if any operational days in this period remain unclosed
+    const unclosedDays = await trx
+      .selectFrom("accounting_days")
+      .select(["id"])
+      .where("franchise_id", "=", franchiseId)
+      .where("period_id", "=", period.id)
+      .where("status", "!=", "closed")
+      .execute();
+
+    // If any day is unclosed, final settlement status MUST be PENDING_SETTLEMENT; otherwise retain VERIFIED
+    const newFinalStatus = unclosedDays.length === 0 ? "VERIFIED" : "PENDING_SETTLEMENT";
+
+    // 1. Update period status to open
+    await trx
+      .updateTable("accounting_periods")
+      .set({
+        status: "open",
+        final_settlement_status: newFinalStatus,
+        reopened_at: sql`clock_timestamp()`,
+        reopened_by_user_id: user.id,
+        updated_at: sql`clock_timestamp()`
+      })
+      .where("id", "=", period.id)
+      .execute();
+
+    // 2. Record audit log for period reopen
+    await recordAuditLog(trx, {
+      franchiseId,
+      userId: user.id,
+      userEmail: user.email,
+      action: "UPDATE",
+      entityType: "accounting_period",
+      entityId: period.id,
+      afterState: {
+        periodKey: period.period_key,
+        status: "open",
+        reopenedAt: new Date().toISOString(),
+        reopenedBy: user.email,
+        reason
+      }
+    });
+
+    const result = {
+      reopened: true,
+      periodId: period.id,
+      periodKey: period.period_key,
+      status: "open",
+      period: {
+        id: period.id,
+        periodKey: period.period_key,
+        status: "open"
+      },
+      reopenedAt: new Date().toISOString()
+    };
+
+    if (clientMutationId && !customTrx) {
+      await saveIdempotencyRecord(trx, {
+        franchiseId,
+        clientMutationId,
+        userId: user.id,
+        endpoint: `POST /api/v1/periods/${periodId}/reopen`,
         payloadHash,
         responseStatus: 200,
         responseBody: result

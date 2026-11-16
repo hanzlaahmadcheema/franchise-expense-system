@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 export interface LedgerUser { uid: string; email?: string | null; displayName?: string | null; }
-import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History } from "lucide-react";
+import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History, Table, User, Search, ChevronLeft, Maximize2 } from "lucide-react";
 import type { UserRole, SystemAuditLog } from "../../../types/ledger";
 import { subscribeAuditLogs } from "../../../lib/auditLogService";
 import type { SyncState } from "../../../lib/syncStatus";
 import { MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
+import { Alert, StatusBadge } from "../../../shared/components";
 import {
   accountsSorted,
   buildStockDayRecord,
@@ -107,8 +108,7 @@ export function isServerLoadedStockDay(day?: StockDayRecord | null): boolean {
   return false;
 }
 
-type StockSection = "dashboard" | "stockIn" | "daily" | "records" | "balances" | "jazzPayable" | "dues" | "products" | "accounts" | "settings" | "backup" | "reportsHub";
-type StockSectionGroup = "entries" | "reports";
+export type StockSection = "dashboard" | "stockIn" | "daily" | "records" | "balances" | "jazzPayable" | "dues" | "products" | "accounts" | "settings" | "backup" | "reportsHub";
 
 type Props = {
   user: LedgerUser;
@@ -124,6 +124,9 @@ type Props = {
   ledgerReadModeConfig: LedgerReadModeConfig;
   loading?: boolean;
   onPendingStateChange?: (pending: boolean) => void;
+  section?: StockSection;
+  onSectionChange?: (sec: StockSection) => void;
+  hideOnPageTabs?: boolean;
 };
 
 function isFutureDay(monthId: string, dayNo: number, now = new Date()) {
@@ -189,13 +192,15 @@ function NumberInput({
   onChange,
   disabled,
   onFocus,
-  onBlur
+  onBlur,
+  className = ""
 }: {
   value: number;
   onChange: (value: number) => void;
   disabled?: boolean;
   onFocus?: () => void;
   onBlur?: () => void;
+  className?: string;
 }) {
   const [text, setText] = useState(value ? String(value) : "");
   const [focused, setFocused] = useState(false);
@@ -212,6 +217,7 @@ function NumberInput({
       inputMode="decimal"
       value={text}
       disabled={disabled}
+      className={`text-left font-mono font-bold tabular-nums text-white ${className}`}
       onFocus={() => {
         dirtyRef.current = false;
         setFocused(true);
@@ -232,6 +238,14 @@ function NumberInput({
       }}
     />
   );
+}
+
+function splitProductName(name: string): [string, string] {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length <= 1) return [name, ""];
+  if (parts.length === 2) return [parts[0], parts[1]];
+  const mid = Math.ceil(parts.length / 2);
+  return [parts.slice(0, mid).join(" "), parts.slice(mid).join(" ")];
 }
 
 function stockDraftSignature(draft: StockDailyAccountDraft) {
@@ -293,7 +307,7 @@ function StockProductEntryTable({
             const quantity = quantities[product.id] ?? 0;
             return (
               <tr key={product.id}>
-                <td className="font-semibold text-slate-200">{product.name}</td>
+                <td className="font-bold text-white">{product.name}</td>
                 <td className="w-36">
                   <NumberInput
                     value={quantity}
@@ -303,16 +317,16 @@ function StockProductEntryTable({
                     onChange={(value) => onQuantityChange(product.id, value)}
                   />
                 </td>
-                <td className="whitespace-nowrap font-mono">{formatMoney(product.rate)}</td>
-                <td className="whitespace-nowrap font-mono">{formatMoney(roundMoney(quantity * product.rate))}</td>
+                <td className="whitespace-nowrap font-mono font-bold text-white">{formatMoney(product.rate)}</td>
+                <td className="whitespace-nowrap font-mono font-bold text-white">{formatMoney(roundMoney(quantity * product.rate))}</td>
               </tr>
             );
           })}
-          <tr className="bg-slate-950/40 font-semibold">
-            <td>Total</td>
-            <td>{formatMoney(totalQty)}</td>
-            <td className="text-slate-500">—</td>
-            <td className="font-mono">{formatMoney(totalAmount)}</td>
+          <tr className="bg-slate-950/40 font-bold">
+            <td className="font-bold text-white">Total</td>
+            <td className="font-bold text-white">{formatMoney(totalQty)}</td>
+            <td className="text-slate-500 font-bold">—</td>
+            <td className="font-mono font-bold text-white">{formatMoney(totalAmount)}</td>
           </tr>
           {footerRows}
         </tbody>
@@ -680,14 +694,21 @@ export function StockLedgerModule({
   onTriggerMasterRefresh,
   ledgerReadModeConfig,
   loading,
-  onPendingStateChange
+  onPendingStateChange,
+  section: externalSection,
+  onSectionChange: onExternalSectionChange,
+  hideOnPageTabs = false
 }: Props) {
   const { selectedDay, setSelectedDay } = useSelectedDate();
-  const [section, setSection] = useState<StockSection>("daily");
-  const [openSectionGroups, setOpenSectionGroups] = useState<Record<StockSectionGroup, boolean>>({
-    entries: true,
-    reports: false
-  });
+  const [internalSection, setInternalSection] = useState<StockSection>("daily");
+  const section = externalSection ?? internalSection;
+  const setSection = (nextSection: StockSection) => {
+    if (onExternalSectionChange) {
+      onExternalSectionChange(nextSection);
+    } else {
+      setInternalSection(nextSection);
+    }
+  };
   const [months, setMonths] = useState<StockMonth[]>([]);
   const [days, setDays] = useState<StockDayRecord[]>([]);
   const [stockDaysInitialized, setStockDaysInitialized] = useState(false);
@@ -704,6 +725,9 @@ export function StockLedgerModule({
   const [products, setProducts] = useState<StockProduct[]>([]);
   const [accounts, setAccounts] = useState<StockAccountProfile[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
+  const [entryViewMode, setEntryViewMode] = useState<"sheet" | "focus">("sheet");
+  const [activeColumnKey, setActiveColumnKey] = useState<string | null>(null);
+  const [dealerSearchQuery, setDealerSearchQuery] = useState("");
   const [draft, setDraft] = useState<StockDailyAccountDraft>({ accountId: "", productQuantities: {}, paymentReceived: 0 });
   const [activeReportSubTab, setActiveReportSubTab] = useState<
     "masterSummary" | "stockPosition" | "overview" | "products" | "accounts" | "stockIn" | "stockOut" | "payments" | "dues" | "currentStock" | "cashCredit" | "audit"
@@ -893,15 +917,23 @@ export function StockLedgerModule({
     ? (selectedDayRecord?.stockAccountProjections?.find((p) => p.account_id === selectedAccountId) ??
        selectedDayRecord?.entries?.find((e) => e.accountId === selectedAccountId))
     : undefined;
-  const selectedCarryForwardBalance = selectedAccount
-    ? (selectedPgAccountProj
-      ? Number((selectedPgAccountProj as any).opening_due ?? (selectedPgAccountProj as any).carryForwardBalance ?? 0)
+  const getAccountCarryForward = (acc: StockAccountProfile) => {
+    const prevEntry = findPreviousEntry(days, selectedDay, acc.id);
+    const prevMonthDue = prevSummary?.accountTotals.find((item) => item.accountId === acc.id)?.dueBalance;
+    const pgProj = isPostgreSqlPeriod(monthId)
+      ? (selectedDayRecord?.stockAccountProjections?.find((p) => p.account_id === acc.id) ??
+         selectedDayRecord?.entries?.find((e) => e.accountId === acc.id))
+      : undefined;
+    return pgProj
+      ? Number((pgProj as any).opening_due ?? (pgProj as any).carryForwardBalance ?? 0)
       : resolveStockCarryForwardBalance({
-        previousEntryDueBalance: previousEntry?.dueBalance,
-        previousMonthDueBalance,
-        accountOpeningBalance: openingBalances.stockAccountOpening?.[selectedAccount.id] ?? selectedAccount.openingBalance
-      }))
-    : 0;
+        previousEntryDueBalance: prevEntry?.dueBalance,
+        previousMonthDueBalance: prevMonthDue,
+        accountOpeningBalance: openingBalances.stockAccountOpening?.[acc.id] ?? acc.openingBalance
+      });
+  };
+
+  const selectedCarryForwardBalance = selectedAccount ? getAccountCarryForward(selectedAccount) : 0;
   const effectiveCarryForwardBalance = selectedCarryForwardBalance;
 
   const allStockInRecords = useMemo(() => {
@@ -913,27 +945,33 @@ export function StockLedgerModule({
   const monthOpeningJazzPayable = prevSummary?.closingJazzPayable ?? openingBalances.jazzOpeningPayable;
 
   const currentStockBalances = useMemo(() => {
-    if (isPostgreSqlPeriod(monthId) && selectedDayRecord?.stockProductProjections && selectedDayRecord.stockProductProjections.length > 0) {
-      const projMap = new Map(selectedDayRecord.stockProductProjections.map((p) => [p.product_id, p]));
-      return products.map((product) => {
-        const proj = projMap.get(product.id);
-        const opening = proj ? Number(proj.opening_qty) : (openingBalances.openingStock[product.id] ?? 0);
-        const stockIn = proj ? Number(proj.stock_in_qty ?? proj.received_qty ?? 0) : 0;
-        const stockOut = proj ? Number(proj.stock_out_qty ?? proj.sold_qty ?? 0) : 0;
-        const current = proj ? Number(proj.closing_qty) : opening;
-        return {
-          productId: product.id,
-          productName: product.name,
-          openingStock: opening,
-          totalStockIn: stockIn,
-          totalStockOut: stockOut,
-          currentStock: current,
-          updatedAt: Date.now()
-        };
-      });
+    if (isPostgreSqlPeriod(monthId)) {
+      const targetDayRecord = section === "reportsHub"
+        ? ([...days].reverse().find((d) => d.stockProductProjections && d.stockProductProjections.length > 0) ?? selectedDayRecord)
+        : selectedDayRecord;
+
+      if (targetDayRecord?.stockProductProjections && targetDayRecord.stockProductProjections.length > 0) {
+        const projMap = new Map(targetDayRecord.stockProductProjections.map((p) => [p.product_id, p]));
+        return products.map((product) => {
+          const proj = projMap.get(product.id);
+          const opening = proj ? Number(proj.opening_qty) : (openingBalances.openingStock[product.id] ?? 0);
+          const stockIn = proj ? Number(proj.stock_in_qty ?? proj.received_qty ?? 0) : 0;
+          const stockOut = proj ? Number(proj.stock_out_qty ?? proj.sold_qty ?? 0) : 0;
+          const current = proj ? Number(proj.closing_qty) : opening;
+          return {
+            productId: product.id,
+            productName: product.name,
+            openingStock: opening,
+            totalStockIn: stockIn,
+            totalStockOut: stockOut,
+            currentStock: current,
+            updatedAt: Date.now()
+          };
+        });
+      }
     }
     return calculateCurrentStock(products, monthOpeningStock, allStockInRecords, days);
-  }, [allStockInRecords, days, isPostgreSqlPeriod, monthId, monthOpeningStock, openingBalances.openingStock, products, selectedDayRecord?.stockProductProjections]);
+  }, [allStockInRecords, days, isPostgreSqlPeriod, monthId, monthOpeningStock, openingBalances.openingStock, products, section, selectedDayRecord]);
   const productRateById = useMemo(() => {
     return Object.fromEntries(products.map((product) => [product.id, product.rate]));
   }, [products]);
@@ -1095,6 +1133,7 @@ export function StockLedgerModule({
     return calculateJazzPayableLedger(monthOpeningJazzPayable, allStockInRecords);
   }, [monthOpeningJazzPayable, allStockInRecords]);
 
+  const canRead = roleCanStock(role, "read");
   const canManageSettings = roleCanStock(role, "settings");
   const stockSettingsReady = Object.values(stockSettingsInitialized).every(Boolean);
   const stockDailyReady = stockSettingsReady && stockDaysInitialized && stockPreviousSummaryInitialized;
@@ -1416,6 +1455,30 @@ export function StockLedgerModule({
     };
   }, [accounts, monthId, products, selectedDay, user]);
 
+  const [reportsRefreshing, setReportsRefreshing] = useState(false);
+
+  const refreshStockReports = useCallback(async () => {
+    if (!isPostgreSqlPeriod(monthId) || products.length === 0) return;
+    setReportsRefreshing(true);
+    try {
+      const monthDays = await loadStockMonthPostgres(monthId, products, accounts);
+      if (monthDays && monthDays.length > 0) {
+        setDays(monthDays);
+        setSummary(calculateMonthlySummary(monthId, monthDays));
+      }
+    } catch (err) {
+      console.warn("[StockLedgerModule] Failed to refresh reports from PostgreSQL:", err);
+    } finally {
+      setReportsRefreshing(false);
+    }
+  }, [accounts, isPostgreSqlPeriod, monthId, products]);
+
+  useEffect(() => {
+    if (section === "reportsHub" && isPostgreSqlPeriod(monthId)) {
+      void refreshStockReports();
+    }
+  }, [isPostgreSqlPeriod, monthId, refreshStockReports, section]);
+
   useEffect(() => {
     if (isPostgreSqlPeriod(monthId)) {
       setStockDaysInitialized(true);
@@ -1564,7 +1627,9 @@ export function StockLedgerModule({
     if (isPostgreSqlPeriod(monthId)) {
       try {
         await saveStockDayPostgres(monthId, selectedDay, nextDraft, products);
-        setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), nextDay].sort((a, b) => a.dayNo - b.dayNo));
+        const reloadedDay = await loadStockDayPostgres(monthId, selectedDay, products, accounts).catch(() => null);
+        const dayToSet = reloadedDay ?? nextDay;
+        setDays((current) => [...current.filter((day) => day.dayNo !== selectedDay), dayToSet].sort((a, b) => a.dayNo - b.dayNo));
         if (currentStockDraftSignature() === savedDraftSignature) {
           stockDraftDirtyRef.current = false;
         }
@@ -1627,6 +1692,9 @@ export function StockLedgerModule({
           ? `Stock day ${selectedDay} was saved successfully to PostgreSQL.`
           : `Stock day ${selectedDay} was saved successfully.`
       });
+      window.setTimeout(() => {
+        setVerifiedSave((current) => current?.status === "success" ? null : current);
+      }, 2200);
     } catch (error) {
       setVerifiedSave({
         status: "error",
@@ -1637,6 +1705,118 @@ export function StockLedgerModule({
       saveInFlightRef.current = false;
     }
   }
+
+  async function switchDealer(newAccountId: string) {
+    if (newAccountId === selectedAccountId) return;
+    if (stockDraftDirtyRef.current && selectedAccount) {
+      try {
+        await saveEntry(draft, { throwOnError: false });
+      } catch (err) {
+        console.warn("Autosave before dealer switch:", err);
+      }
+    }
+    setSelectedAccountId(newAccountId);
+  }
+
+  const currentDealerIndex = activeAccounts.findIndex((acc) => acc.id === selectedAccountId);
+  const prevDealer = currentDealerIndex > 0 ? activeAccounts[currentDealerIndex - 1] : null;
+  const nextDealer = currentDealerIndex >= 0 && currentDealerIndex < activeAccounts.length - 1 ? activeAccounts[currentDealerIndex + 1] : null;
+
+  const filteredAccounts = useMemo(() => {
+    if (!dealerSearchQuery.trim()) return activeAccounts;
+    const q = dealerSearchQuery.toLowerCase().trim();
+    return activeAccounts.filter(
+      (acc) => acc.name.toLowerCase().includes(q) || acc.type.toLowerCase().includes(q)
+    );
+  }, [activeAccounts, dealerSearchQuery]);
+
+  const allDealersSheetRows = useMemo(() => {
+    return activeAccounts.map((account) => {
+      const isSelected = account.id === selectedAccountId;
+      const entry = selectedDayRecord?.entries.find((e) => e.accountId === account.id);
+      const openingDue = getAccountCarryForward(account);
+
+      if (isSelected) {
+        const totalQty = previewEntry?.totalQty ?? 0;
+        const totalAmount = previewEntry?.totalAmount ?? 0;
+        const paymentReceived = draft.paymentReceived ?? 0;
+        const closingDue = previewEntry?.dueBalance ?? (openingDue + totalAmount - paymentReceived);
+        const productQuantities = draft.productQuantities;
+        const notes = draft.notes ?? "";
+        const hasMovement = totalQty > 0 || paymentReceived > 0 || Boolean(notes.trim());
+
+        return {
+          account,
+          isSelected: true,
+          openingDue,
+          productQuantities,
+          totalQty,
+          totalAmount,
+          paymentReceived,
+          closingDue,
+          notes,
+          hasMovement
+        };
+      }
+
+      const productQuantities: Record<string, number> = {};
+      activeProducts.forEach((p) => {
+        productQuantities[p.id] = entry?.products.find((item) => item.productId === p.id)?.quantity ?? 0;
+      });
+      const totalQty = entry?.totalQty ?? 0;
+      const totalAmount = entry?.totalAmount ?? 0;
+      const paymentReceived = entry?.totalPaymentReceived ?? 0;
+      const closingDue = entry?.dueBalance ?? (openingDue + totalAmount - paymentReceived);
+      const notes = entry?.notes ?? "";
+      const hasMovement = totalQty > 0 || paymentReceived > 0 || Boolean(notes.trim());
+
+      return {
+        account,
+        isSelected: false,
+        openingDue,
+        productQuantities,
+        totalQty,
+        totalAmount,
+        paymentReceived,
+        closingDue,
+        notes,
+        hasMovement
+      };
+    });
+  }, [
+    activeAccounts,
+    activeProducts,
+    draft,
+    previewEntry,
+    selectedAccountId,
+    selectedDayRecord,
+    days,
+    selectedDay,
+    prevSummary,
+    openingBalances,
+    monthId
+  ]);
+
+  const sheetTotals = useMemo(() => {
+    const productQtyTotals: Record<string, number> = {};
+    activeProducts.forEach((p) => {
+      productQtyTotals[p.id] = allDealersSheetRows.reduce((sum, r) => sum + (r.productQuantities[p.id] ?? 0), 0);
+    });
+    const totalOpening = allDealersSheetRows.reduce((sum, r) => sum + r.openingDue, 0);
+    const grandTotalQty = allDealersSheetRows.reduce((sum, r) => sum + r.totalQty, 0);
+    const grandTotalAmount = allDealersSheetRows.reduce((sum, r) => sum + r.totalAmount, 0);
+    const grandTotalPayment = allDealersSheetRows.reduce((sum, r) => sum + r.paymentReceived, 0);
+    const grandTotalClosingDue = allDealersSheetRows.reduce((sum, r) => sum + r.closingDue, 0);
+
+    return {
+      productQtyTotals,
+      totalOpening,
+      grandTotalQty,
+      grandTotalAmount,
+      grandTotalPayment,
+      grandTotalClosingDue
+    };
+  }, [activeProducts, allDealersSheetRows]);
 
   const handlePrint = (title: string, elementId: string) => {
     const content = document.getElementById(elementId)?.innerHTML;
@@ -2521,15 +2701,15 @@ export function StockLedgerModule({
     stockEntryAutoSave.autoSaveStatus,
     verifiedSave?.status
   ]);
-  useSidebarDayControls("stock", sidebarDayControls, true);
+  useSidebarDayControls("stock", sidebarDayControls, canRead && section === "daily");
 
   useEffect(() => {
     if (section === "settings" && !canManageSettings) {
       setSection("daily");
-      onStatus("Owner only. Stock Settings are restricted to owner access.");
+      onStatus("Owner and Admin only. Stock Settings are restricted.");
     }
     if (section === "backup" && !canUseStockBackup) {
-      setSection("dashboard");
+      setSection("reportsHub");
       onStatus("Owner only. Stock backup is restricted to owner access.");
     }
   }, [canManageSettings, canUseStockBackup, onStatus, section]);
@@ -2573,573 +2753,627 @@ export function StockLedgerModule({
   }
 
   const metrics = metricSummary();
-  const entrySections: Array<{ id: StockSection; label: string; icon: typeof CalendarDays; disabled?: boolean; disabledReason?: string }> = [
-    { id: "daily", label: "Stock Issuance", icon: ArrowUpRight },
-    { id: "stockIn", label: "Stock Lifting", icon: PlusCircle },
-    { id: "settings", label: "Stock Settings", icon: Settings, disabled: !canManageSettings, disabledReason: "Only owner can manage Stock Settings." }
-  ];
-  const reportSections: Array<{ id: StockSection; label: string; icon: typeof CalendarDays; disabled?: boolean; disabledReason?: string }> = [
-    { id: "dashboard", label: "Stock Dashboard", icon: BarChart3 },
-    { id: "reportsHub", label: "Stock Monthly Reports", icon: FileSpreadsheet },
-    { id: "backup", label: "Backup / Export", icon: FileDown, disabled: !canUseStockBackup, disabledReason: "Only owner can use Stock backup." }
-  ];
-  const sectionGroup: StockSectionGroup = entrySections.some((item) => item.id === section) ? "entries" : "reports";
-  const activeSectionVisible = openSectionGroups[sectionGroup];
+  const stockSections = useMemo(
+    () => [
+      { id: "daily" as const, label: "Daily Stock Issuance", icon: ArrowUpRight, show: true },
+      { id: "stockIn" as const, label: "Stock Lifting (Stock In)", icon: PlusCircle, show: true },
+      { id: "reportsHub" as const, label: "Reports & Summaries", icon: FileSpreadsheet, show: true },
+      {
+        id: "settings" as const,
+        label: "Products & Accounts",
+        icon: Settings,
+        show: true,
+        disabled: !canManageSettings,
+        disabledReason: "Only owner and admin can manage Stock Settings."
+      }
+    ],
+    [canManageSettings]
+  );
 
-  function toggleSectionGroup(group: StockSectionGroup) {
-    const fallbackSection = group === "entries" ? "daily" : "dashboard";
-    const nextOpen = !openSectionGroups[group];
-    if (nextOpen) setSection(fallbackSection);
-    setOpenSectionGroups((current) => {
-      return { ...current, [group]: nextOpen };
-    });
-  }
-
-  function selectGroupedSection(group: StockSectionGroup, nextSection: StockSection) {
+  async function handleSectionChange(nextSection: StockSection) {
+    if (nextSection === section) return;
     if (nextSection === "settings" && !canManageSettings) {
-      onStatus("Owner only. Stock Settings are restricted to owner access.");
+      onStatus("Owner and Admin only. Stock Settings are restricted to owner/admin access.");
       return;
     }
     if (nextSection === "backup" && !canUseStockBackup) {
       onStatus("Owner only. Stock backup is restricted to owner access.");
       return;
     }
-    setOpenSectionGroups((current) => ({ ...current, [group]: true }));
+    if (stockDraftDirtyRef.current && selectedAccount && canEdit) {
+      try {
+        await saveEntry(draft, { throwOnError: false });
+      } catch (err) {
+        console.warn("Autosave before section switch:", err);
+      }
+    } else if (hasPendingStockChanges) {
+      if (!window.confirm("There are unsaved Stock changes. Leave this screen anyway?")) {
+        return;
+      }
+    }
     setSection(nextSection);
+  }
+
+  if (!canRead) {
+    return (
+      <section className="panel">
+        <h2>Stock Ledger</h2>
+        <Alert
+          variant="warning"
+          title="Access Restricted"
+          message="This account is not allowed to access Stock Ledger data."
+        />
+      </section>
+    );
   }
 
   return (
     <section className="space-y-5">
       <SaveProgressDialog state={verifiedSave} onClose={() => setVerifiedSave(null)} />
       {carryForwardWarnings.length > 0 && (role === "owner" || role === "admin") && (
-        <div className="warning">
-          <p>{carryForwardWarnings.length} Stock month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
-          <ul className="mt-2 list-disc pl-5 text-sm">
-            {carryForwardWarnings.slice(0, 5).map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
+        <Alert
+          variant="warning"
+          title="Opening Mismatches Detected"
+          message={
+            <div>
+              <p>{carryForwardWarnings.length} Stock month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
+              <ul className="mt-2 list-disc pl-5 text-xs space-y-0.5">
+                {carryForwardWarnings.slice(0, 5).map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          }
+        />
+      )}
+
+      {/* Primary Stock Navigation Tabs */}
+      {!hideOnPageTabs && (
+        <div className="py-2">
+          <nav aria-label="Stock navigation tabs" className="inline-flex flex-wrap gap-1 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 shadow-sm">
+            {stockSections.map(({ id, label, icon: Icon, disabled, disabledReason }) => {
+              const isActive = section === id || (id === "reportsHub" && (section === "dashboard" || section === "backup"));
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={disabled}
+                  title={disabled ? disabledReason : label}
+                  onClick={() => handleSectionChange(id)}
+                  className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-semibold transition-all ${
+                    isActive
+                      ? "bg-slate-800 text-white shadow-sm ring-1 ring-slate-700/60"
+                      : disabled
+                      ? "cursor-not-allowed opacity-40 text-slate-500"
+                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                  }`}
+                >
+                  <Icon className={`h-4 w-4 ${isActive ? "text-emerald-400" : "text-slate-500"}`} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </nav>
         </div>
       )}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">Stock Ledger</h2>
-          <p className="mt-1 text-sm text-slate-400">{monthLabel(monthId)} · {month?.status ?? "open"} · {syncLabel}</p>
-        </div>
-        <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Active Month</p>
-          <p className="mt-1 text-sm font-medium text-white">{monthLabel(monthId)}</p>
-        </div>
-      </div>
-      <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-3 text-slate-100 shadow-xl shadow-black/20">
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2">
-            <button
-              type="button"
-              className="btn-secondary w-full justify-between"
-              onClick={() => toggleSectionGroup("entries")}
-            >
-              <span className="inline-flex items-center gap-2">
-                {openSectionGroups.entries ? <ChevronDown /> : <ChevronRight />}
-                Settings & Entries
-              </span>
-              <span>{openSectionGroups.entries ? "Collapse" : "Expand"}</span>
-            </button>
-            {openSectionGroups.entries && (
-              <nav className="mt-2 flex flex-wrap gap-2">
-                {entrySections.map(({ id, label, icon: Icon, disabled, disabledReason }) => (
-                  <button
-                    key={id}
-                    className={section === id ? "btn-tab btn-tab-active" : "btn-tab"}
-                    disabled={disabled}
-                    title={disabled ? disabledReason : label}
-                    onClick={() => selectGroupedSection("entries", id)}
+
+      {section === "daily" && (
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+          {/* Left Column: Data entry and tables */}
+          <div className="min-w-0 space-y-5">
+            <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950/70 border-slate-800 shadow-xl">
+              {/* Header with Title and Mode Switcher */}
+              <div className="panel-title border-b border-slate-800/60 pb-4 flex-wrap gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <h2>Stock Issuance</h2>
+                    {/* View Mode Toggle: All Dealers Sheet vs Single Dealer Focus */}
+                    <div className="inline-flex rounded-lg border border-slate-800 bg-slate-950 p-1">
+                      <button
+                        type="button"
+                        onClick={() => setEntryViewMode("sheet")}
+                        className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-bold transition-all ${
+                          entryViewMode === "sheet"
+                            ? "bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-500/50"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                        title="Direct spreadsheet entry across all active dealers"
+                      >
+                        <Table className="h-3.5 w-3.5" />
+                        <span>All Dealers Sheet</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEntryViewMode("focus")}
+                        className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-bold transition-all ${
+                          entryViewMode === "focus"
+                            ? "bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-500/50"
+                            : "text-slate-400 hover:text-white"
+                        }`}
+                        title="Focused card selector and single dealer issuance form"
+                      >
+                        <User className="h-3.5 w-3.5" />
+                        <span>Single Dealer Focus</span>
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-slate-400 text-sm mt-1">
+                    {entryViewMode === "sheet"
+                      ? "Direct spreadsheet entry across all active dealers and employees for today."
+                      : `Issuing stock for ${selectedAccount?.name ?? "selected dealer"}.`}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Screen reader accessible fallback select */}
+                  <select
+                    aria-label="Employee / Dealer"
+                    title="Employee / Dealer"
+                    className="sr-only"
+                    value={selectedAccountId}
+                    disabled={!stockDailyReady || !canEdit || activeAccounts.length === 0 || monthBootstrapPending}
+                    onChange={(event) => void switchDealer(event.target.value)}
                   >
-                    <Icon />
-                    {label}
-                  </button>
-                ))}
-              </nav>
-            )}
-          </div>
+                    {activeAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>{account.name} · {account.type}</option>
+                    ))}
+                  </select>
 
-          <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2">
-            <button
-              type="button"
-              className="btn-secondary w-full justify-between"
-              onClick={() => toggleSectionGroup("reports")}
-            >
-              <span className="inline-flex items-center gap-2">
-                {openSectionGroups.reports ? <ChevronDown /> : <ChevronRight />}
-                Reports
-              </span>
-              <span>{openSectionGroups.reports ? "Collapse" : "Expand"}</span>
-            </button>
-            {openSectionGroups.reports && (
-              <nav className="mt-2 flex flex-wrap gap-2">
-                {reportSections.map(({ id, label, icon: Icon, disabled, disabledReason }) => (
-                  <button
-                    key={id}
-                    className={section === id ? "btn-tab btn-tab-active" : "btn-tab"}
-                    disabled={disabled}
-                    title={disabled ? disabledReason : label}
-                    onClick={() => selectGroupedSection("reports", id)}
-                  >
-                    <Icon />
-                    {label}
-                  </button>
-                ))}
-              </nav>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="grid grid-cols-1 gap-3 md:grid-cols-4">
-        <MetricCard label="Stock Amount" value={formatMoney(currentInventoryAmount)} helper="Current inventory value from stock balance and product rates." />
-        <MetricCard label="Payment Received" value={formatMoney(metrics.totalPaymentReceived)} helper={syncLabel} />
-        <MetricCard label="Due Balance" value={formatMoney(metrics.totalDueBalance)} helper={syncState === "offline" ? "Offline changes are queued." : "Firestore stock summary."} />
-        <MetricCard label="Quantity" value={formatMoney(currentInventoryQty)} helper="Current stock balance quantity." />
-      </section>
-
-          {/* Selected Date Summary & Stock Flow Dashboard */}
-          {/* <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border-slate-800">
-            <div className="panel-title border-b border-slate-800 pb-3">
-              <div>
-                <h2>Selected Date Summary & Stock Flow</h2>
-                <p>Quick summaries, stock-in, allotments, and stock closing flow for {dayDate(monthId, selectedDay)}.</p>
-              </div>
-              <BarChart3 className="text-emerald-500" />
-            </div>
-
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Stock Issued</span>
-                <p className="mt-1 text-lg font-extrabold text-slate-100">{formatMoney(selectedDayRecord?.summary.totalQty ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Units allotted today</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Amount</span>
-                <p className="mt-1 text-lg font-extrabold text-emerald-400">{formatMoney(selectedDayRecord?.summary.totalAmount ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Total value issued</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Payments Recovered</span>
-                <p className="mt-1 text-lg font-extrabold text-blue-400">{formatMoney(selectedDayRecord?.summary.totalPaymentReceived ?? 0)}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Total collected today</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Stock In (Jazz)</span>
-                <p className="mt-1 text-lg font-extrabold text-indigo-400">
-                  {formatMoney(
-                    (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => sum + r.totalQty, 0)
-                  )}
-                </p>
-                <p className="text-[10px] text-slate-500 mt-1">Units received from Jazz</p>
-              </div>
-              <div className="card card-pad bg-slate-950/30 border-slate-800/80">
-                <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Net Dues Change</span>
-                <p className="mt-1 text-lg font-extrabold text-rose-400">
-                  {formatMoney(
-                    roundMoney(
-                      (selectedDayRecord?.summary.totalAmount ?? 0) -
-                        (selectedDayRecord?.summary.totalPaymentReceived ?? 0)
-                    )
-                  )}
-                </p>
-                <p className="text-[10px] text-slate-500 mt-1">Difference today</p>
-              </div>
-            </div>
-
-            <div className="mt-6">
-              <h3 className="text-sm font-semibold text-slate-100 mb-2 flex items-center gap-1.5">
-                <RefreshCw className="h-4 w-4 text-emerald-400 animate-spin-slow" />
-                <span>Day Inventory Closing Flow & Impact</span>
-              </h3>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th>Opening Stock (A)</th>
-                      <th>Stock Received (B)</th>
-                      <th>Stock Out / Allotted (C)</th>
-                      <th>Closing Stock (A + B - C)</th>
-                      <th>Rate Snapshot</th>
-                      <th>Closing Value (Rs.)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {products.map((p) => {
-                      const todayOpening = (() => {
-                        const openingVal = monthOpeningStock[p.id] ?? 0;
-                        let cumulativeStockIn = 0;
-                        let cumulativeStockOut = 0;
-
-                        for (const day of days) {
-                          if (day.dayNo < selectedDay) {
-                            // Stock In
-                            const stockInRecs = day.stockIn ?? [];
-                            for (const record of stockInRecs) {
-                              const prodLine = record.products.find((line) => line.productId === p.id);
-                              if (prodLine) cumulativeStockIn += prodLine.quantity;
-                            }
-                            // Stock Out
-                            for (const entry of day.entries) {
-                              const prodLine = entry.products.find((line) => line.productId === p.id);
-                              if (prodLine) cumulativeStockOut += prodLine.quantity;
-                            }
-                          }
-                        }
-                        return roundMoney(openingVal + cumulativeStockIn - cumulativeStockOut);
-                      })();
-
-                      const stockInToday = (selectedDayRecord?.stockIn ?? []).reduce((sum, r) => {
-                        const prodLine = r.products.find((line) => line.productId === p.id);
-                        return sum + (prodLine?.quantity ?? 0);
-                      }, 0);
-
-                      const stockOutToday = (selectedDayRecord?.entries ?? []).reduce((sum, entry) => {
-                        const prodLine = entry.products.find((line) => line.productId === p.id);
-                        return sum + (prodLine?.quantity ?? 0);
-                      }, 0);
-
-                      const closingToday = roundMoney(todayOpening + stockInToday - stockOutToday);
-
-                      return (
-                        <tr key={p.id}>
-                          <td className="font-semibold text-slate-200">{p.name}</td>
-                          <td>{formatMoney(todayOpening)}</td>
-                          <td className="text-indigo-400 font-semibold">{formatMoney(stockInToday)}</td>
-                          <td className="text-rose-400 font-semibold">{formatMoney(stockOutToday)}</td>
-                          <td className="font-bold text-slate-100">{formatMoney(closingToday)}</td>
-                          <td>{formatMoney(p.rate)}</td>
-                          <td className="font-mono text-emerald-400">{formatMoney(roundMoney(closingToday * p.rate))}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
-                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <ArrowDownRight className="h-3.5 w-3.5 text-indigo-400" />
-                    <span>Stock In Received Today (Jazz)</span>
+                  <span className={`inline-flex whitespace-nowrap rounded-md border border-slate-800 bg-slate-950/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
+                    !canEdit
+                      ? "text-slate-400"
+                      : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
+                      ? "text-amber-300"
+                      : stockEntryAutoSave.autoSaveStatus === "error"
+                      ? "text-rose-300"
+                      : stockDraftDirtyRef.current
+                      ? "text-amber-400"
+                      : "text-emerald-300"
+                  }`}>
+                    {!stockDailyReady
+                      ? "Loading..."
+                      : !canEdit
+                      ? "Day closed"
+                      : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
+                      ? "Saving…"
+                      : stockEntryAutoSave.autoSaveStatus === "error"
+                      ? "Save failed"
+                      : stockDraftDirtyRef.current
+                      ? "Unsaved changes"
+                      : "Saved"}
                   </span>
-                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.stockIn ?? []).length} shipments</span>
-                </h4>
-                <div className="table-wrap">
-                  <table className="!text-xs">
-                    <thead>
+                </div>
+              </div>
+
+              {/* Warnings */}
+              {!stockDailyReady && <p className="status mt-4 bg-slate-500/10 text-slate-300 border border-slate-500/20 px-3 py-2 rounded-lg text-xs">Loading Stock Ledger data...</p>}
+              {stockDailyReady && !canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
+              {stockDailyReady && activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
+
+              {/* MODE 1: ALL DEALERS SHEET (DIRECT GRID ENTRY) */}
+              {entryViewMode === "sheet" && activeAccounts.length > 0 && (
+                <div className="table-wrap mt-4">
+                  <table className="stock-entry-table w-full">
+                    <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                       <tr>
-                        <th>Mode</th>
-                        <th>Total Amount</th>
-                        <th>Paid</th>
-                        <th>Payable</th>
-                        <th>Reference</th>
+                        <th className="w-32 max-w-[130px] text-left text-xs sticky top-0 left-0 z-30 bg-slate-900 shadow-sm border-r border-slate-800">
+                          <span className="block leading-tight">Dealer /</span>
+                          <span className="block leading-tight">Employee</span>
+                        </th>
+                        <th className="text-left text-xs min-w-[90px] sticky top-0 z-20 bg-slate-900">
+                          <span className="block leading-tight">Opening</span>
+                          <span className="block leading-tight">Balance</span>
+                        </th>
+                        {activeProducts.map((p) => {
+                          const isColActive = activeColumnKey === `product:${p.id}`;
+                          const [line1, line2] = splitProductName(p.name);
+                          return (
+                            <th
+                              key={p.id}
+                              className={`text-left text-xs min-w-[76px] sticky top-0 z-20 cursor-pointer transition-colors ${
+                                isColActive
+                                  ? "bg-emerald-950/90 text-emerald-300 ring-1 ring-inset ring-emerald-500/50 stock-col-active-th"
+                                  : "bg-slate-900/95 text-white hover:bg-slate-800"
+                              }`}
+                              onClick={() => setActiveColumnKey(`product:${p.id}`)}
+                              title={`Click to highlight column for ${p.name}`}
+                            >
+                              <span className={`block font-bold text-xs leading-tight whitespace-nowrap ${isColActive ? "text-emerald-300 font-extrabold" : "text-white"}`}>{line1}</span>
+                              {line2 ? (
+                                <span className={`block font-bold text-xs leading-tight whitespace-nowrap ${isColActive ? "text-emerald-300 font-extrabold" : "text-white"}`}>{line2}</span>
+                              ) : null}
+                              <span className={`block text-[10px] font-normal mt-0.5 whitespace-nowrap ${isColActive ? "text-emerald-400 font-semibold" : "text-slate-400"}`}>({formatMoney(p.rate)})</span>
+                            </th>
+                          );
+                        })}
+                        <th className="text-left text-xs sticky top-0 z-20 bg-slate-900">
+                          <span className="block leading-tight">Total</span>
+                          <span className="block leading-tight">Qty</span>
+                        </th>
+                        <th className="text-left text-xs min-w-[90px] sticky top-0 z-20 bg-slate-900">
+                          <span className="block leading-tight">Stock</span>
+                          <span className="block leading-tight">Amount</span>
+                        </th>
+                        {(() => {
+                          const isPaymentActive = activeColumnKey === "paymentReceived";
+                          return (
+                            <th
+                              className={`text-left text-xs min-w-[96px] sticky top-0 z-20 cursor-pointer transition-colors ${
+                                isPaymentActive
+                                  ? "bg-emerald-950/90 text-emerald-300 ring-1 ring-inset ring-emerald-500/50 stock-col-active-th"
+                                  : "bg-slate-900/95 text-white hover:bg-slate-800"
+                              }`}
+                              onClick={() => setActiveColumnKey("paymentReceived")}
+                              title="Click to highlight Payment Received column"
+                            >
+                              <span className={`block leading-tight ${isPaymentActive ? "text-emerald-300 font-bold" : ""}`}>Payment</span>
+                              <span className={`block leading-tight ${isPaymentActive ? "text-emerald-300 font-bold" : ""}`}>Received</span>
+                            </th>
+                          );
+                        })()}
+                        <th className="text-left text-xs min-w-[90px] sticky top-0 z-20 bg-slate-900">
+                          <span className="block leading-tight">Closing</span>
+                          <span className="block leading-tight">Due</span>
+                        </th>
+                        <th className="w-8 text-center sticky top-0 z-20 bg-slate-900" title="Focus Single Dealer">
+                          <Maximize2 className="h-3.5 w-3.5 inline text-slate-400" />
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(selectedDayRecord?.stockIn ?? []).map((r) => (
-                        <tr key={r.id}>
-                          <td className="capitalize font-semibold text-slate-300">{r.stockInMode}</td>
-                          <td className="font-mono">{formatMoney(r.totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
-                          <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
-                          <td className="text-slate-400 truncate max-w-[120px]" title={r.notes}>{r.notes || "—"}</td>
-                        </tr>
-                      ))}
-                      {(selectedDayRecord?.stockIn ?? []).length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No Jazz shipments received today.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-slate-800 bg-slate-950/20 p-3">
-                <h4 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-2 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <ArrowUpRight className="h-3.5 w-3.5 text-rose-400" />
-                    <span>Stock Out Issued Today (Accounts)</span>
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-normal">{(selectedDayRecord?.entries ?? []).length} accounts allotted</span>
-                </h4>
-                <div className="table-wrap">
-                  <table className="!text-xs">
-                    <thead>
-                      <tr>
-                        <th>Account</th>
-                        <th>Qty</th>
-                        <th>Issued Value</th>
-                        <th>Payment</th>
-                        <th>Due</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(selectedDayRecord?.entries ?? []).map((e) => (
-                        <tr key={e.id}>
-                          <td className="font-semibold text-slate-300">{e.accountName}</td>
-                          <td>{formatMoney(e.totalQty)}</td>
-                          <td className="font-mono">{formatMoney(e.totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
-                          <td className="font-bold text-slate-200">{formatMoney(e.dueBalance)}</td>
-                        </tr>
-                      ))}
-                      {(selectedDayRecord?.entries ?? []).length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="text-center text-slate-500 py-3 italic">No customer allotments entered today.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div> 
-          </section> */}
-          
-      {activeSectionVisible && section === "daily" && (
-        <>
-          <section className="panel bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950/70 border-slate-800 shadow-xl">
-            <div className="panel-title border-b border-slate-800/60 pb-4">
-              <div className="shrink-0">
-                <h2>Stock Issuance</h2>
-                <p className="flex flex-wrap items-center gap-1.5 text-slate-400 text-sm mt-1">
-                  <span>{monthLabel(monthId)}</span>
-                  <span className="text-slate-700">·</span>
-                  <span>{dayDate(monthId, selectedDay)}</span>
-                  <span className="text-slate-700">·</span>
-                  <span className="text-slate-500 uppercase text-[10px] font-semibold tracking-wider">Month:</span>
-                  <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-300">{month?.status ?? "open"}</span>
-                  <span className="text-slate-700">·</span>
-                  <span className="text-slate-500 uppercase text-[10px] font-semibold tracking-wider">Day:</span>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getDayStatusChipClass(selectedDayStatus)}`}>{selectedDayStatus}</span>
-	                  {selectedDayRecord && isReopenActive(selectedDayRecord, now) && (
-	                    <>
-	                      <span className="text-slate-700">·</span>
-	                      <span className="text-[10px] font-semibold uppercase text-emerald-300 animate-pulse">
-	                        Reopened until manual close
-	                      </span>
-	                    </>
-	                  )}
-	                  {selectedDayHasLegacyTimedReopen && (
-	                    <>
-	                      <span className="text-slate-700">·</span>
-	                      <span className="text-[10px] font-semibold uppercase text-amber-300">
-	                        Owner must reopen again before editing
-	                      </span>
-	                    </>
-	                  )}
-	                </p>
-              </div>
-              <div className="flex min-w-0 flex-1 flex-wrap items-end justify-end gap-2">
-                <select
-                  aria-label="Employee / Dealer"
-                  title="Employee / Dealer"
-                  className="min-w-56 flex-1 !border-emerald-500 focus:!border-emerald-400"
-                  value={selectedAccountId}
-                  disabled={!stockDailyReady || !canEdit || activeAccounts.length === 0 || monthBootstrapPending}
-                  onChange={(event) => setSelectedAccountId(event.target.value)}
-                >
-                  {activeAccounts.map((account) => (
-                    <option key={account.id} value={account.id}>{account.name} · {account.type}</option>
-                  ))}
-                </select>
-                <div className="w-[9.6rem]">
-                  <span className="mb-1 block text-[10px] font-semibold uppercase text-slate-500">Payment Received</span>
-                  <NumberInput
-                    value={draft.paymentReceived ?? 0}
-                    disabled={!canEdit || monthBootstrapPending}
-                    onFocus={() => focusStockDraftField("paymentReceived")}
-                    onBlur={() => blurStockDraftField("paymentReceived")}
-                    onChange={(value) => updateStockDraft((current) => ({ ...current, paymentReceived: value }))}
-                  />
-                </div>
-                <div className="w-48">
-                  <span className="mb-1 block text-[10px] font-semibold uppercase text-slate-500">Notes</span>
-                  <input
-                    value={draft.notes ?? ""}
-                    disabled={!canEdit || monthBootstrapPending}
-                    onFocus={() => focusStockDraftField("notes")}
-                    onBlur={() => blurStockDraftField("notes")}
-                    onChange={(event) => updateStockDraft((current) => ({ ...current, notes: event.target.value }))}
-                    placeholder="Optional note"
-                  />
-                </div>
-                <span className={`inline-flex whitespace-nowrap rounded-md border border-slate-800 bg-slate-950/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide ${
-                  !canEdit
-                    ? "text-slate-400"
-                    : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
-                    ? "text-amber-300"
-                    : stockEntryAutoSave.autoSaveStatus === "error"
-                    ? "text-rose-300"
-                    : stockDraftDirtyRef.current
-                    ? "text-amber-400"
-                    : "text-emerald-300"
-                }`}>
-                  {!stockDailyReady
-                    ? "Loading..."
-                    : !canEdit
-                    ? "Day closed"
-                    : stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current
-                    ? "Saving…"
-                    : stockEntryAutoSave.autoSaveStatus === "error"
-                    ? "Save failed"
-                    : stockDraftDirtyRef.current
-                    ? "Unsaved changes"
-                    : "Saved"}
-                </span>
-                <button
-                  type="button"
-                  className="btn-secondary !h-8 !px-3 text-xs flex items-center gap-1.5 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 shrink-0 font-medium"
-                  disabled={!stockDailyReady || !canEdit || activeAccounts.length < 2 || monthBootstrapPending}
-                  onClick={() => void handleOpenTransferModal("new")}
-                  title="Transfer financial balance between people without stock or cash movements"
-                  data-testid="btn-transfer-balance"
-                >
-                  <ArrowRightLeft className="h-3.5 w-3.5" />
-                  <span>Transfer Balance</span>
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary !h-8 !px-2.5 text-xs flex items-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0 font-medium"
-                  disabled={!stockDailyReady || monthBootstrapPending}
-                  onClick={() => void handleOpenTransferModal("history")}
-                  title="View balance transfer history and reversals"
-                  data-testid="btn-transfer-history"
-                >
-                  <History className="h-3.5 w-3.5 text-slate-400" />
-                  <span>History</span>
-                </button>
-                <CalendarDays className="text-emerald-500 h-5 w-5" />
-              </div>
-            </div>
-
-            {/* Warnings */}
-            {!stockDailyReady && <p className="status mt-4 bg-slate-500/10 text-slate-300 border border-slate-500/20 px-3 py-2 rounded-lg text-xs">Loading Stock Ledger data...</p>}
-            {stockDailyReady && !canEdit && <p className="warning mt-4 bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-2 rounded-lg text-xs">This stock day is read-only for your role or current day status.</p>}
-            {stockDailyReady && activeAccounts.length === 0 && <p className="warning mt-4 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-3 py-2 rounded-lg text-xs">Add active CCR/DO accounts in Stock Settings before using daily stock entry.</p>}
-
-            {selectedAccount && previewEntry && (
-              <>
-              <StockProductEntryTable
-                products={activeProducts}
-                quantities={draft.productQuantities}
-                quantityLabel="Quantity Issued"
-                totalQty={previewEntry.totalQty}
-                totalAmount={previewEntry.totalAmount}
-                disabled={!canEdit || monthBootstrapPending}
-                onQuantityFocus={(productId) => focusStockDraftField(`product:${productId}`)}
-                onQuantityBlur={(productId) => blurStockDraftField(`product:${productId}`)}
-                onQuantityChange={(productId, value) => updateStockDraft((current) => ({
-                  ...current,
-                  productQuantities: {
-                    ...current.productQuantities,
-                    [productId]: value
-                  }
-                }))}
-              />
-              {!isLiveDay(monthId, selectedDay, now) && (
-                <p className="warning mt-4 flex items-start gap-1.5">
-                  <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-                  <span>Warning: You are editing a past date. Saving changes here will not automatically update later days' carry-forward balances. Please verify subsequent days' balances if you change today's due balance.</span>
-                </p>
-              )}
-              </>
-            )}
-          </section>
-
-          {/* Whole Selected Month day-by-day overall summary */}
-          {/* <section className="panel mt-6">
-            <div className="panel-title">
-              <div>
-                <h2>{selectedAccount ? `${selectedAccount.name} Day-by-Day Summary` : `${monthLabel(monthId)} Day-by-Day Summary`}</h2>
-                <p>
-                  {selectedAccount
-                    ? "Selected person day-by-day rollup for the active stock out entry."
-                    : "Select a CCR/DO/DSO account to view the day-by-day rollup for that person."}
-                </p>
-              </div>
-              <BarChart3 className="text-blue-500" />
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Day / Date</th>
-                    <th>Total Qty</th>
-                    <th>Stock Amount</th>
-                    <th>Carry Forward</th>
-                    <th>Payment Received</th>
-                    <th>Outstanding Due</th>
-                    <th>Status</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedAccountDayRows.map((row) => {
-                    const fullDay = days.find((d) => d.dayNo === row.dayNo);
-                    const isReopened = fullDay?.status === "reopen" || Boolean(fullDay && isReopenActive(fullDay, now));
-                    const statusLabel = isReopened ? "Reopen" : row.status === "closed" ? "Closed" : "Open";
-                    return (
-                      <tr key={row.dayNo}>
-                        <td className="font-semibold text-slate-200">
-                          Day {row.dayNo} <span className="text-xs text-slate-500 font-normal">({row.date})</span>
-                        </td>
-                        <td>{formatMoney(row.totalQty)}</td>
-                        <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
-                        <td className="text-slate-400">{formatMoney(row.carryForwardBalance)}</td>
-                        <td className="text-emerald-400 font-semibold">{formatMoney(row.totalPaymentReceived)}</td>
-                        <td className="font-bold text-slate-100">{formatMoney(row.totalDueBalance)}</td>
-                        <td>
-                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getDayStatusChipClass(statusLabel)}`}>
-                            {statusLabel}
-                          </span>
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="btn-secondary !py-1 !px-2 text-xs flex items-center gap-1"
-                            onClick={() => {
-                              setSelectedDay(row.dayNo);
-                              window.scrollTo({ top: 0, behavior: "smooth" });
-                            }}
+                      {allDealersSheetRows.map((row) => {
+                        const isSelected = row.isSelected;
+                        return (
+                          <tr
+                            key={row.account.id}
+                            className={`transition-colors ${
+                              isSelected
+                                ? "bg-emerald-950/20 ring-1 ring-inset ring-emerald-500/40"
+                                : "hover:bg-slate-900/50"
+                            }`}
                           >
-                            <Pencil className="h-3 w-3" />
-                            Load Day
-                          </button>
+                            <td className={`w-32 max-w-[130px] truncate sticky left-0 z-10 border-r border-slate-800 transition-colors ${
+                              isSelected ? "bg-emerald-950/90" : "bg-slate-900/95"
+                            }`}>
+                              <button
+                                type="button"
+                                onClick={() => void switchDealer(row.account.id)}
+                                className={`text-left font-bold truncate block w-full transition-colors ${
+                                  isSelected ? "text-emerald-300 font-extrabold" : "text-white hover:text-emerald-400"
+                                }`}
+                                title={row.account.name}
+                              >
+                                {row.account.name}
+                              </button>
+                            </td>
+                            <td className="font-mono font-bold text-white whitespace-nowrap">
+                              {formatMoney(row.openingDue)}
+                            </td>
+
+                            {/* Product Quantities */}
+                            {activeProducts.map((product) => {
+                              const qty = row.productQuantities[product.id] ?? 0;
+                              const isColActive = activeColumnKey === `product:${product.id}`;
+                              return (
+                                <td
+                                  key={product.id}
+                                  className={`min-w-[76px] transition-colors ${
+                                    isColActive
+                                      ? isSelected
+                                        ? "bg-emerald-900/40 ring-1 ring-inset ring-emerald-500/60 stock-col-active-cell-selected"
+                                        : "bg-emerald-950/25 stock-col-active-cell"
+                                      : ""
+                                  }`}
+                                >
+                                  {isSelected ? (
+                                    <NumberInput
+                                      value={draft.productQuantities[product.id] ?? 0}
+                                      disabled={!canEdit || monthBootstrapPending}
+                                      className={`w-full min-w-[56px] max-w-[68px] !h-8 !py-1 !px-2 text-xs !font-normal text-center ${
+                                        isColActive ? "!border-emerald-500 !ring-1 !ring-emerald-500/60 bg-emerald-950/50 text-emerald-200" : ""
+                                      }`}
+                                      onFocus={() => {
+                                        focusStockDraftField(`product:${product.id}`);
+                                        setActiveColumnKey(`product:${product.id}`);
+                                      }}
+                                      onBlur={() => blurStockDraftField(`product:${product.id}`)}
+                                      onChange={(value) =>
+                                        updateStockDraft((current) => ({
+                                          ...current,
+                                          productQuantities: {
+                                            ...current.productQuantities,
+                                            [product.id]: value
+                                          }
+                                        }))
+                                      }
+                                    />
+                                  ) : (
+                                    <input
+                                      type="text"
+                                      readOnly
+                                      value={qty ? String(qty) : ""}
+                                      placeholder="0"
+                                      onClick={() => {
+                                        void switchDealer(row.account.id);
+                                        setActiveColumnKey(`product:${product.id}`);
+                                      }}
+                                      className={`cursor-pointer text-center font-mono !font-normal tabular-nums text-white w-full min-w-[56px] max-w-[68px] !h-8 !py-1 !px-2 text-xs transition-colors ${
+                                        isColActive
+                                          ? "bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 hover:border-emerald-400"
+                                          : "bg-slate-950/40 hover:border-slate-600"
+                                      }`}
+                                      title="Click to edit this dealer"
+                                    />
+                                  )}
+                                </td>
+                              );
+                            })}
+
+                            <td className="font-mono font-bold text-white whitespace-nowrap">
+                              {formatMoney(row.totalQty)}
+                            </td>
+                            <td className="font-mono font-bold text-white whitespace-nowrap">
+                              {formatMoney(row.totalAmount)}
+                            </td>
+
+                            {/* Payment Received */}
+                            {(() => {
+                              const isPaymentActive = activeColumnKey === "paymentReceived";
+                              return (
+                                <td
+                                  className={`min-w-[96px] transition-colors ${
+                                    isPaymentActive
+                                      ? isSelected
+                                        ? "bg-emerald-900/40 ring-1 ring-inset ring-emerald-500/60 stock-col-active-cell-selected"
+                                        : "bg-emerald-950/25 stock-col-active-cell"
+                                      : ""
+                                  }`}
+                                >
+                                  {isSelected ? (
+                                    <NumberInput
+                                      value={draft.paymentReceived ?? 0}
+                                      disabled={!canEdit || monthBootstrapPending}
+                                      className={`w-full min-w-[80px] max-w-[100px] !h-8 !py-1 !px-2 text-xs !font-normal text-left ${
+                                        isPaymentActive ? "!border-emerald-500 !ring-1 !ring-emerald-500/60 bg-emerald-950/50 text-emerald-200" : ""
+                                      }`}
+                                      onFocus={() => {
+                                        focusStockDraftField("paymentReceived");
+                                        setActiveColumnKey("paymentReceived");
+                                      }}
+                                      onBlur={() => blurStockDraftField("paymentReceived")}
+                                      onChange={(value) =>
+                                        updateStockDraft((current) => ({ ...current, paymentReceived: value }))
+                                      }
+                                    />
+                                  ) : (
+                                    <input
+                                      type="text"
+                                      readOnly
+                                      value={row.paymentReceived ? String(row.paymentReceived) : ""}
+                                      placeholder="0"
+                                      onClick={() => {
+                                        void switchDealer(row.account.id);
+                                        setActiveColumnKey("paymentReceived");
+                                      }}
+                                      className={`cursor-pointer text-left font-mono !font-normal tabular-nums text-white w-full max-w-[76px] !h-7 !py-0.5 !px-1.5 text-xs transition-colors ${
+                                        isPaymentActive
+                                          ? "bg-emerald-950/40 border border-emerald-500/40 text-emerald-200 hover:border-emerald-400"
+                                          : "bg-slate-950/40 hover:border-slate-600"
+                                      }`}
+                                      title="Click to edit this dealer"
+                                    />
+                                  )}
+                                </td>
+                              );
+                            })()}
+
+                            <td className="font-mono font-bold text-white whitespace-nowrap">
+                              {formatMoney(row.closingDue)}
+                            </td>
+
+                            <td className="w-8 text-center">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void switchDealer(row.account.id);
+                                  setEntryViewMode("focus");
+                                }}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:border-emerald-500 hover:bg-slate-700 hover:text-white transition-all shadow-sm"
+                                title={`Focus on ${row.account.name}`}
+                                aria-label={`Focus on ${row.account.name}`}
+                              >
+                                <Maximize2 className="h-3.5 w-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t border-slate-700 bg-slate-950/90 font-bold text-white sticky bottom-0 z-20">
+                        <td className="font-bold text-white uppercase tracking-wider text-xs sticky left-0 z-20 bg-slate-950 border-r border-slate-800">Total Franchise</td>
+                        <td className="font-mono font-bold text-white whitespace-nowrap">
+                          {formatMoney(sheetTotals.totalOpening)}
                         </td>
+                        {activeProducts.map((p) => {
+                          const isColActive = activeColumnKey === `product:${p.id}`;
+                          return (
+                            <td
+                              key={p.id}
+                              className={`font-mono font-bold whitespace-nowrap transition-colors ${
+                                isColActive
+                                  ? "bg-emerald-950/60 text-emerald-300 ring-1 ring-inset ring-emerald-500/40 stock-col-active-footer"
+                                  : "text-white"
+                              }`}
+                            >
+                              {formatMoney(sheetTotals.productQtyTotals[p.id] ?? 0)}
+                            </td>
+                          );
+                        })}
+                        <td className="font-mono font-bold text-white whitespace-nowrap">
+                          {formatMoney(sheetTotals.grandTotalQty)}
+                        </td>
+                        <td className="font-mono font-bold text-white whitespace-nowrap">
+                          {formatMoney(sheetTotals.grandTotalAmount)}
+                        </td>
+                        <td
+                          className={`font-mono font-bold text-white whitespace-nowrap transition-colors ${
+                            activeColumnKey === "paymentReceived"
+                              ? "bg-emerald-950/60 text-emerald-300 ring-1 ring-inset ring-emerald-500/40 stock-col-active-footer"
+                              : ""
+                          }`}
+                        >
+                          {formatMoney(sheetTotals.grandTotalPayment)}
+                        </td>
+                        <td className="font-mono font-bold text-white whitespace-nowrap">
+                          {formatMoney(sheetTotals.grandTotalClosingDue)}
+                        </td>
+                        <td className="w-8 text-center text-slate-600">—</td>
                       </tr>
-                    );
-                  })}
-                  {selectedAccountDayRows.length > 0 && (
-                    <tr className="border-t border-slate-700/80 bg-slate-950/50 font-semibold">
-                      <td className="text-slate-100">Total</td>
-                      <td className="text-slate-100">{formatMoney(selectedAccountDayTotals.totalQty)}</td>
-                      <td className="font-mono text-slate-100">{formatMoney(selectedAccountDayTotals.totalAmount)}</td>
-                      <td className="text-slate-500">—</td>
-                      <td className="text-emerald-400">{formatMoney(selectedAccountDayTotals.totalPaymentReceived)}</td>
-                      <td className="font-bold text-slate-100">{formatMoney(selectedAccountDayTotals.totalDueBalance)}</td>
-                      <td className="text-slate-400" colSpan={2}>—</td>
-                    </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+
+              {/* MODE 2: SINGLE DEALER FOCUS (CARDS + DETAILED FORM) */}
+              {entryViewMode === "focus" && selectedAccount && previewEntry && (
+                <div className="space-y-5 mt-4">
+                  {/* Search & Dealer Selector Ribbon */}
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="relative min-w-[200px] flex-1 max-w-xs">
+                        <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                        <input
+                          type="text"
+                          value={dealerSearchQuery}
+                          onChange={(e) => setDealerSearchQuery(e.target.value)}
+                          placeholder="Search dealer by name or type..."
+                          className="!pl-8 !py-1 text-xs"
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={!prevDealer}
+                          onClick={() => prevDealer && void switchDealer(prevDealer.id)}
+                          className="btn-secondary !h-7 text-xs font-semibold px-2.5 disabled:opacity-30"
+                          title="Previous dealer"
+                        >
+                          <ChevronLeft className="h-3.5 w-3.5 mr-0.5" />
+                          Prev
+                        </button>
+                        <span className="text-xs font-mono font-bold text-slate-400">
+                          {currentDealerIndex >= 0 ? `${currentDealerIndex + 1} / ${activeAccounts.length}` : ""}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={!nextDealer}
+                          onClick={() => nextDealer && void switchDealer(nextDealer.id)}
+                          className="btn-secondary !h-7 text-xs font-semibold px-2.5 disabled:opacity-30"
+                          title="Next dealer"
+                        >
+                          Next
+                          <ChevronRight className="h-3.5 w-3.5 ml-0.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Dealer Cards Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                      {filteredAccounts.map((account) => {
+                        const isSelected = account.id === selectedAccountId;
+                        const row = allDealersSheetRows.find((r) => r.account.id === account.id);
+                        return (
+                          <button
+                            key={account.id}
+                            type="button"
+                            onClick={() => void switchDealer(account.id)}
+                            className={`flex flex-col text-left p-2.5 rounded-xl border transition-all ${
+                              isSelected
+                                ? "border-emerald-500 bg-emerald-950/50 ring-1 ring-emerald-500 shadow-md"
+                                : "border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-1">
+                              <span className="font-bold text-white text-xs truncate">{account.name}</span>
+                              <span className="text-[10px] font-semibold text-slate-400 uppercase shrink-0">{account.type}</span>
+                            </div>
+                            <div className="mt-1 flex items-center justify-between text-[11px]">
+                              {row?.hasMovement ? (
+                                <span className="text-emerald-400 font-bold font-mono">✓ Rs {formatMoney(row.totalAmount)}</span>
+                              ) : (
+                                <span className="text-slate-500 font-medium">• No entry</span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-[10px] font-mono text-slate-400 truncate">
+                              Due: {formatMoney(row?.closingDue ?? 0)}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Focused Dealer Header & Notes */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+                    <div>
+                      <h3 className="text-base font-bold text-white">
+                        {selectedAccount.name}
+                        <span className="ml-2 text-xs font-semibold uppercase text-slate-400">({selectedAccount.type})</span>
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Opening Due: <span className="font-mono font-bold text-white">{formatMoney(effectiveCarryForwardBalance)}</span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="w-52">
+                        <span className="mb-1 block text-[10px] font-semibold uppercase text-slate-500">Notes</span>
+                        <input
+                          value={draft.notes ?? ""}
+                          disabled={!canEdit || monthBootstrapPending}
+                          onFocus={() => focusStockDraftField("notes")}
+                          onBlur={() => blurStockDraftField("notes")}
+                          onChange={(event) => updateStockDraft((current) => ({ ...current, notes: event.target.value }))}
+                          placeholder="Optional note"
+                          className="!py-1 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <StockProductEntryTable
+                    products={activeProducts}
+                    quantities={draft.productQuantities}
+                    quantityLabel="Quantity Issued"
+                    totalQty={previewEntry.totalQty}
+                    totalAmount={previewEntry.totalAmount}
+                    disabled={!canEdit || monthBootstrapPending}
+                    onQuantityFocus={(productId) => {
+                      focusStockDraftField(`product:${productId}`);
+                      setActiveColumnKey(`product:${productId}`);
+                    }}
+                    onQuantityBlur={(productId) => blurStockDraftField(`product:${productId}`)}
+                    onQuantityChange={(productId, value) => updateStockDraft((current) => ({
+                      ...current,
+                      productQuantities: {
+                        ...current.productQuantities,
+                        [productId]: value
+                      }
+                    }))}
+                  />
+
+                  {!isLiveDay(monthId, selectedDay, now) && (
+                    <Alert
+                      variant="warning"
+                      title="Past Date Warning"
+                      message="Warning: You are editing a past date. Saving changes here will not automatically update later days' carry-forward balances. Please verify subsequent days' balances if you change today's due balance."
+                    />
                   )}
-                  {metrics.dayRows.length === 0 && (
-                    <tr>
-                      <td colSpan={8} className="text-center text-slate-500 py-4 italic">
-                        No day summaries recorded in this month yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section> */}
+                </div>
+              )}
+            </section>
+
 
           <section className="panel mt-6">
             <div className="panel-title">
@@ -3170,45 +3404,99 @@ export function StockLedgerModule({
                 </div>
                 <div className="table-wrap mt-3">
                   <table className="!text-xs">
-                    <thead>
+                    <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                       <tr>
-                        <th>Date</th>
-                        <th>Opening Balance</th>
-                        {activeProducts.map((p) => (
-                          <th key={p.id} className="text-center font-mono">{p.name}</th>
-                        ))}
-                        <th>Total Allotted Qty</th>
-                        <th>Total Stock Amount</th>
-                        <th>Payment Received</th>
-                        <th>Closing Balance</th>
+                        <th className="sticky top-0 left-0 z-30 bg-slate-900 border-r border-slate-800">Date</th>
+                        <th className="sticky top-0 z-20 bg-slate-900">Opening Balance</th>
+                        {activeProducts.map((p) => {
+                          const isColActive = activeColumnKey === `product:${p.id}`;
+                          return (
+                            <th
+                              key={p.id}
+                              className={`text-left font-mono sticky top-0 z-20 cursor-pointer transition-colors ${
+                                isColActive
+                                  ? "bg-emerald-950/90 text-emerald-300 ring-1 ring-inset ring-emerald-500/50 stock-col-active-th"
+                                  : "bg-slate-900/95 text-slate-300 hover:text-white"
+                              }`}
+                              onClick={() => setActiveColumnKey(`product:${p.id}`)}
+                              title={`Click to highlight ${p.name}`}
+                            >
+                              {p.name}
+                            </th>
+                          );
+                        })}
+                        <th className="sticky top-0 z-20 bg-slate-900">Total Allotted Qty</th>
+                        <th className="sticky top-0 z-20 bg-slate-900">Total Stock Amount</th>
+                        <th
+                          className={`sticky top-0 z-20 cursor-pointer transition-colors ${
+                            activeColumnKey === "paymentReceived"
+                              ? "bg-emerald-950/90 text-emerald-300 ring-1 ring-inset ring-emerald-500/50 stock-col-active-th"
+                              : "bg-slate-900/95"
+                          }`}
+                          onClick={() => setActiveColumnKey("paymentReceived")}
+                          title="Click to highlight Payment Received"
+                        >
+                          Payment Received
+                        </th>
+                        <th className="sticky top-0 z-20 bg-slate-900">Closing Balance</th>
                       </tr>
                     </thead>
                     <tbody>
                       {visibleSelectedDealerMasterDayRows.map((row) => (
                         <tr key={row.dayNo}>
-                          <td className="font-semibold text-slate-200">{new Date(`${monthId}-${String(row.dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
-                          <td className="font-mono text-slate-100">{formatMoney(row.opening)}</td>
-                          {activeProducts.map((p) => (
-                            <td key={p.id} className="text-center font-mono font-semibold text-indigo-400">
-                              {formatMoney(row.productTotals[p.id] ?? 0)}
-                            </td>
-                          ))}
-                          <td className="font-semibold text-slate-300">{formatMoney(row.totalQty)}</td>
-                          <td className="font-mono text-slate-300">{formatMoney(row.totalAmount)}</td>
-                          <td className="text-emerald-400 font-semibold font-mono">{formatMoney(row.totalPaymentReceived)}</td>
-                          <td className="text-rose-400 font-bold font-mono">{formatMoney(row.closing)}</td>
+                          <td className="font-bold text-white sticky left-0 z-10 bg-slate-900/95 border-r border-slate-800 whitespace-nowrap">{new Date(`${monthId}-${String(row.dayNo).padStart(2, "0")}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</td>
+                          <td className="font-mono font-bold text-white">{formatMoney(row.opening)}</td>
+                          {activeProducts.map((p) => {
+                            const isColActive = activeColumnKey === `product:${p.id}`;
+                            return (
+                              <td
+                                key={p.id}
+                                className={`text-left font-mono font-bold transition-colors ${
+                                  isColActive ? "bg-emerald-950/25 text-emerald-200 stock-col-active-cell" : "text-white"
+                                }`}
+                              >
+                                {formatMoney(row.productTotals[p.id] ?? 0)}
+                              </td>
+                            );
+                          })}
+                          <td className="font-bold text-white">{formatMoney(row.totalQty)}</td>
+                          <td className="font-mono font-bold text-white">{formatMoney(row.totalAmount)}</td>
+                          <td
+                            className={`font-bold font-mono transition-colors ${
+                              activeColumnKey === "paymentReceived" ? "bg-emerald-950/25 text-emerald-200 stock-col-active-cell" : "text-white"
+                            }`}
+                          >
+                            {formatMoney(row.totalPaymentReceived)}
+                          </td>
+                          <td className="font-bold font-mono text-white">{formatMoney(row.closing)}</td>
                         </tr>
                       ))}
-                      <tr className="border-t border-slate-800 bg-slate-950/40 font-semibold">
-                        <td className="text-slate-100">Total</td>
-                        <td className="text-slate-500">—</td>
-                        {activeProducts.map((p) => (
-                          <td key={p.id} className="text-center font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.productTotals[p.id] ?? 0)}</td>
-                        ))}
-                        <td className="text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalQty)}</td>
-                        <td className="font-mono text-slate-100">{formatMoney(selectedDealerMasterDayTotals.totalAmount)}</td>
-                        <td className="text-emerald-400 font-semibold font-mono">{formatMoney(selectedDealerMasterDayTotals.totalPaymentReceived)}</td>
-                        <td className="text-rose-400 font-bold font-mono">{formatMoney(selectedDealerMasterDayTotals.closing)}</td>
+                      <tr className="border-t border-slate-800 bg-slate-950/90 font-bold sticky bottom-0 z-20">
+                        <td className="font-bold text-white sticky left-0 z-20 bg-slate-950 border-r border-slate-800">Total</td>
+                        <td className="text-slate-500 font-bold">—</td>
+                        {activeProducts.map((p) => {
+                          const isColActive = activeColumnKey === `product:${p.id}`;
+                          return (
+                            <td
+                              key={p.id}
+                              className={`text-left font-mono font-bold transition-colors ${
+                                isColActive ? "bg-emerald-950/60 text-emerald-300 ring-1 ring-inset ring-emerald-500/40 stock-col-active-footer" : "text-white"
+                              }`}
+                            >
+                              {formatMoney(selectedDealerMasterDayTotals.productTotals[p.id] ?? 0)}
+                            </td>
+                          );
+                        })}
+                        <td className="font-bold text-white">{formatMoney(selectedDealerMasterDayTotals.totalQty)}</td>
+                        <td className="font-mono font-bold text-white">{formatMoney(selectedDealerMasterDayTotals.totalAmount)}</td>
+                        <td
+                          className={`font-bold font-mono transition-colors ${
+                            activeColumnKey === "paymentReceived" ? "bg-emerald-950/60 text-emerald-300 ring-1 ring-inset ring-emerald-500/40 stock-col-active-footer" : "text-white"
+                          }`}
+                        >
+                          {formatMoney(selectedDealerMasterDayTotals.totalPaymentReceived)}
+                        </td>
+                        <td className="font-bold font-mono text-white">{formatMoney(selectedDealerMasterDayTotals.closing)}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -3241,10 +3529,179 @@ export function StockLedgerModule({
               filterActiveStatus="all"
             />
           </section>
-        </>
-      )}
+        </div>
 
-      {activeSectionVisible && section === "dashboard" && (() => {
+        {/* Right-Side Vertical Panel: Day info & Operations at the top, followed by financial summary cards */}
+        <aside className="space-y-3 xl:sticky xl:top-14 xl:self-start order-first xl:order-none">
+          {/* Day and operations section — at the top */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/30 backdrop-blur-sm space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-white leading-tight">
+                  {dayDate(monthId, selectedDay)}
+                </h3>
+                <span className="sr-only">{monthId}-{String(selectedDay).padStart(2, "0")}</span>
+              </div>
+              <StatusBadge
+                status={
+                  selectedDayStatus === "Closed"
+                    ? "closed"
+                    : selectedDayStatus === "Reopen"
+                    ? "reopened"
+                    : "open"
+                }
+              />
+            </div>
+
+            {/* {selectedDayRecord && isReopenActive(selectedDayRecord, now) && (
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300 animate-pulse">
+                Reopened until manual close
+              </div>
+            )}
+            {selectedDayHasLegacyTimedReopen && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-300">
+                Owner must reopen again before editing
+              </div>
+            )} */}
+
+            {/* Save status */}
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-xs">
+              <span className="text-slate-400">Save Status:</span>
+              <span className={`font-semibold uppercase ${
+                !canEdit
+                  ? "text-slate-400"
+                  : (stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current)
+                  ? "text-amber-300"
+                  : stockEntryAutoSave.autoSaveStatus === "error"
+                  ? "text-rose-300"
+                  : stockDraftDirtyRef.current
+                  ? "text-amber-400"
+                  : "text-emerald-300"
+              }`}>
+                {!stockDailyReady
+                  ? "Loading…"
+                  : !canEdit
+                  ? "Day closed"
+                  : (stockEntryAutoSave.autoSaveStatus === "saving" || saveInFlightRef.current)
+                  ? "Saving…"
+                  : stockEntryAutoSave.autoSaveStatus === "error"
+                  ? "Save failed"
+                  : stockDraftDirtyRef.current
+                  ? "Unsaved changes"
+                  : "Saved"}
+              </span>
+            </div>
+
+            {/* Primary Save Now & Verify button */}
+            <div className="pt-1">
+              <button
+                type="button"
+                className="btn-primary !h-11 w-full !justify-center text-sm font-bold tracking-wide shadow-md shadow-emerald-950/50"
+                disabled={!canEdit || Boolean(loading) || monthBootstrapPending || verifiedSave?.status === "saving"}
+                title={!canEdit
+                  ? selectedDayHasLegacyTimedReopen
+                    ? "This day has legacy timed reopen data. Owner must reopen it again before saving."
+                    : selectedDayIsCanonicalClosed || selectedDayIsLegacyLocked
+                      ? "Reopen the day before saving."
+                      : "You do not have permission to save this stock day."
+                  : "Save immediately and wait for confirmation"}
+                onClick={() => void handleVerifiedSave()}
+              >
+                <Save className="h-4 w-4 mr-2" />
+                Save Now & Verify
+              </button>
+            </div>
+
+            {/* Operational buttons: Transfer Balance, History */}
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 shrink-0 font-medium"
+                disabled={!stockDailyReady || !canEdit || activeAccounts.length < 2 || monthBootstrapPending}
+                onClick={() => void handleOpenTransferModal("new")}
+                title="Transfer financial balance between people without stock or cash movements"
+                data-testid="btn-transfer-balance"
+              >
+                <ArrowRightLeft className="h-3.5 w-3.5" />
+                <span>Transfer Balance</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0 font-medium"
+                disabled={!stockDailyReady || monthBootstrapPending}
+                onClick={() => void handleOpenTransferModal("history")}
+                title="View balance transfer history and reversals"
+                data-testid="btn-transfer-history"
+              >
+                <History className="h-3.5 w-3.5 text-slate-400" />
+                <span>History</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Financial Summary Cards */}
+          <div className="grid grid-cols-1 gap-3">
+            {/* 1. Opening Balance */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+              <p className="text-sm font-black uppercase tracking-wider text-white">Opening Balance</p>
+              <p className="text-xl font-bold font-mono tabular-nums text-white">
+                {formatMoney(effectiveCarryForwardBalance)}
+              </p>
+            </div>
+
+            {/* 2. Payment Received (with input) */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5 shadow-xl shadow-black/20">
+              <label className="text-sm font-black uppercase tracking-wider text-white shrink-0">
+                Payment Received
+              </label>
+              <div className="w-36">
+                <NumberInput
+                  value={draft.paymentReceived ?? 0}
+                  disabled={!canEdit || monthBootstrapPending}
+                  onFocus={() => focusStockDraftField("paymentReceived")}
+                  onBlur={() => blurStockDraftField("paymentReceived")}
+                  onChange={(value) => updateStockDraft((current) => ({ ...current, paymentReceived: value }))}
+                />
+              </div>
+            </div>
+
+            {/* 3. Total Receivable */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+              <p className="text-sm font-black uppercase tracking-wider text-white">Total Receivable</p>
+              <p className="text-xl font-bold font-mono tabular-nums text-white">
+                {formatMoney(effectiveCarryForwardBalance + (previewEntry?.totalAmount ?? 0))}
+              </p>
+            </div>
+
+            {/* 4. Stock Amount */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+              <p className="text-sm font-black uppercase tracking-wider text-white">Stock Amount</p>
+              <p className="text-xl font-bold font-mono tabular-nums text-white">
+                {formatMoney(previewEntry?.totalAmount ?? 0)}
+              </p>
+            </div>
+
+            {/* 5. Closing Due Balance */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+              <p className="text-sm font-black uppercase tracking-wider text-white">Closing Due Balance</p>
+              <p className="text-xl font-bold font-mono tabular-nums text-white">
+                {formatMoney(previewEntry?.dueBalance ?? 0)}
+              </p>
+            </div>
+
+            {/* 6. Issued Quantity */}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+              <p className="text-sm font-black uppercase tracking-wider text-white">Issued Quantity</p>
+              <p className="text-xl font-bold font-mono tabular-nums text-white">
+                {formatMoney(previewEntry?.totalQty ?? 0)}
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    )}
+
+      {section === "dashboard" && (() => {
         // Calculations for Premium KPI Cards
         const totalStockInVal = allStockInRecords.reduce((sum, r) => sum + r.totalAmount, 0);
         const totalPayments = metrics.totalPaymentReceived;
@@ -3522,7 +3979,7 @@ export function StockLedgerModule({
               </div>
               <div className="table-wrap mt-3">
                 <table>
-                  <thead>
+                  <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                     <tr>
                       <th>Date</th>
                       <th>Payment Mode</th>
@@ -3622,7 +4079,7 @@ export function StockLedgerModule({
               </div>
               <div className="table-wrap mt-3">
                 <table className="!text-xs">
-                  <thead>
+                  <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                     <tr>
                       <th>Dealer / Account Name</th>
                       <th>Account Type</th>
@@ -3740,18 +4197,8 @@ export function StockLedgerModule({
         );
       })()}
 
-      {activeSectionVisible && section === "stockIn" && (
-        <>
-          {/* <section className="panel">
-            <div className="panel-title">
-              <div>
-                <h2>Stock In from Jazz Company</h2>
-                <p>{monthLabel(monthId)} · {dayDate(monthId, selectedDay)} · {month?.status ?? "open"}</p>
-              </div>
-              <CalendarDays />
-            </div>
-          </section> */}
-
+      {section === "stockIn" && (
+        <div className="space-y-5">
           <section className="panel">
             <div className="panel-title">
               <div>
@@ -3859,7 +4306,7 @@ export function StockLedgerModule({
             </div>
             <div className="table-wrap">
               <table>
-                <thead>
+                <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                   <tr>
                     <th>Mode</th>
                     <th>Products Received</th>
@@ -4017,18 +4464,88 @@ export function StockLedgerModule({
               productRateById={productRateById}
             />
           </section>
-        </>
+        </div>
       )}
 
-      {activeSectionVisible && section === "reportsHub" && (
-        <section className="panel">
-          <div className="panel-title border-b border-slate-800 pb-3">
-            <div>
-              <h2>Stock Monthly Reports Center</h2>
-              <p>Comprehensive interactive reporting and analytics engine derived entirely from Stock Ledger ledger entries.</p>
-            </div>
-            <FileSpreadsheet className="text-emerald-500 h-6 w-6" />
+      {section === "reportsHub" && (
+        <div className="space-y-5">
+          {/* Executive KPI Metric Cards */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <MetricCard label="Stock Amount" value={formatMoney(currentInventoryAmount)} helper="Current inventory value from stock balance and product rates." />
+            <MetricCard label="Payment Received" value={formatMoney(metrics.totalPaymentReceived)} helper={syncLabel} />
+            <MetricCard label="Due Balance" value={formatMoney(metrics.totalDueBalance)} helper={syncState === "offline" ? "Offline changes are queued." : "Firestore stock summary."} />
+            <MetricCard label="Quantity" value={formatMoney(currentInventoryQty)} helper="Current stock balance quantity." />
           </div>
+
+          {/* Action Bar with Excel, Print, and Standalone Stock JSON Backup */}
+          <div className="flex flex-col gap-3 rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <FileSpreadsheet className="h-4 w-4 text-emerald-400" />
+                <span>Stock Reports, Exports & Backup</span>
+              </h3>
+              <p className="mt-0.5 text-xs text-slate-400">
+                Interactive reporting, printable ledgers, Excel exports, and standalone Stock JSON backups.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="btn-secondary !h-8 !px-3 text-xs flex items-center gap-1.5 border-slate-700 hover:border-emerald-500/50"
+                disabled={reportsRefreshing}
+                onClick={() => void refreshStockReports()}
+                title="Refresh month reports and calculation summaries from PostgreSQL without reloading the page"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${reportsRefreshing ? "animate-spin text-emerald-400" : "text-emerald-400"}`} />
+                <span>{reportsRefreshing ? "Refreshing..." : "Refresh Reports"}</span>
+              </button>
+              <button
+                type="button"
+                className="btn-primary !h-8 !px-3 text-xs flex items-center gap-1.5"
+                disabled={!summary}
+                onClick={() => summary && exportStockMonthlyXlsx(summary, days)}
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Export Stock Excel</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary !h-8 !px-3 text-xs flex items-center gap-1.5"
+                disabled={!summary}
+                onClick={() => summary && exportStockPrintable(summary, days)}
+              >
+                <Printer className="h-3.5 w-3.5" />
+                <span>Print</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary !h-8 !px-3 text-xs flex items-center gap-1.5 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10"
+                disabled={!canUseStockBackup}
+                title={!canUseStockBackup ? "Only owner can export Stock JSON backup." : "Export complete Stock Ledger JSON backup"}
+                onClick={() => onQueueWrite(listStockBackup().then((backup) => {
+                  const blob = new Blob([JSON.stringify({ exportedAt: Date.now(), stock: backup }, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement("a");
+                  link.href = url;
+                  link.download = `stock-backup-${monthId}.json`;
+                  link.click();
+                  URL.revokeObjectURL(url);
+                }), "Could not export stock backup.")}
+              >
+                <FileDown className="h-3.5 w-3.5" />
+                <span>Stock JSON Backup</span>
+              </button>
+            </div>
+          </div>
+
+          <section className="panel">
+            <div className="panel-title border-b border-slate-800 pb-3">
+              <div>
+                <h2>Stock Monthly Reports Center</h2>
+                <p>Comprehensive interactive reporting and analytics engine derived entirely from Stock Ledger ledger entries.</p>
+              </div>
+              <FileSpreadsheet className="text-emerald-500 h-6 w-6" />
+            </div>
 
           {/* DELUXE FILTERS BAR */}
           <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
@@ -4387,7 +4904,7 @@ export function StockLedgerModule({
                                 <td className="uppercase font-bold text-slate-400">{row.type}</td>
                                 <td>{formatMoney(row.totalQty)}</td>
                                 <td className="font-mono">{formatMoney(row.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(row.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(row.totalPayments)}</td>
                                 <td>{formatMoney(row.carry)}</td>
                                 <td className="font-bold text-slate-100">{formatMoney(row.currentDue)}</td>
                                 <td className="text-xs text-slate-400">{row.latestDate}</td>
@@ -4399,7 +4916,7 @@ export function StockLedgerModule({
                                 <td className="text-slate-500">—</td>
                                 <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
                                 <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.totalPayments)}</td>
                                 <td className="text-slate-100">{formatMoney(totals.carry)}</td>
                                 <td className="font-bold text-slate-100">{formatMoney(totals.currentDue)}</td>
                                 <td className="text-slate-500">—</td>
@@ -4458,8 +4975,8 @@ export function StockLedgerModule({
                                 </td>
                                 <td>{formatMoney(r.totalQty)}</td>
                                 <td className="font-mono">{formatMoney(r.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(r.paidAmount)}</td>
-                                <td className="text-rose-400 font-semibold">{formatMoney(r.jazzPayableAmount)}</td>
+                                <td className="font-bold text-white">{formatMoney(r.paidAmount)}</td>
+                                <td className="font-bold text-white">{formatMoney(r.jazzPayableAmount)}</td>
                                 <td className="text-xs text-slate-400 italic">{r.notes || "—"}</td>
                               </tr>
                             ))}
@@ -4470,8 +4987,8 @@ export function StockLedgerModule({
                                 <td className="text-slate-500">—</td>
                                 <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
                                 <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.paidAmount)}</td>
-                                <td className="text-rose-400 font-semibold">{formatMoney(totals.jazzPayableAmount)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.paidAmount)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.jazzPayableAmount)}</td>
                                 <td className="text-slate-500">—</td>
                               </tr>
                             )}
@@ -4525,7 +5042,7 @@ export function StockLedgerModule({
                                 </td>
                                 <td>{formatMoney(e.totalQty)}</td>
                                 <td className="font-mono text-slate-300">{formatMoney(e.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(e.totalPaymentReceived)}</td>
+                                <td className="font-bold text-white">{formatMoney(e.totalPaymentReceived)}</td>
                                 <td className="font-bold text-slate-100">{formatMoney(e.dueBalance)}</td>
                               </tr>
                             ))}
@@ -4537,7 +5054,7 @@ export function StockLedgerModule({
                                 <td className="text-slate-500">—</td>
                                 <td className="text-slate-100">{formatMoney(totals.totalQty)}</td>
                                 <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">{formatMoney(totals.totalPaymentReceived)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.totalPaymentReceived)}</td>
                                 <td className="font-bold text-slate-100">{formatMoney(totals.dueBalance)}</td>
                               </tr>
                             )}
@@ -4597,8 +5114,8 @@ export function StockLedgerModule({
                                 <td className="font-semibold text-slate-200">{a.name}</td>
                                 <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
                                 <td className="font-mono text-slate-300">{formatMoney(a.totalAmount)}</td>
-                                <td className="text-emerald-400 font-extrabold">{formatMoney(a.totalPayments)}</td>
-                                <td className="font-bold text-rose-400">{formatMoney(a.currentDue)}</td>
+                                <td className="font-bold text-white">{formatMoney(a.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(a.currentDue)}</td>
                               </tr>
                             ))}
                             {rows.length > 0 && (
@@ -4606,8 +5123,8 @@ export function StockLedgerModule({
                                 <td className="text-slate-100">Total</td>
                                 <td className="text-slate-500">—</td>
                                 <td className="font-mono text-slate-100">{formatMoney(totals.totalAmount)}</td>
-                                <td className="text-emerald-400 font-extrabold">{formatMoney(totals.totalPayments)}</td>
-                                <td className="font-bold text-rose-400">{formatMoney(totals.currentDue)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.currentDue)}</td>
                               </tr>
                             )}
                           </>
@@ -4684,9 +5201,9 @@ export function StockLedgerModule({
                                 <td className="font-semibold text-slate-200">{a.name}</td>
                                 <td className="uppercase font-bold text-slate-400 text-xs">{a.type}</td>
                                 <td>{formatMoney(a.prevDue)}</td>
-                                <td className="text-amber-500 font-semibold">+{formatMoney(a.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">-{formatMoney(a.totalPayments)}</td>
-                                <td className="font-bold text-rose-400">{formatMoney(a.currentDue)}</td>
+                                <td className="font-bold text-white">+{formatMoney(a.totalAmount)}</td>
+                                <td className="font-bold text-white">-{formatMoney(a.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(a.currentDue)}</td>
                               </tr>
                             ))}
                             {rows.length > 0 && (
@@ -4694,9 +5211,9 @@ export function StockLedgerModule({
                                 <td className="text-slate-100">Total</td>
                                 <td className="text-slate-500">—</td>
                                 <td className="text-slate-100">{formatMoney(totals.prevDue)}</td>
-                                <td className="text-amber-500 font-semibold">+{formatMoney(totals.totalAmount)}</td>
-                                <td className="text-emerald-400 font-semibold">-{formatMoney(totals.totalPayments)}</td>
-                                <td className="font-bold text-rose-400">{formatMoney(totals.currentDue)}</td>
+                                <td className="font-bold text-white">+{formatMoney(totals.totalAmount)}</td>
+                                <td className="font-bold text-white">-{formatMoney(totals.totalPayments)}</td>
+                                <td className="font-bold text-white">{formatMoney(totals.currentDue)}</td>
                               </tr>
                             )}
                           </>
@@ -4745,10 +5262,10 @@ export function StockLedgerModule({
                                   <td className="font-semibold text-slate-200">{row.productName}</td>
                                   <td className="font-mono">{formatMoney(rate)}</td>
                                   <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(row.openingStock ?? 0)}</td>
-                                  <td className="text-emerald-400">{isSkipped ? "—" : `+${formatMoney(row.totalStockIn)}`}</td>
-                                  <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(row.totalStockOut)}`}</td>
+                                  <td className="font-bold text-white">{isSkipped ? "—" : `+${formatMoney(row.totalStockIn)}`}</td>
+                                  <td className="font-bold text-white">{isSkipped ? "—" : `-${formatMoney(row.totalStockOut)}`}</td>
                                   <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(row.currentStock ?? 0)}</td>
-                                  <td className="font-mono font-semibold text-emerald-400">{isSkipped ? "—" : formatMoney(balanceValue)}</td>
+                                  <td className="font-mono font-bold text-white">{isSkipped ? "—" : formatMoney(balanceValue)}</td>
                                   <td>
                                     <span className={`px-2 py-0.5 rounded text-xs font-semibold uppercase ${
                                       isSkipped
@@ -4770,10 +5287,10 @@ export function StockLedgerModule({
                                 <td className="text-slate-100">Total</td>
                                 <td className="text-slate-500">—</td>
                                 <td>{formatMoney(totals.openingStock)}</td>
-                                <td className="text-emerald-400">+{formatMoney(totals.totalStockIn)}</td>
-                                <td className="text-rose-400">-{formatMoney(totals.totalStockOut)}</td>
+                                <td className="font-bold text-white">+{formatMoney(totals.totalStockIn)}</td>
+                                <td className="font-bold text-white">-{formatMoney(totals.totalStockOut)}</td>
                                 <td className="font-bold text-slate-100">{formatMoney(totals.currentStock)}</td>
-                                <td className="font-mono font-semibold text-emerald-400">{formatMoney(totals.balanceValue)}</td>
+                                <td className="font-mono font-bold text-white">{formatMoney(totals.balanceValue)}</td>
                                 <td className="text-slate-500">—</td>
                               </tr>
                             )}
@@ -4842,11 +5359,12 @@ export function StockLedgerModule({
             </div>
           </div>
         </section>
+        </div>
       )}
 
-      {activeSectionVisible && section === "settings" && (
+      {section === "settings" && (
         canManageSettings ? (
-          <>
+          <div className="space-y-5">
             <SettingsTable
               title="Products"
               kind="product"
@@ -4865,16 +5383,20 @@ export function StockLedgerModule({
               onDelete={handleDeleteStockAccount}
               onReorder={handleReorderStockAccounts}
             />
-          </>
+          </div>
         ) : (
           <section className="panel">
             <h2>Stock Settings</h2>
-            <p className="warning mt-4">Owner only.</p>
+            <Alert
+              variant="warning"
+              title="Access Restricted"
+              message="Stock Settings are restricted to owner and admin roles."
+            />
           </section>
         )
       )}
 
-      {activeSectionVisible && section === "backup" && (
+      {section === "backup" && (
         canUseStockBackup ? (
           <section className="panel">
             <div className="panel-title"><div><h2>Stock Backup / Export</h2><p>Exports only Stock Ledger settings and stock records.</p></div><FileDown /></div>
@@ -4895,7 +5417,11 @@ export function StockLedgerModule({
         ) : (
           <section className="panel">
             <h2>Stock Backup / Export</h2>
-            <p className="warning mt-4">Owner only.</p>
+            <Alert
+              variant="warning"
+              title="Access Restricted"
+              message="Stock Backup is restricted to owner role."
+            />
           </section>
         )
       )}
@@ -4921,7 +5447,7 @@ function SummaryTable({ title, headers, rows }: { title: string; headers: string
       <div className="table-wrap">
         <table>
           <thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
-          <tbody>{rows.length > 0 ? rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>) : <tr><td colSpan={headers.length}>No stock data yet.</td></tr>}</tbody>
+          <tbody>{rows.length > 0 ? rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex} className="font-bold text-white">{cell}</td>)}</tr>) : <tr><td colSpan={headers.length} className="font-bold text-white">No stock data yet.</td></tr>}</tbody>
         </table>
       </div>
     </section>

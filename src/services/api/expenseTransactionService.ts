@@ -362,14 +362,20 @@ export async function saveExpenseDayPostgres(
         });
       }
     } else {
-      await ledgerApiClient.expenses.create({
+      const idempotencyKey = exp.idempotencyKey || (exp.id ? `exp-${exp.id}` : crypto.randomUUID());
+      exp.idempotencyKey = idempotencyKey;
+      const createRes = await ledgerApiClient.expenses.create({
         day_id: dayId,
         category_id: categoryId,
         category_name_snapshot: categoryNameSnapshot,
         item_name: itemName,
         description,
         amount
-      });
+      }, idempotencyKey);
+      if (createRes?.data?.id) {
+        retainedExistingIds.add(createRes.data.id);
+        exp.id = createRes.data.id;
+      }
     }
   }
 

@@ -93,22 +93,6 @@ export function UniversalDayControlBar({
           Reopen Selected Day
         </ActionButton>
         <ActionButton
-          disabled={busy || !permissions.canReopenAllDays}
-          reason={permissions.reopenAllDisabledReason ?? "Only owner can reopen all days."}
-          onClick={onReopenAllDays}
-          compact={compact}
-        >
-          Reopen All Days
-        </ActionButton>
-        <ActionButton
-          disabled={busy || !permissions.canClosePreviousDaysExceptToday}
-          reason={permissions.closePreviousDisabledReason ?? "Only owner can close previous days."}
-          onClick={onClosePreviousDaysExceptToday}
-          compact={compact}
-        >
-          Close All Previous Days Except Today
-        </ActionButton>
-        <ActionButton
           primary
           disabled={busy || !permissions.canCloseSelectedDay}
           reason={permissions.closeDisabledReason ?? "This day cannot be closed."}

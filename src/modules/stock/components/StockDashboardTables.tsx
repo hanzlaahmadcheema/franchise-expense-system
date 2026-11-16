@@ -480,6 +480,67 @@ export function ProductStockFlowTable({
 }: ProductStockFlowTableProps) {
   const filteredProducts = products.filter((product) => !filterProductId || product.id === filterProductId);
 
+  const rowsData = filteredProducts.map((product) => {
+    const isSkipped = monthOpeningStock[product.id] === null;
+    const todayOpening = (() => {
+      if (isSkipped) return null;
+      const openingValue = monthOpeningStock[product.id] ?? 0;
+      let cumulativeStockIn = 0;
+      let cumulativeStockOut = 0;
+
+      for (const day of days) {
+        if (day.dayNo < filterStartDate) {
+          const stockInRecords = day.stockIn ?? [];
+          for (const record of stockInRecords) {
+            const productLine = record.products.find((line) => line.productId === product.id);
+            if (productLine) cumulativeStockIn += productLine.quantity;
+          }
+          for (const entry of day.entries) {
+            const productLine = entry.products.find((line) => line.productId === product.id);
+            if (productLine) cumulativeStockOut += productLine.quantity;
+          }
+        }
+      }
+
+      return roundMoney(openingValue + cumulativeStockIn - cumulativeStockOut);
+    })();
+
+    const stockInPeriod = days
+      .filter((day) => day.dayNo >= filterStartDate && day.dayNo <= filterEndDate)
+      .reduce((sum, day) => {
+        const stockInRecords = (day.stockIn ?? []).filter((record) => !filterStockInMode || record.stockInMode === filterStockInMode);
+        return sum + stockInRecords.reduce((stockInSum, record) => stockInSum + (record.products.find((line) => line.productId === product.id)?.quantity ?? 0), 0);
+      }, 0);
+
+    const stockOutPeriod = days
+      .filter((day) => day.dayNo >= filterStartDate && day.dayNo <= filterEndDate)
+      .reduce((sum, day) => {
+        const entries = day.entries.filter((entry) => (!filterAccountId || entry.accountId === filterAccountId) && (!filterAccountType || entry.accountType === filterAccountType));
+        return sum + entries.reduce((entrySum, entry) => entrySum + (entry.products.find((line) => line.productId === product.id)?.quantity ?? 0), 0);
+      }, 0);
+
+    const closingPeriod = isSkipped ? null : roundMoney((todayOpening ?? 0) + stockInPeriod - stockOutPeriod);
+    const value = isSkipped ? 0 : roundMoney((closingPeriod ?? 0) * product.rate);
+    const isLow = !isSkipped && (closingPeriod ?? 0) < 20;
+
+    return {
+      product,
+      isSkipped,
+      todayOpening,
+      stockInPeriod,
+      stockOutPeriod,
+      closingPeriod,
+      value,
+      isLow
+    };
+  });
+
+  const totalOpening = rowsData.reduce((sum, r) => sum + (r.todayOpening ?? 0), 0);
+  const totalStockIn = rowsData.reduce((sum, r) => sum + (r.isSkipped ? 0 : r.stockInPeriod), 0);
+  const totalStockOut = rowsData.reduce((sum, r) => sum + (r.isSkipped ? 0 : r.stockOutPeriod), 0);
+  const totalClosing = rowsData.reduce((sum, r) => sum + (r.closingPeriod ?? 0), 0);
+  const totalValue = rowsData.reduce((sum, r) => sum + r.value, 0);
+
   return (
     <div className="table-wrap">
       <table>
@@ -496,73 +557,29 @@ export function ProductStockFlowTable({
           </tr>
         </thead>
         <tbody>
-          {filteredProducts.map((product) => {
-            const isSkipped = monthOpeningStock[product.id] === null;
-            const todayOpening = (() => {
-              if (isSkipped) return null;
-              const openingValue = monthOpeningStock[product.id] ?? 0;
-              let cumulativeStockIn = 0;
-              let cumulativeStockOut = 0;
-
-              for (const day of days) {
-                if (day.dayNo < filterStartDate) {
-                  const stockInRecords = day.stockIn ?? [];
-                  for (const record of stockInRecords) {
-                    const productLine = record.products.find((line) => line.productId === product.id);
-                    if (productLine) cumulativeStockIn += productLine.quantity;
-                  }
-                  for (const entry of day.entries) {
-                    const productLine = entry.products.find((line) => line.productId === product.id);
-                    if (productLine) cumulativeStockOut += productLine.quantity;
-                  }
-                }
-              }
-
-              return roundMoney(openingValue + cumulativeStockIn - cumulativeStockOut);
-            })();
-
-            const stockInPeriod = days
-              .filter((day) => day.dayNo >= filterStartDate && day.dayNo <= filterEndDate)
-              .reduce((sum, day) => {
-                const stockInRecords = (day.stockIn ?? []).filter((record) => !filterStockInMode || record.stockInMode === filterStockInMode);
-                return sum + stockInRecords.reduce((stockInSum, record) => stockInSum + (record.products.find((line) => line.productId === product.id)?.quantity ?? 0), 0);
-              }, 0);
-
-            const stockOutPeriod = days
-              .filter((day) => day.dayNo >= filterStartDate && day.dayNo <= filterEndDate)
-              .reduce((sum, day) => {
-                const entries = day.entries.filter((entry) => (!filterAccountId || entry.accountId === filterAccountId) && (!filterAccountType || entry.accountType === filterAccountType));
-                return sum + entries.reduce((entrySum, entry) => entrySum + (entry.products.find((line) => line.productId === product.id)?.quantity ?? 0), 0);
-              }, 0);
-
-            const closingPeriod = isSkipped ? null : roundMoney((todayOpening ?? 0) + stockInPeriod - stockOutPeriod);
-            const value = isSkipped ? 0 : roundMoney((closingPeriod ?? 0) * product.rate);
-            const isLow = !isSkipped && (closingPeriod ?? 0) < 20;
-
-            return (
-              <tr key={product.id}>
-                <td className="font-semibold text-slate-200">{product.name}</td>
-                <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(todayOpening ?? 0)}</td>
-                <td className="text-indigo-400">{isSkipped ? "—" : `+${formatMoney(stockInPeriod)}`}</td>
-                <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(stockOutPeriod)}`}</td>
-                <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(closingPeriod ?? 0)}</td>
-                <td>{formatMoney(product.rate)}</td>
-                <td className="font-mono text-emerald-400">{isSkipped ? "—" : formatMoney(value)}</td>
-                <td>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${
-                    isSkipped
-                      ? "bg-slate-800 text-slate-400 border border-slate-700"
-                      : isLow
-                        ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                        : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                  }`}>
-                    {isLow && <AlertTriangle className="h-3 w-3" />}
-                    <span>{isSkipped ? "Skipped" : isLow ? "Low Stock" : "Healthy"}</span>
-                  </span>
-                </td>
-              </tr>
-            );
-          })}
+          {rowsData.map(({ product, isSkipped, todayOpening, stockInPeriod, stockOutPeriod, closingPeriod, value, isLow }) => (
+            <tr key={product.id}>
+              <td className="font-semibold text-slate-200">{product.name}</td>
+              <td>{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(todayOpening ?? 0)}</td>
+              <td className="text-indigo-400">{isSkipped ? "—" : `+${formatMoney(stockInPeriod)}`}</td>
+              <td className="text-rose-400">{isSkipped ? "—" : `-${formatMoney(stockOutPeriod)}`}</td>
+              <td className="font-bold text-slate-100">{isSkipped ? <span className="text-slate-500 italic">Skipped</span> : formatMoney(closingPeriod ?? 0)}</td>
+              <td>{formatMoney(product.rate)}</td>
+              <td className="font-mono text-emerald-400">{isSkipped ? "—" : formatMoney(value)}</td>
+              <td>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase flex items-center justify-center gap-1 ${
+                  isSkipped
+                    ? "bg-slate-800 text-slate-400 border border-slate-700"
+                    : isLow
+                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                      : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                }`}>
+                  {isLow && <AlertTriangle className="h-3 w-3" />}
+                  <span>{isSkipped ? "Skipped" : isLow ? "Low Stock" : "Healthy"}</span>
+                </span>
+              </td>
+            </tr>
+          ))}
           {filteredProducts.length === 0 && (
             <tr>
               <td className="py-6 text-center text-slate-500" colSpan={8}>
@@ -571,6 +588,20 @@ export function ProductStockFlowTable({
             </tr>
           )}
         </tbody>
+        {filteredProducts.length > 0 && (
+          <tfoot>
+            <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
+              <td className="py-2.5 font-bold">Total</td>
+              <td className="py-2.5 font-mono">{formatMoney(totalOpening)}</td>
+              <td className="py-2.5 font-mono text-indigo-400">+{formatMoney(totalStockIn)}</td>
+              <td className="py-2.5 font-mono text-rose-400">-{formatMoney(totalStockOut)}</td>
+              <td className="py-2.5 font-mono font-bold text-slate-100">{formatMoney(totalClosing)}</td>
+              <td className="py-2.5 text-slate-400">—</td>
+              <td className="py-2.5 font-mono text-emerald-400">{formatMoney(totalValue)}</td>
+              <td className="py-2.5 text-slate-400">—</td>
+            </tr>
+          </tfoot>
+        )}
       </table>
     </div>
   );

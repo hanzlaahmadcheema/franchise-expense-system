@@ -11,6 +11,7 @@ export interface GuidedMonthCloseModalProps {
   onNotNow: () => void;
   onProceedToNextMonth?: () => void;
   onDismiss?: () => void;
+  isNextMonthArrived?: boolean;
 }
 
 function formatMonthLabel(monthKey: string): string {
@@ -35,7 +36,8 @@ export function GuidedMonthCloseModal({
   onCloseMonth,
   onNotNow,
   onProceedToNextMonth,
-  onDismiss
+  onDismiss,
+  isNextMonthArrived = true
 }: GuidedMonthCloseModalProps) {
   if (!isOpen) return null;
 
@@ -160,12 +162,21 @@ export function GuidedMonthCloseModal({
                 className="text-base font-semibold text-white leading-relaxed"
                 data-testid="month-close-success-message"
               >
-                {monthLabel} is now closed. You can proceed to {nextMonthName} Day 1.
+                {monthLabel} is now closed.
+                {isNextMonthArrived ? ` You can proceed to ${nextMonthName} Day 1.` : ""}
               </p>
               <div className="mt-2 space-y-1 text-xs text-emerald-200/90">
-                <p>{monthLabel} closed successfully.</p>
-                <p>{nextMonthName} has been initialized from {monthLabel} FINAL.</p>
-                <p>{nextMonthName} Day 1 is now open.</p>
+                <p>{monthLabel} closed successfully in PostgreSQL ledger.</p>
+                {isNextMonthArrived ? (
+                  <>
+                    <p>{nextMonthName} has been initialized from {monthLabel} FINAL.</p>
+                    <p>{nextMonthName} Day 1 is now open.</p>
+                  </>
+                ) : (
+                  <p className="text-amber-300 font-medium">
+                    {nextMonthName} will not open automatically until {nextMonthName} 1st arrives.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -178,7 +189,7 @@ export function GuidedMonthCloseModal({
               >
                 Done
               </button>
-              {onProceedToNextMonth && (
+              {isNextMonthArrived && onProceedToNextMonth && (
                 <button
                   type="button"
                   className="btn-primary !h-11 w-full sm:w-auto"

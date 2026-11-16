@@ -3,11 +3,6 @@
 
 @theme {
   --font-sans: "Pathway Extreme", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --breakpoint-sm: 0px;
-  --breakpoint-md: 0px;
-  --breakpoint-lg: 0px;
-  --breakpoint-xl: 0px;
-  --breakpoint-2xl: 0px;
 }
 
 :root,
@@ -64,12 +59,12 @@ html[data-ui-mode="classic"] {
   html,
   body,
   #root {
-    min-width: 1280px;
+    min-height: 100vh;
   }
 
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
-    overflow-x: auto;
+    overflow-x: hidden;
     font-size: var(--ui-base-font-size);
   }
 
@@ -96,7 +91,12 @@ html[data-ui-mode="classic"] {
   }
 
   td {
-    @apply border-b border-slate-800/70 px-4 py-3 text-slate-200;
+    @apply border-b border-slate-800/70 px-4 py-3 font-bold text-white;
+  }
+
+  table input,
+  table select {
+    @apply font-bold text-white;
   }
 }
 
@@ -121,6 +121,14 @@ html[data-ui-mode="classic"] {
 
   .btn-ghost {
     @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-2 text-center text-sm font-semibold leading-tight text-slate-300 transition hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .table-compact th {
+    @apply px-3.5 py-2.5 text-xs whitespace-nowrap;
+  }
+
+  .table-compact td {
+    @apply px-3.5 py-2.5 text-xs;
   }
 
   .btn-icon {
@@ -173,16 +181,53 @@ html[data-ui-mode="classic"] {
 
   .table-wrap {
     @apply overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/40;
-    height: auto !important;
-    max-height: none !important;
-    min-height: auto !important;
-    overflow-y: visible !important;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
+    overflow-y: visible;
+    height: auto;
+    max-height: none;
+    scrollbar-color: rgb(52 211 153 / 0.35) transparent;
+    scrollbar-width: thin;
   }
 
-  .table-wrap::-webkit-scrollbar {
-    display: none;
+  .table-wrap thead {
+    position: relative;
+    z-index: 20;
+  }
+
+  .table-wrap thead th,
+  .stock-entry-table thead th,
+  .table-compact thead th {
+    background-color: rgb(15 23 42 / 0.98);
+    box-shadow: inset 0 -1px 0 rgb(51 65 85 / 0.8);
+  }
+
+  .theme-light .table-wrap thead th,
+  .theme-light .stock-entry-table thead th,
+  .theme-light .table-compact thead th {
+    background-color: rgb(248 250 252 / 0.98) !important;
+    box-shadow: inset 0 -1px 0 rgb(219 227 238 / 0.9) !important;
+    color: rgb(15 23 42) !important;
+  }
+
+  /* Active column highlight helpers for light mode */
+  .theme-light .stock-col-active-th {
+    background-color: rgb(209 250 229 / 0.95) !important;
+    color: rgb(6 95 70) !important;
+    box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.5), inset 0 -1px 0 rgb(16 185 129 / 0.5) !important;
+  }
+
+  .theme-light .stock-col-active-cell {
+    background-color: rgb(209 250 229 / 0.4) !important;
+  }
+
+  .theme-light .stock-col-active-cell-selected {
+    background-color: rgb(167 243 208 / 0.75) !important;
+    box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.6) !important;
+  }
+
+  .theme-light .stock-col-active-footer {
+    background-color: rgb(209 250 229 / 0.9) !important;
+    color: rgb(6 95 70) !important;
+    box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.4) !important;
   }
 
   .app-scrollbar {
@@ -984,7 +1029,8 @@ html[data-ui-mode="classic"] td {
   padding: var(--ui-table-cell-y) var(--ui-table-cell-x) !important;
   font-size: 1rem !important;
   line-height: 1.5 !important;
-  color: rgb(241 245 249) !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
 }
 
 html[data-ui-mode="classic"] .table-wrap {
@@ -1060,7 +1106,7 @@ html[data-ui-mode="classic"] .theme-light td {
 
 .stock-entry-table th,
 .stock-entry-table td {
-  padding: 0.45rem 0.6rem !important;
+  padding: 0.4rem 0.5rem !important;
   vertical-align: middle;
   white-space: nowrap;
 }

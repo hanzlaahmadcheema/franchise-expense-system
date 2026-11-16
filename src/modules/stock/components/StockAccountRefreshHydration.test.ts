@@ -9,7 +9,6 @@ describe("StockAccountRefreshHydration", () => {
     id: arslanAccountId,
     name: "DO ARSLAN",
     type: "DO",
-    slug: "do-arslan",
     openingBalance: 136855,
     active: true,
     displayOrder: 4,
@@ -22,7 +21,6 @@ describe("StockAccountRefreshHydration", () => {
     {
       id: "prod-sim",
       name: "RETAIL IMZI",
-      slug: "retail-imzi",
       rate: 280,
       active: true,
       category: "sim",

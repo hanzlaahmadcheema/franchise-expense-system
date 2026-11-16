@@ -860,9 +860,9 @@ export async function getPeriodFinalProjectionsInternal(
       }
       return {
         productId: p.productId,
-        openingQuantity: p.closingQty,
+        openingQuantity: Math.max(0, p.closingQty),
         status: "active" as const,
-        notes: null,
+        notes: p.closingQty < 0 ? `PREVIOUS_PERIOD_DEFICIT_${p.closingQty}` : null,
         sourcePeriodKey: period.period_key,
         sourceDayNo: finalDay.day_no
       };

@@ -16,6 +16,7 @@ import { useAutoSaveEntry } from "../shared/hooks/useAutoSaveEntry";
 import { SaveProgressDialog, type SaveProgressState } from "../shared/components/SaveProgressDialog";
 import { getAccountingPeriodWithDays, isPostgreSqlPeriod } from "../services/api/periodDayService";
 import { ledgerApiClient } from "../services/api/ledgerApiClient";
+import { Alert, SaveControlBar, StatusBadge } from "../shared/components";
 
 type Props = {
   dayNo: number;
@@ -38,7 +39,7 @@ type Props = {
   reopenRequiresTime?: boolean;
   previousDay?: DailyLedgerInput;
   onSave: (input: DailyLedgerInput, options?: { silent?: boolean; awaitRemote?: boolean }) => Promise<void>;
-  onCloseDay: (input: DailyLedgerInput) => Promise<void>;
+  onCloseDay?: (input: DailyLedgerInput) => Promise<void>;
   onSendEmail?: (input: DailyLedgerInput) => Promise<void>;
   onReopenDay?: () => Promise<void>;
   canSendEmail?: boolean;
@@ -94,6 +95,7 @@ function InputText({
   return (
     <input
       type="text"
+      className="font-mono tabular-nums"
       value={localVal}
       disabled={disabled}
       onChange={(event) => {
@@ -251,8 +253,13 @@ export function DailyEntryForm({
   initial,
   disabled,
   locked,
+  canClose,
+  canReopen,
+  reopenLabel,
   previousDay,
   onSave,
+  onCloseDay,
+  onReopenDay,
   onSendEmail,
   canSendEmail,
   canCreateCatalogs,
@@ -338,7 +345,6 @@ export function DailyEntryForm({
   const [editingCreditId, setEditingCreditId] = useState<string | null>(null);
   const [commissionFilter, setCommissionFilter] = useState("all");
   const [saving, setSaving] = useState(false);
-  const [emailing, setEmailing] = useState(false);
   const [verifiedSave, setVerifiedSave] = useState<SaveProgressState>(null);
   const [creditVerifyMessage, setCreditVerifyMessage] = useState("");
   const [catalogModal, setCatalogModal] = useState<null | "expense" | "commission" | "credit">(null);
@@ -347,6 +353,7 @@ export function DailyEntryForm({
   const lastSavedRef = useRef("");
   const disabledRef = useRef(Boolean(disabled));
   const draftDirtyRef = useRef(false);
+  const saveInFlightRef = useRef(false);
   const [saveInFlight, setSaveInFlight] = useState(false);
   const [saveBaselineReady, setSaveBaselineReady] = useState(false);
 
@@ -672,7 +679,7 @@ export function DailyEntryForm({
   }, [hasPendingChanges]);
 
   async function handleManualSave(): Promise<boolean> {
-    if (disabledRef.current) return false;
+    if (disabledRef.current || saveInFlightRef.current) return false;
     if (inFlightSavePromiseRef.current) {
       try {
         await inFlightSavePromiseRef.current;
@@ -683,6 +690,7 @@ export function DailyEntryForm({
         return false;
       }
     }
+    saveInFlightRef.current = true;
     setSaving(true);
     setSaveInFlight(true);
     const savePromise = (async () => {
@@ -694,6 +702,7 @@ export function DailyEntryForm({
       } catch {
         return false;
       } finally {
+        saveInFlightRef.current = false;
         setSaveInFlight(false);
         setSaving(false);
         inFlightSavePromiseRef.current = null;
@@ -704,7 +713,8 @@ export function DailyEntryForm({
   }
 
   async function handleVerifiedSave() {
-    if (disabledRef.current || saveInFlight) return;
+    if (disabledRef.current || saveInFlight || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
     setVerifiedSave({
       status: "saving",
       title: isPg ? "Saving Expense Day to PostgreSQL" : "Saving Expense Day",
@@ -731,23 +741,11 @@ export function DailyEntryForm({
         message: error instanceof Error ? error.message : "Failed to save day."
       });
     } finally {
+      saveInFlightRef.current = false;
       setSaveInFlight(false);
     }
   }
 
-  async function handleSendEmail() {
-    if (!onSendEmail) return;
-    setEmailing(true);
-    try {
-      if (hasPendingChanges) {
-        const saved = await handleManualSave();
-        if (!saved) return;
-      }
-      await onSendEmail(payload);
-    } finally {
-      setEmailing(false);
-    }
-  }
 
   const manualSaveRef = useRef<() => Promise<boolean>>(handleManualSave);
   manualSaveRef.current = handleManualSave;
@@ -764,13 +762,15 @@ export function DailyEntryForm({
     if (isPg && categoryOptions.length === 0) return;
     markDraftDirty();
     setExpenses((rows) => {
+      const existingItem = editingExpenseId ? rows.find((row) => row.id === editingExpenseId) : undefined;
       const remainingRows = editingExpenseId ? rows.filter((row) => row.id !== editingExpenseId) : rows;
       return [
         ...remainingRows,
         {
           id: editingExpenseId ?? `${dayNo}-expense-${crypto.randomUUID()}`,
           ...expenseDraft,
-          categoryId: isPg ? (expenseDraft.categoryId ?? categoryOptions[0]?.id) : expenseDraft.categoryId
+          categoryId: isPg ? (expenseDraft.categoryId ?? categoryOptions[0]?.id) : expenseDraft.categoryId,
+          idempotencyKey: existingItem?.idempotencyKey ?? crypto.randomUUID()
         }
       ];
     });
@@ -1077,100 +1077,17 @@ export function DailyEntryForm({
         </div>
       )}
       <div className="space-y-5">
-        <section className="panel">
-          <div className="panel-title">
-            <div>
-              <h2>{dayNo === 32 ? "FINAL Month-End Entry" : `Day ${dayNo} Entry`}</h2>
-            </div>
-            <div className="hidden items-center gap-3 md:flex">
-              <span className={`text-xs font-semibold uppercase ${
-                disabled
-                  ? "text-slate-400"
-                  : (saveInFlight || autoSaveStatus === "saving")
-                  ? "text-amber-300"
-                  : autoSaveStatus === "error"
-                  ? "text-rose-300"
-                  : draftDirtyRef.current
-                  ? "text-amber-400"
-                  : "text-emerald-300"
-              }`}>
-                {disabled
-                  ? "Day closed"
-                  : (saveInFlight || autoSaveStatus === "saving")
-                  ? "Saving…"
-                  : autoSaveStatus === "error"
-                  ? "Save failed"
-                  : draftDirtyRef.current
-                  ? "Unsaved changes"
-                  : "Saved"}
-              </span>
-              <button
-                className="btn-primary"
-                disabled={disabled || saving || emailing || saveInFlight}
-                title={disabled ? "Reopen the day before saving." : isPg ? "Write now to PostgreSQL ledger and wait for confirmation" : "Write now and wait for confirmation"}
-                onClick={() => void handleVerifiedSave()}
-              >
-                <Save />
-                Save Now & Verify
-              </button>
-              {onSendEmail && (
-                <button
-                  className="btn-secondary"
-                  disabled={!canSendEmail || saving || emailing || saveInFlight}
-                  title={!canSendEmail ? "Email sending is disabled until Firebase Functions deployment is available." : "Send email report"}
-                  onClick={() => void handleSendEmail()}
-                >
-                  {emailing && <LoadingIcon label="Sending email" />}
-                  {emailing ? "Sending..." : "Send Email"}
-                </button>
-              )}
-            </div>
-          </div>
-          <div className="grid two">
-            <label>
-              Opening Balance
-              <input value={preview.openingBalance.toLocaleString()} disabled readOnly />
-            </label>
-            <label>
-              Notes
-              <input value={notes} disabled={disabled} onChange={(event) => { markDraftDirty(); setNotes(event.target.value); }} />
-            </label>
-          </div>
-        </section>
-
-        <div className="mobile-entry-actions md:hidden">
-          <div className="flex flex-col gap-0.5">
-            <p className={`text-[11px] font-semibold uppercase ${
-              disabled
-                ? "text-slate-400"
-                : (saveInFlight || autoSaveStatus === "saving")
-                ? "text-amber-300"
-                : autoSaveStatus === "error"
-                ? "text-rose-300"
-                : draftDirtyRef.current
-                ? "text-amber-400"
-                : "text-emerald-300"
-            }`}>
-              {disabled
-                ? "Day closed"
-                : (saveInFlight || autoSaveStatus === "saving")
-                ? "Saving…"
-                : autoSaveStatus === "error"
-                ? "Save failed"
-                : draftDirtyRef.current
-                ? "Unsaved changes"
-                : "Saved"}
-            </p>
-            <p className="mt-0.5 text-xs text-slate-400">
-              {locked ? "Day closed" : hasPendingChanges ? "Pending changes" : "Ready"}
-            </p>
-          </div>
-          <button className="btn-primary" disabled={disabled || saving || saveInFlight} onClick={() => void handleVerifiedSave()}>
-            <Save />
-            Save & Verify
-          </button>
-        </div>
-
+        <label className="sr-only">
+          Notes
+          <input
+            value={notes}
+            disabled={disabled}
+            onChange={(event) => {
+              markDraftDirty();
+              setNotes(event.target.value);
+            }}
+          />
+        </label>
         <section className="panel">
           <div className="panel-title">
             <div>
@@ -1178,9 +1095,9 @@ export function DailyEntryForm({
             </div>
           </div>
           {isPg && commissionOptions.length === 0 && (
-            <p className="warning mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <Alert variant="warning" className="mb-4">
               No active commission categories configured in PostgreSQL catalog. Please configure commission categories before adding commissions.
-            </p>
+            </Alert>
           )}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
             <label>
@@ -1216,17 +1133,6 @@ export function DailyEntryForm({
               </button>
             </div>
           </div>
-          {/* <div className="mb-4 max-w-xs">
-            <label>
-              Filter
-              <select value={commissionFilter} onChange={(event) => setCommissionFilter(event.target.value)}>
-                <option value="all">All non-zero</option>
-                {commissionOptions.map((category) => (
-                  <option key={category.id} value={category.id}>{category.name}</option>
-                ))}
-              </select>
-            </label>
-          </div> */}
           <div className="mobile-card-list md:hidden">
             {visibleCommissions.map((item) => {
               const order = commissionOptions.findIndex((category) => category.name === item.category || category.id === item.categoryId);
@@ -1237,7 +1143,7 @@ export function DailyEntryForm({
                       <p className="mobile-label">Commission</p>
                       <h3 className="mobile-card-title">{item.category}</h3>
                     </div>
-                    <span className="mobile-pill mobile-pill-good">{item.amount.toLocaleString()}</span>
+                    <span className="mobile-pill mobile-pill-good font-mono tabular-nums">{item.amount.toLocaleString()}</span>
                   </div>
                   <p className="mt-2 text-sm text-slate-400">Order {order >= 0 ? order + 1 : "-"}</p>
                   <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1257,10 +1163,10 @@ export function DailyEntryForm({
             <table>
               <thead>
                 <tr>
-                  <th>Order</th>
+                  <th className="w-16 text-center">#</th>
                   <th>Category</th>
-                  <th>Amount</th>
-                  <th>Actions</th>
+                  <th className="text-right">Amount</th>
+                  <th className="w-24 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1268,11 +1174,11 @@ export function DailyEntryForm({
                   const order = commissionOptions.findIndex((category) => category.name === item.category || category.id === item.categoryId);
                   return (
                     <tr key={item.id}>
-                      <td>{order >= 0 ? order + 1 : "-"}</td>
-                      <td>{item.category}</td>
-                      <td>{item.amount.toLocaleString()}</td>
-                      <td>
-                        <div className="inline-flex items-center gap-2">
+                      <td className="text-center font-mono text-xs font-bold text-white">{order >= 0 ? order + 1 : "-"}</td>
+                      <td className="font-bold text-white">{item.category}</td>
+                      <td className="text-right font-mono font-bold tabular-nums text-white">{item.amount.toLocaleString()}</td>
+                      <td className="text-right">
+                        <div className="inline-flex items-center justify-end gap-2">
                           <button
                             className="btn-ghost !h-9 !w-9 !px-0"
                             disabled={disabled}
@@ -1296,7 +1202,7 @@ export function DailyEntryForm({
                 })}
                 {visibleCommissions.length === 0 && (
                   <tr>
-                    <td colSpan={4}>No commission entries match this filter.</td>
+                    <td colSpan={4} className="text-center py-6 text-slate-400">No commission entries match this filter.</td>
                   </tr>
                 )}
               </tbody>
@@ -1311,9 +1217,9 @@ export function DailyEntryForm({
             </div>
           </div>
           {isPg && categoryOptions.length === 0 && (
-            <p className="warning mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <Alert variant="warning" className="mb-4">
               No active expense categories configured in PostgreSQL catalog. Please configure expense categories before adding expenses.
-            </p>
+            </Alert>
           )}
           <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_2fr_1fr_auto]">
             <label>
@@ -1379,7 +1285,7 @@ export function DailyEntryForm({
                     <p className="mobile-label">{item.category}</p>
                     <h3 className="mobile-card-title">{item.name || "Expense"}</h3>
                   </div>
-                  <span className="mobile-pill mobile-pill-good">{item.amount.toLocaleString()}</span>
+                  <span className="mobile-pill mobile-pill-good font-mono tabular-nums">{item.amount.toLocaleString()}</span>
                 </div>
                 {item.description && <p className="mt-2 text-sm text-slate-400">{item.description}</p>}
                 <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1401,19 +1307,23 @@ export function DailyEntryForm({
                   <th>Category</th>
                   <th>Name</th>
                   <th>Description</th>
-                  <th>Amount</th>
-                  <th>Actions</th>
+                  <th className="text-right">Amount</th>
+                  <th className="w-24 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {expenses.map((item) => (
                   <tr key={item.id}>
-                    <td>{item.category}</td>
-                    <td>{item.name}</td>
-                    <td>{item.description}</td>
-                    <td>{item.amount.toLocaleString()}</td>
                     <td>
-                      <div className="inline-flex items-center gap-2">
+                      <span className="inline-block rounded-md bg-slate-800 px-2 py-0.5 text-xs font-bold text-white border border-slate-700/60">
+                        {item.category}
+                      </span>
+                    </td>
+                    <td className="font-bold text-white">{item.name}</td>
+                    <td className="font-bold text-white text-sm">{item.description}</td>
+                    <td className="text-right font-mono font-bold tabular-nums text-white">{item.amount.toLocaleString()}</td>
+                    <td className="text-right">
+                      <div className="inline-flex items-center justify-end gap-2">
                         <button
                           className="btn-ghost !h-9 !w-9 !px-0"
                           disabled={disabled}
@@ -1436,7 +1346,7 @@ export function DailyEntryForm({
                 ))}
                 {expenses.length === 0 && (
                   <tr>
-                    <td colSpan={5}>No expense entries.</td>
+                    <td colSpan={5} className="text-center py-6 text-slate-400">No expense entries.</td>
                   </tr>
                 )}
               </tbody>
@@ -1470,11 +1380,11 @@ export function DailyEntryForm({
             </label>
             <label>
               Opening
-              <input value={ownerOpeningPreview.toLocaleString()} disabled readOnly />
+              <input value={ownerOpeningPreview.toLocaleString()} disabled readOnly className="font-mono tabular-nums" />
             </label>
             <label>
               Closing
-              <input value={ownerClosingPreview.toLocaleString()} disabled readOnly />
+              <input value={ownerClosingPreview.toLocaleString()} disabled readOnly className="font-mono tabular-nums font-semibold" />
             </label>
             <button
               className="btn-primary self-end"
@@ -1492,12 +1402,12 @@ export function DailyEntryForm({
                     <p className="mobile-label">Franchise Owner</p>
                     <h3 className="mobile-card-title">{row.description ?? row.label ?? "Owner entry"}</h3>
                   </div>
-                  <span className="mobile-pill">{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</span>
+                  <span className="mobile-pill font-mono tabular-nums">{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</span>
                 </div>
                 <dl className="mobile-kv-grid mt-3">
-                  <div><dt>Opening</dt><dd>{(row.opening ?? 0).toLocaleString()}</dd></div>
-                  <div><dt>Expense</dt><dd>{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</dd></div>
-                  <div><dt>Received</dt><dd>{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</dd></div>
+                  <div><dt>Opening</dt><dd className="font-mono tabular-nums">{(row.opening ?? 0).toLocaleString()}</dd></div>
+                  <div><dt>Expense</dt><dd className="font-mono tabular-nums text-rose-300">{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</dd></div>
+                  <div><dt>Received</dt><dd className="font-mono tabular-nums text-emerald-400">{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</dd></div>
                 </dl>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <button className="btn-ghost" disabled={disabled} onClick={() => editOwnerRow(row)}>
@@ -1516,23 +1426,23 @@ export function DailyEntryForm({
               <thead>
                 <tr>
                   <th>Description</th>
-                  <th>Opening</th>
-                  <th>Expense</th>
-                  <th>Received</th>
-                  <th>Balance</th>
-                  <th>Actions</th>
+                  <th className="text-right">Opening</th>
+                  <th className="text-right">Expense (Out)</th>
+                  <th className="text-right">Received (In)</th>
+                  <th className="text-right">Balance</th>
+                  <th className="w-24 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {derivedOwnerBalances.map((row) => (
                   <tr key={row.id}>
-                    <td>{row.description ?? row.label ?? ""}</td>
-                    <td>{(row.opening ?? 0).toLocaleString()}</td>
-                    <td>{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</td>
-                    <td>{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</td>
-                    <td>{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</td>
-                    <td>
-                      <div className="inline-flex items-center gap-2">
+                    <td className="font-bold text-white">{row.description ?? row.label ?? ""}</td>
+                    <td className="text-right font-mono font-bold tabular-nums text-white">{(row.opening ?? 0).toLocaleString()}</td>
+                    <td className="text-right font-mono font-bold tabular-nums text-white">{(row.expense ?? Math.max(row.amount, 0)).toLocaleString()}</td>
+                    <td className="text-right font-mono font-bold tabular-nums text-white">{(row.received ?? Math.max(-row.amount, 0)).toLocaleString()}</td>
+                    <td className="text-right font-mono font-bold tabular-nums text-white">{(row.balance ?? (row.opening ?? 0) + row.amount).toLocaleString()}</td>
+                    <td className="text-right">
+                      <div className="inline-flex items-center justify-end gap-2">
                         <button
                           className="btn-ghost !h-9 !w-9 !px-0"
                           disabled={disabled}
@@ -1555,7 +1465,7 @@ export function DailyEntryForm({
                 ))}
                 {derivedOwnerBalances.length === 0 && (
                   <tr>
-                    <td colSpan={6}>No owner entries.</td>
+                    <td colSpan={6} className="text-center py-6 text-slate-400">No owner entries.</td>
                   </tr>
                 )}
               </tbody>
@@ -1597,10 +1507,10 @@ export function DailyEntryForm({
             </label>
             <label>
               Opening
-              <input value={creditOpeningPreview.toLocaleString()} disabled readOnly />
+              <input value={creditOpeningPreview.toLocaleString()} disabled readOnly className="font-mono tabular-nums" />
             </label>
             <label>
-              Loan Description
+              Description
               <input
                 value={creditDraft.loanDescription ?? ""}
                 disabled={disabled || !creditDraft.partyId}
@@ -1613,7 +1523,7 @@ export function DailyEntryForm({
               {inputText(creditDraft.loan ?? 0, (loan) => setCreditDraft((draft) => ({ ...draft, loan })), disabled)}
             </label>
             <label>
-              Receive Description
+              Description
               <input
                 value={creditDraft.receiveDescription ?? ""}
                 disabled={disabled || !creditDraft.partyId}
@@ -1649,12 +1559,12 @@ export function DailyEntryForm({
                       <p className="mobile-label">Credit Party</p>
                       <h3 className="mobile-card-title">{row.partyName}</h3>
                     </div>
-                    <span className="mobile-pill">{balance.toLocaleString()}</span>
+                    <span className="mobile-pill font-mono tabular-nums">{balance.toLocaleString()}</span>
                   </div>
                   <dl className="mobile-kv-grid mt-3">
-                    <div><dt>Opening</dt><dd>{row.opening.toLocaleString()}</dd></div>
+                    <div><dt>Opening</dt><dd className="font-mono tabular-nums">{row.opening.toLocaleString()}</dd></div>
                     <div>
-                      <dt>Loan Description</dt>
+                      <dt>Description</dt>
                       <dd>
                         <input
                           value={descriptions.loanDescription}
@@ -1664,9 +1574,9 @@ export function DailyEntryForm({
                         />
                       </dd>
                     </div>
-                    <div><dt>Loan</dt><dd>{(row.loan ?? row.today ?? 0).toLocaleString()}</dd></div>
+                    <div><dt>Loan</dt><dd className="font-mono tabular-nums text-rose-300">{(row.loan ?? row.today ?? 0).toLocaleString()}</dd></div>
                     <div>
-                      <dt>Receive Description</dt>
+                      <dt>Description</dt>
                       <dd>
                         <input
                           value={descriptions.receiveDescription}
@@ -1676,7 +1586,7 @@ export function DailyEntryForm({
                         />
                       </dd>
                     </div>
-                    <div><dt>Receive</dt><dd>{row.receive.toLocaleString()}</dd></div>
+                    <div><dt>Receive</dt><dd className="font-mono tabular-nums text-emerald-400">{row.receive.toLocaleString()}</dd></div>
                   </dl>
                   {descriptions.legacyDescription && (
                     <p className="mt-2 text-xs text-amber-300">Legacy description: {descriptions.legacyDescription}</p>
@@ -1699,13 +1609,13 @@ export function DailyEntryForm({
               <thead>
                 <tr>
                   <th>Party</th>
-                  <th>Opening</th>
-                  <th>Loan Description</th>
-                  <th>Loan</th>
-                  <th>Receive Description</th>
-                  <th>Receive</th>
-                  <th>Balance</th>
-                  <th>Actions</th>
+                  <th className="text-right">Opening</th>
+                  <th>Description</th>
+                  <th className="text-right">Loan</th>
+                  <th>Description</th>
+                  <th className="text-right">Receive</th>
+                  <th className="text-right">Balance</th>
+                  <th className="w-24 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1714,32 +1624,34 @@ export function DailyEntryForm({
                   const descriptions = resolveCreditDescriptions(row);
                   return (
                     <tr key={row.id}>
-                      <td>{row.partyName}</td>
-                      <td>{row.opening.toLocaleString()}</td>
+                      <td className="font-bold text-white">{row.partyName}</td>
+                      <td className="text-right font-mono font-bold tabular-nums text-white">{row.opening.toLocaleString()}</td>
                       <td>
                         <input
                           value={descriptions.loanDescription}
                           disabled={disabled}
                           onChange={(event) => updateCreditDescription(row.id, "loanDescription", event.target.value)}
                           placeholder="-"
+                          className="font-bold text-white"
                         />
                         {descriptions.legacyDescription && (
-                          <span className="mt-1 block text-xs text-amber-300">Legacy: {descriptions.legacyDescription}</span>
+                          <span className="mt-1 block text-xs font-bold text-slate-400">Legacy: {descriptions.legacyDescription}</span>
                         )}
                       </td>
-                      <td>{(row.loan ?? row.today ?? 0).toLocaleString()}</td>
+                      <td className="text-right font-mono font-bold tabular-nums text-white">{(row.loan ?? row.today ?? 0).toLocaleString()}</td>
                       <td>
                         <input
                           value={descriptions.receiveDescription}
                           disabled={disabled}
                           onChange={(event) => updateCreditDescription(row.id, "receiveDescription", event.target.value)}
                           placeholder="-"
+                          className="font-bold text-white"
                         />
                       </td>
-                      <td>{row.receive.toLocaleString()}</td>
-                      <td>{balance.toLocaleString()}</td>
-                      <td>
-                        <div className="inline-flex items-center gap-2">
+                      <td className="text-right font-mono font-bold tabular-nums text-white">{row.receive.toLocaleString()}</td>
+                      <td className="text-right font-mono font-bold tabular-nums text-white">{balance.toLocaleString()}</td>
+                      <td className="text-right">
+                        <div className="inline-flex items-center justify-end gap-2">
                           <button
                             className="btn-ghost !h-9 !w-9 !px-0"
                             disabled={disabled}
@@ -1763,7 +1675,7 @@ export function DailyEntryForm({
                 })}
                 {derivedCredits.length === 0 && (
                   <tr>
-                    <td colSpan={8}>No credit entries.</td>
+                    <td colSpan={8} className="text-center py-6 text-slate-400">No credit entries.</td>
                   </tr>
                 )}
               </tbody>
@@ -1772,19 +1684,85 @@ export function DailyEntryForm({
         </section>
       </div>
 
-      <aside className="hidden space-y-3 xl:sticky xl:top-5 xl:block xl:self-start">
-        {[
-          ["Opening Balance", preview.openingBalance],
-          ["Commission", preview.commissionTotal],
-          ["Expense", preview.expenseTotal],
-          ["Balance", preview.returnBalance],
-          ["Credit", preview.creditTotals.balance]
-        ].map(([label, value]) => (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-black/20" key={label}>
-            <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{Number(value).toLocaleString()}</p>
+      <aside className="space-y-3 xl:sticky xl:top-14 xl:self-start order-first xl:order-none">
+        {/* Day and operations section — at the top */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/30 backdrop-blur-sm space-y-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h3 className="text-base font-bold text-white leading-tight">
+                {dateLabel}
+                {/* {initial?.updatedAt && (
+                  <span className="ml-1.5 font-bold text-slate-300">
+                    ({new Date(initial.updatedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })})
+                  </span>
+                )} */}
+              </h3>
+            </div>
+            <StatusBadge status={disabled ? "closed" : "open"} />
           </div>
-        ))}
+
+          <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-xs">
+            <span className="text-slate-400">Save Status:</span>
+            <span className={`font-semibold uppercase ${
+              disabled
+                ? "text-slate-400"
+                : (saveInFlight || autoSaveStatus === "saving")
+                ? "text-amber-300"
+                : autoSaveStatus === "error"
+                ? "text-rose-300"
+                : draftDirtyRef.current
+                ? "text-amber-400"
+                : "text-emerald-300"
+            }`}>
+              {disabled
+                ? "Day closed"
+                : (saveInFlight || autoSaveStatus === "saving")
+                ? "Saving…"
+                : autoSaveStatus === "error"
+                ? "Save failed"
+                : draftDirtyRef.current
+                ? "Unsaved changes"
+                : "Saved"}
+            </span>
+          </div>
+
+          <div className="pt-1">
+            <button
+              type="button"
+              className="btn-primary !h-11 w-full !justify-center text-sm font-bold tracking-wide shadow-md shadow-emerald-950/50"
+              disabled={disabled || saving || saveInFlight}
+              title={disabled ? "Reopen the day before saving." : isPg ? "Write now to PostgreSQL ledger and wait for confirmation" : "Write now and wait for confirmation"}
+              onClick={() => void handleVerifiedSave()}
+            >
+              <Save className="h-4 w-4 mr-2" />
+              Save Now & Verify
+            </button>
+          </div>
+        </div>
+
+        {/* Financial Summary Cards */}
+        <div className="grid grid-cols-1 gap-3">
+          {[
+            ["Opening Balance", preview.openingBalance],
+            ["Commission", preview.commissionTotal],
+            ["Expense", preview.expenseTotal],
+            ["Balance", preview.returnBalance],
+            ["Franchise Owner", ownerClosingPreview],
+            ["Credit", preview.creditTotals.balance]
+          ].map(([label, value]) => (
+            <div
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20 backdrop-blur-sm"
+              key={label as string}
+            >
+              <p className="text-sm font-black uppercase tracking-wider text-white">
+                {label as string}
+              </p>
+              <p className="font-mono text-xl font-bold tabular-nums text-white">
+                {Number(value).toLocaleString()}
+              </p>
+            </div>
+          ))}
+        </div>
       </aside>
     </section>
   );

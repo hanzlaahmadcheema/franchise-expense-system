@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { BarChart3, CalendarDays, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, RefreshCw, Save, Settings, Trash2, X } from "lucide-react";
+import { BarChart3, BookOpen, CalendarDays, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, RefreshCw, Save, Settings, Trash2, X } from "lucide-react";
+import { Alert, SaveControlBar, StatusBadge } from "../../../shared/components";
 import type { LedgerUser, UserRole } from "../../../types/ledger";
 import type { SyncState } from "../../../lib/syncStatus";
 import { MASTER_REFRESH_ACCESS } from "../../../shared/services/masterRefreshPermissions";
@@ -106,7 +107,7 @@ export function isServerLoadedJazzDay(day?: JazzLoadDay | null): boolean {
   return false;
 }
 
-type JazzLoadSection = "daily" | "dashboard" | "reports" | "settings" | "backup";
+export type JazzLoadSection = "daily" | "reports" | "settings" | "formulas";
 type JazzLoadPopup = {
   kind: "success" | "warning" | "error";
   text: string;
@@ -158,6 +159,9 @@ type Props = {
   ledgerReadModeConfig: LedgerReadModeConfig;
   loading?: boolean;
   onPendingStateChange?: (pending: boolean) => void;
+  section?: JazzLoadSection;
+  onSectionChange?: (sec: JazzLoadSection) => void;
+  hideOnPageTabs?: boolean;
 };
 
 function pad2(value: number) {
@@ -250,13 +254,15 @@ function NumberInput({
   onChange,
   disabled,
   onFocus,
-  onBlur
+  onBlur,
+  className = ""
 }: {
   value: number;
   onChange: (value: number) => void;
   disabled?: boolean;
   onFocus?: () => void;
   onBlur?: () => void;
+  className?: string;
 }) {
   const formatInputValue = (nextValue: number) => nextValue ? String(Math.round(nextValue)) : "";
   const [text, setText] = useState(formatInputValue(value));
@@ -274,6 +280,7 @@ function NumberInput({
       inputMode="decimal"
       value={text}
       disabled={disabled}
+      className={`text-left font-mono !font-normal tabular-nums text-white w-full max-w-[110px] !h-8 !py-1 !px-2.5 text-xs ${className}`}
       onFocus={() => {
         dirtyRef.current = false;
         setFocused(true);
@@ -404,10 +411,21 @@ export function JazzLoadModule({
   onTriggerMasterRefresh,
   ledgerReadModeConfig,
   loading,
-  onPendingStateChange
+  onPendingStateChange,
+  section: externalSection,
+  onSectionChange: onExternalSectionChange,
+  hideOnPageTabs = false
 }: Props) {
   const { selectedDay, setSelectedDay } = useSelectedDate();
-  const [section, setSection] = useState<JazzLoadSection>("daily");
+  const [internalSection, setInternalSection] = useState<JazzLoadSection>("daily");
+  const section = externalSection ?? internalSection;
+  const setSection = (nextSection: JazzLoadSection) => {
+    if (onExternalSectionChange) {
+      onExternalSectionChange(nextSection);
+    } else {
+      setInternalSection(nextSection);
+    }
+  };
   const [months, setMonths] = useState<JazzLoadMonth[]>([]);
   const [days, setDays] = useState<JazzLoadDay[]>([]);
   const [jazzDaysInitialized, setJazzDaysInitialized] = useState(false);
@@ -1151,7 +1169,7 @@ export function JazzLoadModule({
     [doLineBindings]
   );
   const doBalanceRows = useMemo(() => {
-    const rows: JazzLoadMonthlySummary["doBalances"] = [...localSummary.doBalances];
+    const rows: JazzLoadMonthlySummary["doBalances"] = [...(localSummary.doBalances ?? [])];
     const seenNameKeys = new Set(rows.map(doNameIdentityKey).filter(Boolean));
     const seedDays = [
       ...[...previousMonthDays].sort((left, right) => left.dayNo - right.dayNo),
@@ -1219,11 +1237,7 @@ export function JazzLoadModule({
       setSection("daily");
       onStatus("Owner only. Jazz Load Settings are restricted to owner access.");
     }
-    if (section === "backup" && !canBackup) {
-      setSection("daily");
-      onStatus("Owner only. Jazz Load backup is restricted to owner access.");
-    }
-  }, [canBackup, canManageSettings, onStatus, section]);
+  }, [canManageSettings, onStatus, section]);
 
   const warningMessage = !currentMonth
     ? ""
@@ -2455,19 +2469,6 @@ export function JazzLoadModule({
       saveInFlightRef.current = false;
     }
   }
-  const autoSaveChipText = !jazzDailyReady
-    ? "Loading..."
-    : selectedDayClosed
-    ? "Day closed"
-    : saveState.reason
-    ? `Autosave blocked: ${saveState.detail}`
-    : autoSaveStatus === "saving" || saveInFlightRef.current
-    ? "Saving…"
-    : autoSaveStatus === "error"
-    ? `Save failed${autoSaveError ? `: ${autoSaveError}` : ""}`
-    : draftDirtyRef.current
-    ? "Unsaved changes"
-    : "Saved";
 
   const sidebarDayControls = useMemo(() => (
     <>
@@ -2539,16 +2540,6 @@ export function JazzLoadModule({
               <Save />
               Save Now & Verify
             </button>
-            {canApplyCurrentRatesToSelectedDay && (
-              <button
-                className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs"
-                title="Replace this day's saved Jazz Load rate snapshot with current settings"
-                onClick={() => void applyCurrentRatesToSelectedDay()}
-              >
-                <RefreshCw />
-                Apply Current Rates To This Day
-              </button>
-            )}
             <button className="btn-secondary !h-9 w-full !justify-start !px-2 text-xs" disabled={!selectedDayRecord} onClick={() => selectedDayRecord && exportJazzLoadXlsx(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}>
               <FileSpreadsheet />
               Export Daily Excel
@@ -2589,6 +2580,34 @@ export function JazzLoadModule({
     verifiedSave?.status,
     verifiedSaveDisabled
   ]);
+
+  function handleSectionChange(newSection: JazzLoadSection) {
+    if (newSection === section) return;
+    if (hasPendingJazzChanges) {
+      if (!window.confirm("There are unsaved Jazz Load changes. Leave this screen anyway?")) {
+        return;
+      }
+    }
+    setSection(newSection);
+  }
+
+  const jazzSections = useMemo(
+    () => [
+      { id: "daily" as const, label: "Daily Lifting & Issuance", icon: CalendarDays, show: true },
+      { id: "reports" as const, label: "Monthly Reports & Summaries", icon: FileSpreadsheet, show: true },
+      {
+        id: "settings" as const,
+        label: "DO Profiles & Rates",
+        icon: Settings,
+        show: true,
+        disabled: !canManageSettings,
+        disabledReason: "Only owner can manage Jazz Load Settings."
+      },
+      { id: "formulas" as const, label: "Formulas & Reference", icon: BookOpen, show: true }
+    ],
+    [canManageSettings]
+  );
+
   useSidebarDayControls("jazzLoad", sidebarDayControls, canRead && section === "daily");
 
   if (!canRead) {
@@ -2619,169 +2638,115 @@ export function JazzLoadModule({
         </div>
       )}
       {carryForwardWarnings.length > 0 && (role === "owner" || role === "admin") && (
-        <div className="warning">
-          <p>{carryForwardWarnings.length} Jazz Load month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
-          <ul className="mt-2 list-disc pl-5 text-sm">
-            {carryForwardWarnings.slice(0, 5).map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
-        </div>
+        <Alert
+          variant="warning"
+          title="Opening Mismatches Detected"
+          message={
+            <div>
+              <p>{carryForwardWarnings.length} Jazz Load month-to-month opening mismatch{carryForwardWarnings.length === 1 ? "" : "es"} detected. Run Master Calculation Refresh to repair openings from the previous month final projection.</p>
+              <ul className="mt-2 list-disc pl-5 text-xs space-y-0.5">
+                {carryForwardWarnings.slice(0, 5).map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          }
+        />
       )}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">Jazz Load Ledger</h2>
-          <p className="mt-1 text-sm text-slate-400">{monthLabel(monthId)} · {currentMonth?.status ?? "new"} · {syncLabel}</p>
-        </div>
-        <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Active Month</p>
-          <p className="mt-1 text-sm font-medium text-white">{monthLabel(monthId)}</p>
-        </div>
-      </div>
 
-      <nav className="flex flex-wrap gap-2 rounded-xl border border-slate-800 bg-slate-900/80 p-2">
-        {(
-          [
-            { id: "daily", label: "Daily Entry", icon: Save, show: true },
-            { id: "dashboard", label: "Dashboard", icon: BarChart3, show: true },
-            { id: "reports", label: "Reports", icon: FileSpreadsheet, show: true },
-            { id: "settings", label: "Settings", icon: Settings, show: true, disabled: !canManageSettings, disabledReason: "Only owner can manage Jazz Load Settings." },
-            { id: "backup", label: "Backup", icon: FileDown, show: true, disabled: !canBackup, disabledReason: "Only owner can use Jazz Load backup." }
-          ] as Array<{ id: JazzLoadSection; label: string; icon: typeof BarChart3; show: boolean; disabled?: boolean; disabledReason?: string }>
-        ).map(({ id, label, icon: Icon, show }) =>
-          show ? (
-            <button
-              key={id}
-              className={`${section === id ? "btn-tab btn-tab-active" : "btn-tab"}`}
-              disabled={id === "settings" ? !canManageSettings : id === "backup" ? !canBackup : false}
-              title={id === "settings" && !canManageSettings ? "Only owner can manage Jazz Load Settings." : id === "backup" && !canBackup ? "Only owner can use Jazz Load backup." : label}
-              onClick={() => setSection(id)}
-            >
-              <Icon />
-              {label}
-            </button>
-          ) : null
-        )}
-      </nav>
-
-      {section === "dashboard" && (
-        <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <MetricCard label="Issuance Jazz Load" value={formatCurrency(localSummary.totalIssuanceMl)} helper="Jazz Load only" />
-            <MetricCard label="Payments" value={formatCurrency(localSummary.totalPaymentsBase)} helper="Base payment received" />
-            <MetricCard label="Latest In-Hand" value={formatCurrency(localSummary.latestInHandBalance)} helper="Lifting balance" />
-            <MetricCard label="Commission" value={formatCurrency(localSummary.totalCommission)} helper="Commission 1 + 2" />
-          </div>
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <ReportTable
-              title="Highest Outstanding DOs"
-              headers={["DO", "Line", "Closing", "Active Days"]}
-              rows={doBalanceRows.slice(0, 8).map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.closingBase), String(row.activeDays)])}
-            />
-            <ReportTable
-              title="Daily Trend"
-              headers={["Day", "Issuance Jazz Load", "Payment", "Closing", "In-Hand"]}
-              rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceMl), formatCurrency(row.paymentBase), formatCurrency(row.closingBase), formatCurrency(row.inHandBalance)])}
-            />
-          </div>
+      {!hideOnPageTabs && (
+        <div className="py-2">
+          <nav aria-label="Jazz Load navigation tabs" className="inline-flex flex-wrap gap-1 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 shadow-sm">
+            {jazzSections.map(({ id, label, icon: Icon, disabled, disabledReason }) => {
+              const isActive = section === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  disabled={disabled}
+                  title={disabled ? disabledReason : label}
+                  onClick={() => handleSectionChange(id)}
+                  className={`flex items-center gap-2 rounded-lg px-3.5 py-2 text-xs font-semibold transition-all ${
+                    isActive
+                      ? "bg-slate-800 text-white shadow-sm ring-1 ring-slate-700/60"
+                      : disabled
+                      ? "cursor-not-allowed opacity-40 text-slate-500"
+                      : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+                  }`}
+                >
+                  <Icon className={`h-4 w-4 ${isActive ? "text-sky-400" : "text-slate-500"}`} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </nav>
         </div>
       )}
 
       {section === "daily" && (
-        <div className="space-y-5">
-          <section className="panel">
-            <div className="mb-4">
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">Daily Lifting</h3>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
-                <label>Opening Balance<NumberInput value={liftingOpening} disabled={true} onChange={setLiftingOpening} /></label>
-                <label>
-                  Jazz Load Lifting
-                  <NumberInput
-                    value={mlLifting}
-                    disabled={!canEditDaily}
-                    onFocus={() => focusDraftField("mlLifting")}
-                    onBlur={() => blurDraftField("mlLifting")}
-                    onChange={(value) => {
-                      markDraftDirty();
-                      setMlLifting(value);
-                    }}
-                  />
-                </label>
-                <label>Total Balance<input value={formatCurrency(previewLifting.totalBalance)} disabled readOnly /></label>
-                <label>Today Jazz Load Issuance<input value={formatCurrency(previewLifting.todayMlIssuance)} disabled readOnly /></label>
-                <label>In-Hand Balance<input value={formatCurrency(previewLifting.inHandBalance)} disabled readOnly /></label>
-              </div>
-            </div>
-            <div className="mb-5 border-b border-slate-800 pb-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                {[
-                  ["Commission 1", previewSummary.commission1],
-                  ["Commission 2", previewSummary.commission2],
-                  ["Total Commission", previewSummary.totalCommission]
-                ].map(([label, value]) => (
-                  <div key={label} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm">
-                    <p className="text-xs uppercase text-slate-500">{label}</p>
-                    <p className="mt-1 font-semibold text-white">{formatCurrency(value as number)}</p>
-                  </div>
-                ))}
-              </div>
-              <label className="mt-4">
-                Notes
-                <input
-                  value={dayNotes}
-                  disabled={!canEditDaily}
-                  onFocus={() => focusDraftField("dayNotes")}
-                  onBlur={() => blurDraftField("dayNotes")}
-                  onChange={(event) => {
-                    markDraftDirty();
-                    setDayNotes(event.target.value);
-                  }}
-                />
-              </label>
-            </div>
-            <div className="panel-title">
-              <div>
-                <h3>Daily DO Entry</h3>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="btn-chip" title={saveState.reason ? saveState.detail : autoSaveError || undefined}>
-                  {autoSaveChipText}
-                </span>
-              </div>
-            </div>
-            <div className="mb-4 flex flex-wrap gap-2 text-sm text-slate-300">
-              <span className="btn-chip"><CalendarDays /> {selectedDate}</span>
-              <span className="btn-chip">Status: {statusLabel(selectedJazzStatus)}</span>
-              {canManageSettings ? (
-                <>
-                  <span className="btn-chip">Active Jazz Load: {activeRates.mlRate ? `${activeRates.mlRate.name} ${formatPercentage(activeRates.mlRate.percentage)}` : "missing"}</span>
-                  <span className="btn-chip">Commission 1: {activeRates.commission1Rate ? formatPercentage(activeRates.commission1Rate.percentage) : "missing"}</span>
-                  <span className="btn-chip">Commission 2: {activeRates.commission2Rate ? formatPercentage(activeRates.commission2Rate.percentage) : "missing"}</span>
-                </>
-              ) : (
-                <span className="btn-chip">Calculation rates locked</span>
-              )}
-            </div>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
+          {/* Left Column: Workflow DO Entry Table */}
+          <div className="min-w-0 space-y-5">
             {unboundLineDrafts.length > 0 && (
-              <p className="warning mb-4">
-                No DO binding configured for {unboundLineDrafts.map((draft) => draft.doLine ?? draft.doLineId).join(", ")} on {selectedDate}. Configure it in Jazz Load Settings.
-              </p>
+              <Alert
+                variant="warning"
+                title="Unbound DO Lines"
+                message={`No DO binding configured for ${unboundLineDrafts.map((draft) => draft.doLine ?? draft.doLineId).join(", ")} on ${selectedDate}. Configure it in DO Profiles & Rates.`}
+              />
             )}
-            <div className="table-wrap">
-              <table className="min-w-[1180px]">
-                <thead>
+
+            {/* Daily DO Entry Table */}
+            <section className="panel">
+              <div className="panel-title">
+                <div>
+                  <h3>Daily DO Entry</h3>
+                  <p className="text-xs text-slate-400">{drafts.length} DO line{drafts.length === 1 ? "" : "s"} configured</p>
+                </div>
+              </div>
+              <div className="table-wrap">
+              <table className="w-full min-w-[700px] table-compact">
+                <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm">
                   <tr>
-                    <th>DO Line</th>
-                    <th>Bound DO Name</th>
-                    <th>Opening Balance</th>
-                    {/* <th>Open Jazz Load</th> */}
-                    <th>Issuance Balance</th>
-                    <th>Issuance Jazz Load</th>
-                    <th>Total Recieveable</th>
-                    <th>Payment Recieved</th>
-                    {/* <th>Payment Jazz Load</th> */}
-                    <th>Closing Balance</th>
-                    <th>Closing Jazz Load</th>
+                    <th className="text-left sticky top-0 left-0 z-30 bg-slate-900 shadow-sm border-r border-slate-800">
+                      <span className="block leading-tight">DO</span>
+                      {" "}
+                      <span className="block leading-tight">Name</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Opening</span>
+                      {" "}
+                      <span className="block leading-tight">Balance</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Issuance</span>
+                      {" "}
+                      <span className="block leading-tight">Balance</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Issuance</span>
+                      {" "}
+                      <span className="block leading-tight">Load</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Total</span>
+                      {" "}
+                      <span className="block leading-tight">Receivable</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Payment</span>
+                      {" "}
+                      <span className="block leading-tight">Received</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Closing</span>
+                      {" "}
+                      <span className="block leading-tight">Balance</span>
+                    </th>
+                    <th className="text-left sticky top-0 z-20 bg-slate-900">
+                      <span className="block leading-tight">Closing</span>
+                      {" "}
+                      <span className="block leading-tight">Load</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2789,25 +2754,22 @@ export function JazzLoadModule({
                     const preview = previewEntries[index];
                     return (
                       <tr key={draft.id}>
-                        <td>
-                          <p className="font-semibold text-white">{draft.doLine || "-"}</p>
-                          {/* <p className="text-xs text-slate-500">{draft.doLine ? "Settings-bound line" : "Legacy row"}</p> */}
-                        </td>
-                        <td>
+                        <td className="sticky left-0 z-10 bg-slate-900/95 border-r border-slate-800">
                           {draft.doName ? (
-                            <>
-                              <p className="font-semibold text-white">{draft.doName}</p>
-                              {draft.bindingEffectiveFromMonthId && draft.bindingEffectiveFromDay ? (
-                                <p className="text-xs text-slate-500">Binding</p>
-                              ) : (
-                                <p className="text-xs text-slate-500">Saved row snapshot</p>
-                              )}
-                            </>
+                            <div>
+                              <p className="font-bold text-white">{draft.doName}</p>
+                              {draft.doLine ? (
+                                <p className="text-xs text-slate-400 font-normal">{draft.doLine}</p>
+                              ) : null}
+                            </div>
                           ) : (
-                            <p className="text-xs text-amber-300">No DO binding configured for this line/date. Configure it in Jazz Load Settings.</p>
+                            <div>
+                              {draft.doLine && <p className="font-bold text-white">{draft.doLine}</p>}
+                              <p className="text-xs font-medium text-amber-300">No DO binding configured for this line/date. Configure it in Jazz Load Settings.</p>
+                            </div>
                           )}
                         </td>
-                        <td>
+                        <td className="text-left">
                           <NumberInput
                             value={selectedDay === 1 && isPostgreSqlPeriod(monthId) && pgSeedsVerified ? (pgJazzDoOpenings.get(draft.doProfileId ?? '') ?? 0) : (selectedDay === 1 && previousMonthDays.length === 0 ? draft.openingBase ?? 0 : preview?.openingBalance.baseAmount ?? 0)}
                             disabled={(!canEditDaily || selectedDay !== 1 || previousMonthDays.length > 0) || (isPostgreSqlPeriod(monthId) && pgSeedsVerified)}
@@ -2816,8 +2778,7 @@ export function JazzLoadModule({
                             onChange={(value) => setDraft(index, { openingBase: value })}
                           />
                         </td>
-                        {/* <td>{formatCurrency(preview?.openingBalance.calculatedAmount ?? 0)}</td> */}
-                        <td>
+                        <td className="text-left">
                           <NumberInput
                             value={draft.todayMlIssuanceBase}
                             disabled={!canEditDaily}
@@ -2826,9 +2787,9 @@ export function JazzLoadModule({
                             onChange={(value) => setDraft(index, { todayMlIssuanceBase: value })}
                           />
                         </td>
-                        <td>{formatCurrency(preview?.todayMlIssuance.calculatedAmount ?? 0)}</td>
-                        <td>{formatCurrency(preview?.dayTotal.baseAmount ?? 0)}</td>
-                        <td>
+                        <td className="text-left font-mono tabular-nums font-bold text-white">{formatCurrency(preview?.todayMlIssuance.calculatedAmount ?? 0)}</td>
+                        <td className="text-left font-mono tabular-nums font-bold text-white">{formatCurrency(preview?.dayTotal.baseAmount ?? 0)}</td>
+                        <td className="text-left">
                           <NumberInput
                             value={draft.paymentReceivedBase}
                             disabled={!canEditDaily}
@@ -2837,48 +2798,256 @@ export function JazzLoadModule({
                             onChange={(value) => setDraft(index, { paymentReceivedBase: value })}
                           />
                         </td>
-                        {/* <td>{formatCurrency(preview?.paymentReceived.calculatedAmount ?? 0)}</td> */}
-                        <td>{formatCurrency(preview?.closingBalance.baseAmount ?? 0)}</td>
-                        <td>{formatCurrency(preview?.closingBalance.calculatedAmount ?? 0)}</td>
+                        <td className="text-left font-mono tabular-nums font-bold text-white">{formatCurrency(preview?.closingBalance.baseAmount ?? 0)}</td>
+                        <td className="text-left font-mono tabular-nums font-bold text-white">{formatCurrency(preview?.closingBalance.calculatedAmount ?? 0)}</td>
                       </tr>
                     );
                   })}
                   {drafts.length === 0 && (
-                    <tr><td colSpan={9}>No active DO names or lines configured. Add DO Names and DO Lines in Settings.</td></tr>
+                    <tr><td colSpan={8} className="text-center py-6 text-slate-400">No active DO names or lines configured. Add DO Names and DO Lines in DO Profiles & Rates.</td></tr>
                   )}
                 </tbody>
                 <tfoot>
-                  <tr className="border-t border-slate-700 font-semibold text-white">
-                    <td className="uppercase tracking-[0.12em] text-slate-300">Daily Totals</td>
-                    <td className="text-slate-500">-</td>
-                    <td>{formatCurrency(previewSummary.openingBase)}</td>
-                    {/* <td>{formatCurrency(previewSummary.openingMl)}</td> */}
-                    <td>{formatCurrency(previewSummary.issuanceBase)}</td>
-                    <td>{formatCurrency(previewSummary.issuanceMl)}</td>
-                    <td>{formatCurrency(previewSummary.dayTotalBase ?? 0)}</td>
-                    <td>{formatCurrency(previewSummary.paymentBase)}</td>
-                    {/* <td>{formatCurrency(previewSummary.paymentMl)}</td> */}
-                    <td>{formatCurrency(previewSummary.closingBase)}</td>
-                    <td>{formatCurrency(previewSummary.closingMl)}</td>
+                  <tr className="border-t border-slate-700 font-semibold text-white sticky bottom-0 z-20">
+                    <td className="uppercase tracking-[0.12em] text-slate-300 sticky left-0 z-10 bg-slate-900 border-r border-slate-800">
+                      <span className="block leading-tight">Daily</span>
+                      {" "}
+                      <span className="block leading-tight">Totals</span>
+                    </td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.openingBase)}</td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.issuanceBase)}</td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.issuanceMl)}</td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.dayTotalBase ?? 0)}</td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.paymentBase)}</td>
+                    <td className="text-left font-mono tabular-nums">{formatCurrency(previewSummary.closingBase)}</td>
+                    <td className="text-left font-mono tabular-nums text-white">{formatCurrency(previewSummary.closingMl)}</td>
                   </tr>
                 </tfoot>
               </table>
             </div>
           </section>
         </div>
-      )}
+
+        {/* Right-Side Vertical Panel: Day info & Operations at the top, followed by inputs and financial summary cards */}
+        <aside className="space-y-3 xl:sticky xl:top-14 xl:self-start order-first xl:order-none">
+          {/* Day and operations section — at the top */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900/90 p-4 shadow-xl shadow-black/30 backdrop-blur-sm space-y-3">
+            {/* 1. Selected day and complete date in bold */}
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-white leading-tight">
+                  {new Date(`${selectedDate}T00:00:00`).toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+                </h3>
+                <span className="sr-only">{selectedDate}</span>
+              </div>
+              <StatusBadge
+                status={
+                  selectedDayClosed
+                    ? "closed"
+                    : selectedDayRecord?.status === "reopen"
+                    ? "reopened"
+                    : "open"
+                }
+              />
+            </div>
+
+            {/* 2. Save status */}
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-xs">
+              <span className="text-slate-400">Save Status:</span>
+              <span
+                className={`font-semibold uppercase ${
+                  selectedDayClosed || !jazzDailyReady
+                    ? "text-slate-400"
+                    : (autoSaveStatus === "saving" || saveInFlightRef.current)
+                    ? "text-amber-300"
+                    : autoSaveStatus === "error"
+                    ? "text-rose-300"
+                    : draftDirtyRef.current
+                    ? "text-amber-400"
+                    : "text-emerald-300"
+                }`}
+                title={saveState.reason ? saveState.detail : autoSaveError || undefined}
+              >
+                {!jazzDailyReady
+                  ? "Loading…"
+                  : selectedDayClosed
+                  ? "Day closed"
+                  : (autoSaveStatus === "saving" || saveInFlightRef.current)
+                  ? "Saving…"
+                  : autoSaveStatus === "error"
+                  ? "Save failed"
+                  : draftDirtyRef.current
+                  ? "Unsaved changes"
+                  : "Saved"}
+              </span>
+            </div>
+
+            {/* 3. The single primary Save & Verify action */}
+            <div className="pt-1">
+              <button
+                type="button"
+                className="btn-primary !h-11 w-full !justify-center text-sm font-bold tracking-wide shadow-md shadow-emerald-950/50"
+                disabled={manualSaveDisabled && verifiedSaveDisabled}
+                title={manualSaveDisabled ? manualSaveDisabledReason : "Save and verify Jazz Load transactions"}
+                onClick={() => void handleVerifiedSave()}
+              >
+                <Save className="h-4 w-4 mr-2" />
+                Save Now & Verify
+              </button>
+            </div>
+          </div>
+
+          {/* 1. Opening Balance */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Opening Balance</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(liftingOpening)}
+            </p>
+          </div>
+
+          {/* 2. Daily Lifting input/control */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5 shadow-xl shadow-black/20">
+            <label className="text-sm font-black uppercase tracking-wider text-white shrink-0">
+              Jazz Load Lifting
+            </label>
+            <div className="w-36">
+              <NumberInput
+                value={mlLifting}
+                disabled={!canEditDaily}
+                className="!w-full !max-w-none"
+                onFocus={() => focusDraftField("mlLifting")}
+                onBlur={() => blurDraftField("mlLifting")}
+                onChange={(value) => {
+                  markDraftDirty();
+                  setMlLifting(value);
+                }}
+              />
+            </div>
+          </div>
+
+          {/* 3. Total Balance */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Total Balance</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewLifting.totalBalance)}
+            </p>
+          </div>
+
+          {/* 4. Today Issuance */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Today Issuance</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewLifting.todayMlIssuance)}
+            </p>
+          </div>
+
+          {/* 5. In-Hand Balance */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">In-Hand Balance</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewLifting.inHandBalance)}
+            </p>
+          </div>
+
+          {/* 6. Commission 1 control */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Commission 1</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewSummary.commission1)}
+            </p>
+          </div>
+
+          {/* 7. Commission 2 control */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Commission 2</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewSummary.commission2)}
+            </p>
+          </div>
+
+          {/* 8. Total Commission */}
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-xl shadow-black/20">
+            <p className="text-sm font-black uppercase tracking-wider text-white">Total Commission</p>
+            <p className="text-xl font-bold font-mono tabular-nums text-white">
+              {formatCurrency(previewSummary.totalCommission)}
+            </p>
+          </div>
+        </aside>
+      </div>
+    )}
 
       {section === "reports" && (
-        <div className="space-y-4">
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button className="btn-primary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadXlsx(localSummary, days)}><FileSpreadsheet /> Export Excel</button>
-            <button className="btn-secondary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadPrintable(localSummary)}><FileDown /> Export PDF/Print</button>
+        <div className="space-y-5">
+          {/* Executive Overview Metric Cards */}
+          <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+            <MetricCard label="Issuance Jazz Load" value={formatCurrency(localSummary.totalIssuanceMl)} helper="Jazz Load only" />
+            <MetricCard label="Payments" value={formatCurrency(localSummary.totalPaymentsBase)} helper="Base payment received" />
+            <MetricCard label="Latest In-Hand" value={formatCurrency(localSummary.latestInHandBalance)} helper="Lifting balance" />
+            <MetricCard label="Commission" value={formatCurrency(localSummary.totalCommission)} helper="Commission 1 + 2" />
           </div>
-          <ReportTable title="DO Balance Report" headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load"]} rows={doBalanceRows.map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.openingBase), formatCurrency(row.issuanceBase), formatCurrency(row.paymentBase), formatCurrency(row.closingMl)])} />
-          <ReportTable title="Jazz Load Issuance Report" headers={["Day", "Issuance Base", "Issuance Jazz Load"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceBase), formatCurrency(row.issuanceMl)])} />
-          <ReportTable title="Payments Received" headers={["Day", "Payment Base", "Payment Jazz Load"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.paymentBase), formatCurrency(row.paymentMl)])} />
-          <ReportTable title="Lifting Summary" headers={["Day", "Lifting", "In-Hand"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.lifting), formatCurrency(row.inHandBalance)])} />
-          <ReportTable title="Commission Report" headers={["Day", "Commission 1", "Commission 2", "Total"]} rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.commission1), formatCurrency(row.commission2), formatCurrency(row.commission)])} />
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button className="btn-primary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadXlsx(localSummary, days)}><FileSpreadsheet className="h-4 w-4" /> Export Excel</button>
+            <button className="btn-secondary" disabled={localSummary.dayRows.length === 0} onClick={() => exportJazzLoadPrintable(localSummary)}><FileDown className="h-4 w-4" /> Export PDF/Print</button>
+          </div>
+
+          {(() => {
+            const totalDoOpening = doBalanceRows.reduce((acc, r) => acc + (r.openingBase || 0), 0);
+            const totalDoIssuance = doBalanceRows.reduce((acc, r) => acc + (r.issuanceBase || 0), 0);
+            const totalDoPayments = doBalanceRows.reduce((acc, r) => acc + (r.paymentBase || 0), 0);
+            const totalDoClosing = doBalanceRows.reduce((acc, r) => acc + (r.closingMl || 0), 0);
+            const totalComm1 = localSummary.dayRows.reduce((acc, r) => acc + (r.commission1 || 0), 0);
+            const totalComm2 = localSummary.dayRows.reduce((acc, r) => acc + (r.commission2 || 0), 0);
+
+            return (
+              <>
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                  <ReportTable
+                    title="Highest Outstanding DOs"
+                    headers={["DO", "Line", "Closing", "Active Days"]}
+                    rows={doBalanceRows.slice(0, 8).map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.closingBase), String(row.activeDays)])}
+                  />
+                  <ReportTable
+                    title="Daily Trend"
+                    headers={["Day", "Issuance Jazz Load", "Payment", "Closing", "In-Hand"]}
+                    rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceMl), formatCurrency(row.paymentBase), formatCurrency(row.closingBase), formatCurrency(row.inHandBalance)])}
+                    totals={["Total", formatCurrency(localSummary.totalIssuanceMl), formatCurrency(localSummary.totalPaymentsBase), formatCurrency(localSummary.totalClosingBase), formatCurrency(localSummary.latestInHandBalance)]}
+                  />
+                </div>
+
+                <ReportTable
+                  title="DO Balance Report"
+                  headers={["DO", "Line", "Opening", "Issuance", "Payments", "Closing Jazz Load"]}
+                  rows={doBalanceRows.map((row) => [row.doName, row.doLine ?? "-", formatCurrency(row.openingBase), formatCurrency(row.issuanceBase), formatCurrency(row.paymentBase), formatCurrency(row.closingMl)])}
+                  totals={["Total", "-", formatCurrency(totalDoOpening), formatCurrency(totalDoIssuance), formatCurrency(totalDoPayments), formatCurrency(totalDoClosing)]}
+                />
+                <ReportTable
+                  title="Jazz Load Issuance Report"
+                  headers={["Day", "Issuance Base", "Issuance Jazz Load"]}
+                  rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.issuanceBase), formatCurrency(row.issuanceMl)])}
+                  totals={["Total", formatCurrency(localSummary.totalIssuanceBase), formatCurrency(localSummary.totalIssuanceMl)]}
+                />
+                <ReportTable
+                  title="Payments Received"
+                  headers={["Day", "Payment Base", "Payment Jazz Load"]}
+                  rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.paymentBase), formatCurrency(row.paymentMl)])}
+                  totals={["Total", formatCurrency(localSummary.totalPaymentsBase), formatCurrency(localSummary.totalPaymentsMl)]}
+                />
+                <ReportTable
+                  title="Lifting Summary"
+                  headers={["Day", "Lifting", "In-Hand"]}
+                  rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.lifting), formatCurrency(row.inHandBalance)])}
+                  totals={["Total", formatCurrency(localSummary.totalLifting), formatCurrency(localSummary.latestInHandBalance)]}
+                />
+                <ReportTable
+                  title="Commission Report"
+                  headers={["Day", "Commission 1", "Commission 2", "Total"]}
+                  rows={localSummary.dayRows.map((row) => [String(row.dayNo), formatCurrency(row.commission1), formatCurrency(row.commission2), formatCurrency(row.commission)])}
+                  totals={["Total", formatCurrency(totalComm1), formatCurrency(totalComm2), formatCurrency(localSummary.totalCommission)]}
+                />
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -2899,7 +3068,7 @@ export function JazzLoadModule({
                 </select>
               </label>
               <label>Name<input value={rateName} disabled={!canManageSettings} onChange={(event) => setRateName(event.target.value)} placeholder="Rate name" /></label>
-              <label>Percentage<NumberInput value={ratePercentage} disabled={!canManageSettings} onChange={setRatePercentage} /></label>
+              <label>Percentage<NumberInput value={ratePercentage} disabled={!canManageSettings} className="!w-full !max-w-none" onChange={setRatePercentage} /></label>
               <div className="flex items-end gap-2">
                 <button className="btn-primary" disabled={!canManageSettings || !rateName.trim()} onClick={saveRate}>
                   {editingRateId ? "Update Rate" : "Save Rate"}
@@ -3133,21 +3302,28 @@ export function JazzLoadModule({
       )}
       {section === "settings" && !canManageSettings && (
         <section className="panel">
-          <h3>Settings</h3>
-          <p className="warning mt-4">Only owner can manage Jazz Load calculation settings.</p>
+          <div className="panel-title">
+            <div>
+              <h3>DO Profiles & Rates</h3>
+              <p>Configuration of Jazz Load line rates, names, and bindings.</p>
+            </div>
+          </div>
+          <Alert variant="warning" className="mt-4" title="Access Restricted">
+            Only owners can manage Jazz Load calculation settings, rates, and DO profiles.
+          </Alert>
         </section>
       )}
 
-      {section === "settings" && canManageSettings && (
-        <section className="panel mt-4">
+      {section === "formulas" && (
+        <section className="panel">
           <div className="panel-title">
             <div>
-              <h3>Calculation Formulas & Examples</h3>
+              <h3>Calculation Formulas & Reference</h3>
               <p>Mathematical definitions and concrete examples for Jazz Load additions and daily commissions.</p>
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+            <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <h4 className="font-semibold text-emerald-400">1. Jazz Load Addition (ML Addition)</h4>
               <p className="text-xs text-slate-400">
                 Converts raw currency Base amounts to standard Jazz Load balances by adding the ML percentage rate.
@@ -3166,7 +3342,7 @@ export function JazzLoadModule({
               </div>
             </div>
 
-            <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+            <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <h4 className="font-semibold text-sky-400">2. Daily Lifting & In-Hand Balance</h4>
               <p className="text-xs text-slate-400">
                 Tracks inventory stock of Jazz Load. Opening balance carries over automatically from the previous day's In-Hand Balance.
@@ -3187,7 +3363,7 @@ export function JazzLoadModule({
               </div>
             </div>
 
-            <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-950/40 p-4 lg:col-span-2">
+            <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4 lg:col-span-2">
               <h4 className="font-semibold text-amber-400">3. Commission Calculations</h4>
               <p className="text-xs text-slate-400">
                 Commissions are calculated daily on payments received. Commission 1 accounts for ML deductions, while Commission 2 is a flat rate.
@@ -3234,31 +3410,6 @@ export function JazzLoadModule({
           </div>
         </section>
       )}
-
-      {section === "backup" && (
-        canBackup ? (
-          <section className="panel">
-            <div className="panel-title">
-              <div>
-                <h3>Jazz Load Backup / Export</h3>
-                <p>Backup stores Jazz Load in its own JSON group, separate from normal expenses.</p>
-              </div>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <button className="btn-secondary" disabled={loading} onClick={onExportBackup}><FileDown /> Export Full Backup</button>
-              <label className={`file-button ${loading ? "pointer-events-none opacity-50" : ""}`}>
-                Import Full Backup
-                <input type="file" accept=".json" disabled={loading} onChange={(event) => onImportBackup(event.target.files?.[0] ?? null)} />
-              </label>
-            </div>
-          </section>
-        ) : (
-          <section className="panel">
-            <h3>Jazz Load Backup / Export</h3>
-            <p className="warning mt-4">Owner only.</p>
-          </section>
-        )
-      )}
     </section>
   );
 }
@@ -3272,17 +3423,38 @@ function SummaryValue({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ReportTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+function ReportTable({
+  title,
+  headers,
+  rows,
+  totals
+}: {
+  title: string;
+  headers: string[];
+  rows: string[][];
+  totals?: string[];
+}) {
   return (
     <section className="panel">
       <div className="panel-title"><div><h3>{title}</h3><p>{rows.length} rows</p></div></div>
       <div className="table-wrap">
-        <table>
-          <thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
+        <table className="w-full">
+          <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-sm shadow-sm"><tr>{headers.map((header) => <th key={header} className="sticky top-0 bg-slate-900/95">{header}</th>)}</tr></thead>
           <tbody>
-            {rows.map((row, index) => <tr key={`${title}-${index}`}>{row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}</tr>)}
+            {rows.map((row, index) => <tr key={`${title}-${index}`}>{row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`} className="font-bold text-white">{cell}</td>)}</tr>)}
             {rows.length === 0 && <tr><td colSpan={headers.length}>No Jazz Load rows yet.</td></tr>}
           </tbody>
+          {totals && totals.length > 0 && rows.length > 0 && (
+            <tfoot>
+              <tr className="border-t-2 border-slate-700 bg-slate-900/90 font-bold text-white">
+                {totals.map((cell, cellIndex) => (
+                  <td key={`${title}-total-${cellIndex}`} className="py-2.5 font-bold text-emerald-300">
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </section>

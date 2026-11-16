@@ -49,6 +49,7 @@ export type ExpenseItem = {
   amount: number;
   categoryId?: string;
   category?: string;
+  idempotencyKey?: string;
 };
 
 export type CommissionItem = {
