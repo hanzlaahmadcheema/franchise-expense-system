@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 export interface LedgerUser { uid: string; email?: string | null; displayName?: string | null; }
-import { BarChart3, CalendarDays, Check, ChevronDown, ChevronRight, FileDown, FileSpreadsheet, GripVertical, Pencil, Printer, Save, Settings, Trash2, X, PlusCircle, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History, Table, User, Search, ChevronLeft, Maximize2 } from "lucide-react";
+import { BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Plus, PlusCircle, Printer, Save, Settings, Trash2, X, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History, Table, User, Search, Maximize2 } from "lucide-react";
 import type { UserRole, SystemAuditLog } from "../../../types/ledger";
 import { subscribeAuditLogs } from "../../../lib/auditLogService";
 import type { SyncState } from "../../../lib/syncStatus";
@@ -367,320 +367,6 @@ function stockCarryForwardWarnings(
   return warnings;
 }
 
-function SettingsTable({
-  title,
-  kind,
-  canEdit,
-  rows,
-  onSave,
-  onDelete,
-  onReorder
-}: {
-  title: string;
-  kind: "product" | "account";
-  canEdit: boolean;
-  rows: Array<StockProduct | StockAccountProfile>;
-  onSave: (row: any) => void | Promise<any>;
-  onDelete: (id: string) => void;
-  onReorder: (before: Array<StockProduct | StockAccountProfile>, after: Array<StockProduct | StockAccountProfile>) => void;
-}) {
-  const [draft, setDraft] = useState({
-    name: "",
-    rate: 0,
-    type: "CCR" as StockAccountType,
-    order: rows.length + 1,
-    paymentTracking: true
-  });
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [displayRows, setDisplayRows] = useState(rows);
-  const draggedIdRef = useRef<string | null>(null);
-  const [editDraft, setEditDraft] = useState<{
-    name: string;
-    rate: number;
-    type: StockAccountType;
-    order: number;
-    paymentTracking: boolean;
-  } | null>(null);
-  useEffect(() => setDisplayRows(rows), [rows]);
-
-  function handleDrop(overId: string) {
-    const activeId = draggedIdRef.current;
-    draggedIdRef.current = null;
-    if (!canEdit || !activeId || activeId === overId) return;
-    const reordered = applySortOrder(reorderItems(displayRows, activeId, overId)).map((row) => ({
-      ...row,
-      displayOrder: row.sortOrder ?? row.displayOrder
-    }));
-    setDisplayRows(reordered);
-    onReorder(displayRows, reordered);
-  }
-
-  return (
-    <section className="panel">
-      <div className="panel-title">
-        <div>
-          <h2>{title}</h2>
-          <p>Managed separately for the Stock Ledger module.</p>
-        </div>
-        <Settings />
-      </div>
-      {canEdit && (
-        <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-4 md:items-end">
-          <label className="md:col-span-2">
-            Name
-            <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
-          </label>
-          {kind === "product" && (
-            <label>
-              Rate
-              <NumberInput value={draft.rate} onChange={(rate) => setDraft((current) => ({ ...current, rate }))} />
-            </label>
-          )}
-          {kind === "account" && (
-            <label>
-              Type
-              <select value={draft.type} onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value as StockAccountType }))}>
-                <option value="CCR">CCR</option>
-                <option value="DO">DO</option>
-                <option value="DSO">DSO</option>
-                <option value="STOCK">Stock Account</option>
-                <option value="OTHER">Other</option>
-              </select>
-            </label>
-          )}
-          {kind === "product" && (
-            <label className="flex items-end gap-2 pb-2">
-              <input
-                type="checkbox"
-                checked={draft.paymentTracking}
-                onChange={(event) => setDraft((current) => ({ ...current, paymentTracking: event.target.checked }))}
-              />
-              <span>Payment tracking</span>
-            </label>
-          )}
-          <button
-            className="btn-primary"
-            disabled={!draft.name.trim()}
-            onClick={async () => {
-              const id = slug(draft.name);
-              const nextOrder = displayRows.length + 1;
-              const base = {
-                id,
-                name: draft.name.trim(),
-                active: true,
-                displayOrder: nextOrder,
-                sortOrder: nextOrder,
-                createdBy: "",
-                createdAt: Date.now(),
-                updatedAt: Date.now()
-              };
-              try {
-                if (kind === "product") {
-                  await onSave({
-                    ...base,
-                    rate: draft.rate,
-                    paymentTrackingEnabled: draft.paymentTracking
-                  } as StockProduct);
-                } else {
-                  await onSave({ ...base, type: draft.type, openingBalance: 0 } as StockAccountProfile);
-                }
-                setDraft({ name: "", rate: 0, type: "CCR", order: nextOrder + 1, paymentTracking: true });
-              } catch {}
-            }}
-          >
-            Add
-          </button>
-        </div>
-      )}
-      <div className="table-wrap">
-        <table className="table-compact w-full">
-          <thead>
-            <tr>
-              {canEdit && <th>Move</th>}
-              <th>Name</th>
-              {kind === "product" && <th>Rate</th>}
-              {kind === "product" && <th>Payment</th>}
-              {kind === "account" && <th>Type</th>}
-              <th>Order</th>
-              <th>Status</th>
-              {canEdit && <th>Actions</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {displayRows.map((row) => {
-              const isEditing = editingId === row.id;
-              return (
-                <tr
-                  key={row.id}
-                  draggable={canEdit}
-                  onDragStart={() => { draggedIdRef.current = row.id; }}
-                  onDragOver={(event: DragEvent<HTMLTableRowElement>) => event.preventDefault()}
-                  onDrop={() => handleDrop(row.id)}
-                >
-                  {canEdit && (
-                    <td>
-                      <button className="btn-secondary !h-8 !w-8 !px-0 cursor-grab" type="button" title="Drag to reorder">
-                        <GripVertical className="h-4 w-4" />
-                      </button>
-                    </td>
-                  )}
-                  <td>
-                    {isEditing ? (
-                      <input
-                        value={editDraft?.name ?? ""}
-                        onChange={(e) => setEditDraft((curr) => curr ? { ...curr, name: e.target.value } : null)}
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white"
-                      />
-                    ) : (
-                      row.name
-                    )}
-                  </td>
-                  {kind === "product" && (
-                    <td>
-                      {isEditing ? (
-                        <NumberInput
-                          value={editDraft?.rate ?? 0}
-                          onChange={(rate) => setEditDraft((curr) => curr ? { ...curr, rate } : null)}
-                        />
-                      ) : (
-                        formatMoney((row as StockProduct).rate)
-                      )}
-                    </td>
-                  )}
-                  {kind === "product" && (
-                    <td>
-                      {isEditing ? (
-                        <input
-                          type="checkbox"
-                          checked={editDraft?.paymentTracking ?? false}
-                          onChange={(event) => setEditDraft((curr) => curr ? { ...curr, paymentTracking: event.target.checked } : null)}
-                        />
-                      ) : (
-                        (row as StockProduct).paymentTrackingEnabled !== false ? "Enabled" : "Off"
-                      )}
-                    </td>
-                  )}
-                  {kind === "account" && (
-                    <td>
-                      {isEditing ? (
-                        <select
-                          value={editDraft?.type ?? "CCR"}
-                          onChange={(e) => setEditDraft((curr) => curr ? { ...curr, type: e.target.value as StockAccountType } : null)}
-                          className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white"
-                        >
-                          <option value="CCR">CCR</option>
-                          <option value="DO">DO</option>
-                          <option value="DSO">DSO</option>
-                          <option value="STOCK">Stock Account</option>
-                          <option value="OTHER">Other</option>
-                        </select>
-                      ) : (
-                        (row as StockAccountProfile).type
-                      )}
-                    </td>
-                  )}
-                  <td>
-                    {row.sortOrder ?? row.displayOrder}
-                  </td>
-                  <td>
-                    <button className={row.active ? "btn-chip btn-chip-active" : "btn-chip"} disabled={!canEdit} onClick={() => void onSave({ ...row, active: !row.active })}>
-                      {row.active ? "Active" : "Inactive"}
-                    </button>
-                  </td>
-                  {canEdit && (
-                    <td>
-                      <div className="flex gap-1.5">
-                        {isEditing ? (
-                          <>
-                            <button
-                              className="btn-primary !h-8 !w-8 !px-0 flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white"
-                              title="Save changes"
-                              onClick={async () => {
-                                if (!editDraft || !editDraft.name.trim()) return;
-                                const updated = {
-                                  ...row,
-                                  name: editDraft.name.trim(),
-                                  displayOrder: row.displayOrder,
-                                  sortOrder: row.sortOrder,
-                                  updatedAt: Date.now()
-                                };
-                                if (kind === "product") {
-                                  (updated as StockProduct).rate = editDraft.rate;
-                                  (updated as StockProduct).paymentTrackingEnabled = editDraft.paymentTracking;
-                                } else if (kind === "account") {
-                                  (updated as StockAccountProfile).type = editDraft.type;
-                                }
-                                try {
-                                  await onSave(updated);
-                                  setEditingId(null);
-                                  setEditDraft(null);
-                                } catch {}
-                              }}
-                            >
-                              <Check className="h-4 w-4" />
-                            </button>
-                            <button
-                              className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center"
-                              title="Cancel editing"
-                              onClick={() => {
-                                setEditingId(null);
-                                setEditDraft(null);
-                              }}
-                            >
-                              <X className="h-4 w-4" />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center"
-                              title="Edit item"
-                              onClick={() => {
-                                setEditingId(row.id);
-                                setEditDraft({
-                                  name: row.name,
-                                  order: row.sortOrder ?? row.displayOrder,
-                                  rate: kind === "product" ? (row as StockProduct).rate : 0,
-                                  type: kind === "account" ? (row as StockAccountProfile).type : "CCR",
-                                  paymentTracking: kind === "product" ? (row as StockProduct).paymentTrackingEnabled !== false : false
-                                });
-                              }}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </button>
-                            <button
-                              className="btn-secondary !h-8 !w-8 !px-0 flex items-center justify-center text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/30"
-                              title="Delete item"
-                              onClick={() => {
-                                if (window.confirm(`Are you sure you want to delete "${row.name}" permanently from settings?`)) {
-                                  onDelete(row.id);
-                                }
-                              }}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-            {displayRows.length === 0 && (
-              <tr>
-                <td colSpan={kind === "product" ? (canEdit ? 7 : 5) : canEdit ? 6 : 4}>
-                  No rows configured.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
 export function StockLedgerModule({
   user,
   role,
@@ -724,6 +410,24 @@ export function StockLedgerModule({
   const [prevSummary, setPrevSummary] = useState<StockMonthlySummary | null>(null);
   const [products, setProducts] = useState<StockProduct[]>([]);
   const [accounts, setAccounts] = useState<StockAccountProfile[]>([]);
+
+  // Stock Settings: Unified Master DO Directory & Products State
+  const [doProfiles, setDoProfiles] = useState<any[]>([]);
+  const [newAccountName, setNewAccountName] = useState("");
+  const [newAccountType, setNewAccountType] = useState<StockAccountType>("DO");
+  const [newAccountLine, setNewAccountLine] = useState("");
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [editAccountName, setEditAccountName] = useState("");
+  const [editAccountType, setEditAccountType] = useState<StockAccountType>("DO");
+  const [editAccountLine, setEditAccountLine] = useState("");
+
+  const [newProductName, setNewProductName] = useState("");
+  const [newProductRate, setNewProductRate] = useState<number | string>(0);
+  const [newProductPaymentTracking, setNewProductPaymentTracking] = useState(true);
+  const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  const [editProductName, setEditProductName] = useState("");
+  const [editProductRate, setEditProductRate] = useState<number | string>(0);
+  const [editProductPaymentTracking, setEditProductPaymentTracking] = useState(true);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [entryViewMode, setEntryViewMode] = useState<"sheet" | "focus">("sheet");
   const [activeColumnKey, setActiveColumnKey] = useState<string | null>(null);
@@ -1203,12 +907,16 @@ export function StockLedgerModule({
 
       void (async () => {
         try {
-          const [productsRes, accountsRes, periodsRes, periodData] = await Promise.all([
+          const [productsRes, accountsRes, periodsRes, periodData, doProfilesRes] = await Promise.all([
             ledgerApiClient.catalogs.getStockProducts().catch(() => ({ data: [] })),
             ledgerApiClient.catalogs.getStockAccounts().catch(() => ({ data: [] })),
             ledgerApiClient.periods.list().catch(() => ({ periods: [] })),
-            getAccountingPeriodWithDays(monthId).catch(() => null)
+            getAccountingPeriodWithDays(monthId).catch(() => null),
+            ledgerApiClient.catalogs.getJazzLoadDoProfiles().catch(() => ({ data: [] }))
           ]);
+          if (doProfilesRes?.data) {
+            setDoProfiles(doProfilesRes.data);
+          }
           if (cancelled) return;
 
           const openingStock: Record<string, number | null> = {};
@@ -1264,6 +972,7 @@ export function StockLedgerModule({
             active: a.is_active,
             displayOrder: Number(a.sort_order ?? 0),
             sortOrder: a.sort_order,
+            notes: a.notes ?? undefined,
             createdBy: "system",
             createdAt: Date.now(),
             updatedAt: Date.now()
@@ -2441,7 +2150,8 @@ export function StockLedgerModule({
             name: row.name.trim(),
             type: row.type,
             is_active: row.active ?? true,
-            sort_order: row.sortOrder ?? row.displayOrder
+            sort_order: row.sortOrder ?? row.displayOrder,
+            notes: row.notes ?? null
           });
           const updated = res.data;
           setAccounts((prev) =>
@@ -2468,7 +2178,8 @@ export function StockLedgerModule({
           name: row.name.trim(),
           type: row.type,
           is_active: row.active ?? true,
-          sort_order: row.sortOrder ?? row.displayOrder ?? (accounts.length + 1)
+          sort_order: row.sortOrder ?? row.displayOrder ?? (accounts.length + 1),
+          notes: row.notes ?? null
         });
         const created = res.data;
         const newAccount: StockAccountProfile = {
@@ -2479,6 +2190,7 @@ export function StockLedgerModule({
           active: created.is_active,
           displayOrder: Number(created.sort_order ?? 0),
           sortOrder: created.sort_order,
+          notes: created.notes ?? undefined,
           createdBy: "system",
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -2544,6 +2256,175 @@ export function StockLedgerModule({
       }
     }
     return onQueueWrite(updateStockAccountSortOrder(typedBefore, typedAfter), "Could not reorder stock accounts.");
+  }
+
+  function getAccountLine(account: StockAccountProfile): string {
+    if (account.notes?.startsWith("Line:")) {
+      return account.notes.replace(/^Line:\s*/i, "").trim();
+    }
+    const norm = (s: string) => s.toLowerCase().replace(/^do\s+/, "").replace(/[^a-z0-9]/g, "");
+    const targetNorm = norm(account.name);
+    const matched = doProfiles.find((p) => norm(p.do_name) === targetNorm);
+    return matched?.do_line || account.notes || "—";
+  }
+
+  async function handleSyncWithDoDirectory() {
+    if (!canManageSettings) return;
+    try {
+      const res = await ledgerApiClient.catalogs.getJazzLoadDoProfiles(true);
+      const profiles = res.data || [];
+      if (profiles.length === 0) {
+        onStatus("No DO profiles found in Master DO Directory.");
+        return;
+      }
+      const norm = (s: string) => s.toLowerCase().replace(/^do\s+/, "").replace(/[^a-z0-9]/g, "");
+      const existingNormalized = new Set(accounts.map((a) => norm(a.name)));
+
+      let addedCount = 0;
+      for (const p of profiles) {
+        const normName = norm(p.do_name);
+        if (!existingNormalized.has(normName)) {
+          const accountSlug = (slug(`do-${p.do_name}`) || "do-account").replace(/[^a-z0-9_-]/g, "-");
+          const createdRes = await ledgerApiClient.catalogs.createStockAccount({
+            slug: accountSlug,
+            name: p.do_name,
+            type: "DO",
+            is_active: p.is_active ?? true,
+            sort_order: accounts.length + addedCount + 1,
+            notes: p.do_line ? `Line: ${p.do_line}` : null
+          });
+          const created = createdRes.data;
+          setAccounts((prev) => [
+            ...prev,
+            {
+              id: created.id,
+              name: created.name,
+              type: "DO",
+              openingBalance: 0,
+              active: created.is_active,
+              displayOrder: Number(created.sort_order ?? 0),
+              sortOrder: created.sort_order,
+              notes: created.notes ?? undefined,
+              createdBy: "system",
+              createdAt: Date.now(),
+              updatedAt: Date.now()
+            }
+          ]);
+          existingNormalized.add(normName);
+          addedCount++;
+        }
+      }
+      setDoProfiles(profiles);
+      if (addedCount > 0) {
+        onStatus(`Successfully synced ${addedCount} DO(s) from Master Directory into Stock Accounts!`);
+      } else {
+        onStatus("All DOs from Master Directory are already synchronized.");
+      }
+    } catch (err) {
+      onStatus(err instanceof Error ? err.message : "Failed to sync DOs from Master Directory.");
+    }
+  }
+
+  async function handleMoveAccount(index: number, direction: "up" | "down") {
+    if (!canManageSettings) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= sortedAccounts.length) return;
+    const reordered = [...sortedAccounts];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(targetIndex, 0, moved);
+    const updated = applySortOrder(reordered).map((a) => ({
+      ...a,
+      sortOrder: a.sortOrder ?? a.displayOrder,
+      displayOrder: a.sortOrder ?? a.displayOrder
+    }));
+    await handleReorderStockAccounts(sortedAccounts, updated);
+  }
+
+  async function handleMoveProduct(index: number, direction: "up" | "down") {
+    if (!canManageSettings) return;
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= sortedProducts.length) return;
+    const reordered = [...sortedProducts];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(targetIndex, 0, moved);
+    const updated = applySortOrder(reordered).map((p) => ({
+      ...p,
+      sortOrder: p.sortOrder ?? p.displayOrder,
+      displayOrder: p.sortOrder ?? p.displayOrder
+    }));
+    await handleReorderStockProducts(sortedProducts, updated);
+  }
+
+  async function handleAddAccount() {
+    if (!canManageSettings || !newAccountName.trim()) return;
+    const name = newAccountName.trim();
+    const type = newAccountType;
+    const line = newAccountLine.trim();
+    const nextOrder = accounts.length + 1;
+    await handleSaveStockAccount({
+      id: slug(name),
+      name,
+      type,
+      active: true,
+      displayOrder: nextOrder,
+      sortOrder: nextOrder,
+      notes: line ? `Line: ${line}` : undefined,
+      createdBy: "system",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    } as StockAccountProfile);
+    setNewAccountName("");
+    setNewAccountLine("");
+  }
+
+  async function handleSaveEditAccount(account: StockAccountProfile) {
+    if (!canManageSettings || !editAccountName.trim()) return;
+    const name = editAccountName.trim();
+    const type = editAccountType;
+    const line = editAccountLine.trim();
+    await handleSaveStockAccount({
+      ...account,
+      name,
+      type,
+      notes: line ? `Line: ${line}` : account.notes,
+      updatedAt: Date.now()
+    });
+    setEditingAccountId(null);
+  }
+
+  async function handleAddProduct() {
+    if (!canManageSettings || !newProductName.trim()) return;
+    const name = newProductName.trim();
+    const rate = Number(newProductRate) || 0;
+    const nextOrder = products.length + 1;
+    await handleSaveStockProduct({
+      id: slug(name),
+      name,
+      rate,
+      paymentTrackingEnabled: newProductPaymentTracking,
+      active: true,
+      displayOrder: nextOrder,
+      sortOrder: nextOrder,
+      createdBy: "system",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    } as StockProduct);
+    setNewProductName("");
+    setNewProductRate(0);
+  }
+
+  async function handleSaveEditProduct(product: StockProduct) {
+    if (!canManageSettings || !editProductName.trim()) return;
+    const name = editProductName.trim();
+    const rate = Number(editProductRate) || 0;
+    await handleSaveStockProduct({
+      ...product,
+      name,
+      rate,
+      paymentTrackingEnabled: editProductPaymentTracking,
+      updatedAt: Date.now()
+    });
+    setEditingProductId(null);
   }
 
   const stockAutosaveData = useMemo(
@@ -4309,25 +4190,565 @@ export function StockLedgerModule({
 
       {section === "settings" && (
         canManageSettings ? (
-          <div className="space-y-5">
-            <SettingsTable
-              title="Products"
-              kind="product"
-              canEdit={canManageSettings}
-              rows={sortedProducts}
-              onSave={handleSaveStockProduct}
-              onDelete={handleDeleteStockProduct}
-              onReorder={handleReorderStockProducts}
-            />
-            <SettingsTable
-              title="CCR/DO Accounts"
-              kind="account"
-              canEdit={canManageSettings}
-              rows={sortedAccounts}
-              onSave={handleSaveStockAccount}
-              onDelete={handleDeleteStockAccount}
-              onReorder={handleReorderStockAccounts}
-            />
+          <div className="space-y-6">
+            {/* 1. CCR & DO Dealer Accounts Directory */}
+            <section className="panel">
+              <div className="panel-title border-b border-slate-800 pb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                    <User className="h-4 w-4 text-sky-400" />
+                    Distribution Officers & Accounts Directory
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Central directory for DOs, CCRs, and counters. Synchronized with the Master DO Directory.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs text-slate-400">
+                    Total: <span className="font-semibold text-white">{sortedAccounts.length}</span> ({sortedAccounts.filter((a) => a.active).length} active)
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary flex items-center gap-1.5 text-xs text-sky-400 hover:text-sky-300 hover:border-sky-500/40"
+                    onClick={handleSyncWithDoDirectory}
+                    title="Import / link any missing DOs from Jazz Load DO Directory"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Sync with Master DO Directory
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Add Account Bar */}
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Add Account / Distribution Officer
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.5fr_1fr_1.2fr_auto] sm:items-end">
+                  <label className="text-xs font-medium text-slate-300">
+                    Account / Officer Name
+                    <input
+                      type="text"
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                      placeholder="e.g. Naveed Bangla"
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-300">
+                    Account Type
+                    <select
+                      value={newAccountType}
+                      onChange={(e) => setNewAccountType(e.target.value as StockAccountType)}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                    >
+                      <option value="DO">DO (Distribution Officer)</option>
+                      <option value="CCR">CCR (Customer Care Rep)</option>
+                      <option value="DSO">DSO (Direct Sales Officer)</option>
+                      <option value="STOCK">Stock Counter</option>
+                      <option value="OTHER">Other Party</option>
+                    </select>
+                  </label>
+                  <label className="text-xs font-medium text-slate-300">
+                    Line / MSISDN (Optional)
+                    <input
+                      type="text"
+                      value={newAccountLine}
+                      onChange={(e) => setNewAccountLine(e.target.value)}
+                      placeholder="e.g. 03001234567"
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-primary flex items-center justify-center gap-1.5 !h-9 text-xs"
+                    disabled={!newAccountName.trim()}
+                    onClick={handleAddAccount}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Add Account
+                  </button>
+                </div>
+              </div>
+
+              {/* Compact Accounts Table */}
+              <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/40">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-900/80 font-semibold text-slate-300">
+                      <th className="w-16 px-2.5 py-2 text-center">#</th>
+                      <th className="px-3 py-2">Account Name</th>
+                      <th className="w-28 px-3 py-2">Type</th>
+                      <th className="w-40 px-3 py-2">Linked Jazz Line</th>
+                      <th className="w-24 px-3 py-2 text-center">Status</th>
+                      <th className="w-48 px-3 py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {sortedAccounts.map((account, idx) => {
+                      const isEditing = editingAccountId === account.id;
+                      const line = getAccountLine(account);
+                      return (
+                        <tr
+                          key={account.id}
+                          className={`transition-colors hover:bg-slate-900/40 ${
+                            !account.active ? "opacity-60 bg-slate-950/30" : ""
+                          }`}
+                        >
+                          {/* Order & Reorder arrows */}
+                          <td className="px-2 py-1.5 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <span className="w-4 text-center font-mono text-slate-400">{idx + 1}</span>
+                              <div className="flex flex-col">
+                                <button
+                                  type="button"
+                                  disabled={idx === 0}
+                                  onClick={() => handleMoveAccount(idx, "up")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move up"
+                                >
+                                  <ChevronUp className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={idx === sortedAccounts.length - 1}
+                                  onClick={() => handleMoveAccount(idx, "down")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move down"
+                                >
+                                  <ChevronDown className="h-3 w-3" />
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+
+                          {/* Account Name */}
+                          <td className="px-3 py-1.5">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={editAccountName}
+                                onChange={(e) => setEditAccountName(e.target.value)}
+                                className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                                autoFocus
+                              />
+                            ) : (
+                              <div className="font-semibold text-white">
+                                {account.name}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Type */}
+                          <td className="px-3 py-1.5">
+                            {isEditing ? (
+                              <select
+                                value={editAccountType}
+                                onChange={(e) => setEditAccountType(e.target.value as StockAccountType)}
+                                className="rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              >
+                                <option value="DO">DO</option>
+                                <option value="CCR">CCR</option>
+                                <option value="DSO">DSO</option>
+                                <option value="STOCK">STOCK</option>
+                                <option value="OTHER">OTHER</option>
+                              </select>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] font-semibold border ${
+                                  account.type === "DO"
+                                    ? "bg-sky-500/10 text-sky-400 border-sky-500/20"
+                                    : account.type === "CCR"
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                    : account.type === "DSO"
+                                    ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20"
+                                    : "bg-slate-800 text-slate-300 border-slate-700"
+                                }`}
+                              >
+                                {account.type}
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Line / MSISDN */}
+                          <td className="px-3 py-1.5">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={editAccountLine}
+                                onChange={(e) => setEditAccountLine(e.target.value)}
+                                placeholder="e.g. 03001234567"
+                                className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              />
+                            ) : (
+                              <span className="font-mono text-slate-300">
+                                {line !== "—" ? line : <span className="italic text-slate-500">—</span>}
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Status */}
+                          <td className="px-3 py-1.5 text-center">
+                            {account.active ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                                Active
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
+                                <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
+                                Inactive
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Actions */}
+                          <td className="px-3 py-1.5 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {isEditing ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-primary !h-7 !px-2.5 text-xs flex items-center gap-1"
+                                    onClick={() => handleSaveEditAccount(account)}
+                                    disabled={!editAccountName.trim()}
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                    Save
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                    onClick={() => setEditingAccountId(null)}
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                    onClick={() => {
+                                      setEditingAccountId(account.id);
+                                      setEditAccountName(account.name);
+                                      setEditAccountType(account.type);
+                                      setEditAccountLine(line !== "—" ? line : "");
+                                    }}
+                                    title="Edit Account"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`btn-secondary !h-7 !px-2 text-xs ${
+                                      account.active ? "text-slate-400 hover:text-amber-300" : "text-emerald-400 hover:text-emerald-300"
+                                    }`}
+                                    onClick={() => handleSaveStockAccount({ ...account, active: !account.active })}
+                                    title={account.active ? "Deactivate Account" : "Activate Account"}
+                                  >
+                                    {account.active ? "Deactivate" : "Activate"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !w-7 !p-0 text-rose-400 hover:text-rose-300 hover:border-rose-500/40"
+                                    onClick={() => {
+                                      if (window.confirm(`Deactivate account "${account.name}"?`)) {
+                                        handleDeleteStockAccount(account.id);
+                                      }
+                                    }}
+                                    title="Delete / Deactivate Account"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 mx-auto" />
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {sortedAccounts.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-slate-500">
+                          No accounts found. Click &quot;Sync with Master DO Directory&quot; or add an account above.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {/* 2. Stock Products Catalog */}
+            <section className="panel">
+              <div className="panel-title border-b border-slate-800 pb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                    <Box className="h-4 w-4 text-emerald-400" />
+                    Stock Products Catalog
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Manage inventory product rates, units, and company payment tracking definitions.
+                  </p>
+                </div>
+                <div className="text-xs text-slate-400">
+                  Total Items: <span className="font-semibold text-white">{sortedProducts.length}</span> ({sortedProducts.filter((p) => p.active).length} active)
+                </div>
+              </div>
+
+              {/* Quick Add Product Bar */}
+              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Add Stock Product
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.5fr_1fr_auto_auto] sm:items-end">
+                  <label className="text-xs font-medium text-slate-300">
+                    Product Name
+                    <input
+                      type="text"
+                      value={newProductName}
+                      onChange={(e) => setNewProductName(e.target.value)}
+                      placeholder="e.g. Prepaid SIM"
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-300">
+                    Unit Rate (Rs.)
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={newProductRate}
+                      onChange={(e) => setNewProductRate(e.target.value === "" ? "" : Number(e.target.value))}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 pb-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newProductPaymentTracking}
+                      onChange={(e) => setNewProductPaymentTracking(e.target.checked)}
+                      className="rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-0"
+                    />
+                    <span>Track in Company Payable</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-primary flex items-center justify-center gap-1.5 !h-9 text-xs"
+                    disabled={!newProductName.trim()}
+                    onClick={handleAddProduct}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Add Product
+                  </button>
+                </div>
+              </div>
+
+              {/* Compact Products Table */}
+              <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/40">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-900/80 font-semibold text-slate-300">
+                      <th className="w-16 px-2.5 py-2 text-center">#</th>
+                      <th className="px-3 py-2">Product Name</th>
+                      <th className="w-36 px-3 py-2 text-right">Unit Rate (Rs.)</th>
+                      <th className="w-36 px-3 py-2 text-center">Payment Tracking</th>
+                      <th className="w-24 px-3 py-2 text-center">Status</th>
+                      <th className="w-48 px-3 py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {sortedProducts.map((product, idx) => {
+                      const isEditing = editingProductId === product.id;
+                      return (
+                        <tr
+                          key={product.id}
+                          className={`transition-colors hover:bg-slate-900/40 ${
+                            !product.active ? "opacity-60 bg-slate-950/30" : ""
+                          }`}
+                        >
+                          {/* Order & Reorder arrows */}
+                          <td className="px-2 py-1.5 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <span className="w-4 text-center font-mono text-slate-400">{idx + 1}</span>
+                              <div className="flex flex-col">
+                                <button
+                                  type="button"
+                                  disabled={idx === 0}
+                                  onClick={() => handleMoveProduct(idx, "up")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move up"
+                                >
+                                  <ChevronUp className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={idx === sortedProducts.length - 1}
+                                  onClick={() => handleMoveProduct(idx, "down")}
+                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
+                                  title="Move down"
+                                >
+                                  <ChevronDown className="h-3 w-3" />
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+
+                          {/* Product Name */}
+                          <td className="px-3 py-1.5">
+                            {isEditing ? (
+                              <input
+                                type="text"
+                                value={editProductName}
+                                onChange={(e) => setEditProductName(e.target.value)}
+                                className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                                autoFocus
+                              />
+                            ) : (
+                              <div className="font-semibold text-white">
+                                {product.name}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Unit Rate */}
+                          <td className="px-3 py-1.5 text-right">
+                            {isEditing ? (
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={editProductRate}
+                                onChange={(e) => setEditProductRate(e.target.value === "" ? "" : Number(e.target.value))}
+                                className="w-28 rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-right text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                              />
+                            ) : (
+                              <span className="font-mono text-slate-200">
+                                {formatMoney(product.rate)}
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Payment Tracking */}
+                          <td className="px-3 py-1.5 text-center">
+                            {isEditing ? (
+                              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={editProductPaymentTracking}
+                                  onChange={(e) => setEditProductPaymentTracking(e.target.checked)}
+                                  className="rounded border-slate-700 bg-slate-900 text-sky-500"
+                                />
+                                <span className="text-[11px] text-slate-300">Tracked</span>
+                              </label>
+                            ) : (
+                              product.paymentTrackingEnabled !== false ? (
+                                <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                                  Tracked
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
+                                  Off
+                                </span>
+                              )
+                            )}
+                          </td>
+
+                          {/* Status */}
+                          <td className="px-3 py-1.5 text-center">
+                            {product.active ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                                Active
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
+                                <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
+                                Inactive
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Actions */}
+                          <td className="px-3 py-1.5 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {isEditing ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-primary !h-7 !px-2.5 text-xs flex items-center gap-1"
+                                    onClick={() => handleSaveEditProduct(product)}
+                                    disabled={!editProductName.trim()}
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                    Save
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                    onClick={() => setEditingProductId(null)}
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
+                                    onClick={() => {
+                                      setEditingProductId(product.id);
+                                      setEditProductName(product.name);
+                                      setEditProductRate(product.rate);
+                                      setEditProductPaymentTracking(product.paymentTrackingEnabled !== false);
+                                    }}
+                                    title="Edit Product"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`btn-secondary !h-7 !px-2 text-xs ${
+                                      product.active ? "text-slate-400 hover:text-amber-300" : "text-emerald-400 hover:text-emerald-300"
+                                    }`}
+                                    onClick={() => handleSaveStockProduct({ ...product, active: !product.active })}
+                                    title={product.active ? "Deactivate Product" : "Activate Product"}
+                                  >
+                                    {product.active ? "Deactivate" : "Activate"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn-secondary !h-7 !w-7 !p-0 text-rose-400 hover:text-rose-300 hover:border-rose-500/40"
+                                    onClick={() => {
+                                      if (window.confirm(`Deactivate product "${product.name}"?`)) {
+                                        handleDeleteStockProduct(product.id);
+                                      }
+                                    }}
+                                    title="Delete / Deactivate Product"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5 mx-auto" />
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {sortedProducts.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-slate-500">
+                          No stock products found. Add a product above.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         ) : (
           <section className="panel">

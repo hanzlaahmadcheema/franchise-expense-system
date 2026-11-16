@@ -30,6 +30,7 @@ export type StockAccountProfile = {
   sortOrder?: number;
   openingBalance?: number;
   notes?: string;
+  line?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt: number;

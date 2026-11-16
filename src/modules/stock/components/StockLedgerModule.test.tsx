@@ -243,4 +243,23 @@ describe("StockLedgerModule Redesign", () => {
     const settingsTab = screen.getByRole("button", { name: /Products & Accounts/i });
     expect(settingsTab.hasAttribute("disabled")).toBe(true);
   });
+
+  it("renders unified Distribution Officers & Accounts Directory and Stock Products Catalog for owner role", () => {
+    renderModule("owner");
+
+    const settingsTab = screen.getByRole("button", { name: /Products & Accounts/i });
+    expect(settingsTab.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(settingsTab);
+
+    // Verify Distribution Officers & Accounts Directory
+    expect(screen.getByText(/Distribution Officers & Accounts Directory/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Sync with Master DO Directory/i })).toBeDefined();
+    expect(screen.getByPlaceholderText(/e\.g\. Naveed Bangla/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Add Account/i })).toBeDefined();
+
+    // Verify Stock Products Catalog
+    expect(screen.getByText(/Stock Products Catalog/i)).toBeDefined();
+    expect(screen.getByPlaceholderText(/e\.g\. Prepaid SIM/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Add Product/i })).toBeDefined();
+  });
 });
