@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, CalendarDays, Maximize2, X } from "lucide-react";
 import type { ModuleKey, UniversalDaySnapshot, UniversalDayStatus } from "../types/dayControl.types";
 import { calendarCells, daysInMonth, statusChipClass, statusLabel } from "../services/dayStatusService";
@@ -31,9 +32,8 @@ function statusDotClass(status: UniversalDayStatus) {
 }
 
 function selectedCellClass(status: UniversalDayStatus) {
-  if (status === "reopen") return "border-amber-400 bg-amber-400/20 text-amber-200 ring-2 ring-amber-400/40 font-bold";
-  if (status === "closed") return "border-slate-600 bg-slate-800/80 text-slate-400 ring-2 ring-slate-600/40 font-bold";
-  return "border-emerald-400 bg-emerald-400/20 text-emerald-100 ring-2 ring-emerald-400/40 font-bold";
+  void status;
+  return "border-blue-500 bg-blue-500/20 text-blue-100 ring-2 ring-blue-400 shadow-md shadow-blue-500/20 font-bold";
 }
 
 function unselectedCellClass(status: UniversalDayStatus) {
@@ -161,7 +161,7 @@ export function UniversalCalendar({
                     {future ? "Future" : label}
                   </span>
                 )}
-                {selected && !mini && <span className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">Selected</span>}
+                {selected && !mini && <span className="mt-1 text-[10px] uppercase tracking-wide text-blue-300 font-bold">Selected</span>}
               </button>
             );
           })}
@@ -197,7 +197,7 @@ export function UniversalCalendar({
                     {label}
                   </span>
                 )}
-                {selected && !mini && <span className="text-[9px] uppercase tracking-wide text-slate-400">Selected</span>}
+                {selected && !mini && <span className="text-[9px] uppercase tracking-wide text-blue-300 font-bold">Selected</span>}
               </button>
             </div>
           );
@@ -205,144 +205,152 @@ export function UniversalCalendar({
       </div>
 
       {/* Centered Expanded Calendar Pop-up Modal */}
-      {isExpanded && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Expanded Operational Calendar"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setIsExpanded(false);
-          }}
-        >
-          <div className="relative w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/90">
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
-                  <CalendarDays className="h-5 w-5" />
-                </span>
-                <div>
-                  <h3 className="text-base font-bold text-white tracking-tight">
-                    {formatMonthLong(monthId)} · Operational Calendar
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Days of the week with Sunday at last. Click any day to switch records.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsExpanded(false)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition"
-                title="Close Calendar"
-                aria-label="Close Calendar"
+      {isExpanded &&
+        (typeof document !== "undefined"
+          ? createPortal(
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Expanded Operational Calendar"
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto animate-in fade-in duration-150"
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setIsExpanded(false);
+                }}
               >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
+                <div className="relative w-full max-w-2xl rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/90 my-auto">
+                  {/* Header */}
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+                    <div className="flex items-center gap-3">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                        <CalendarDays className="h-5 w-5" />
+                      </span>
+                      <div>
+                        <h3 className="text-base font-bold text-white tracking-tight">
+                          {formatMonthLong(monthId)} · Operational Calendar
+                        </h3>
+                        <p className="text-xs text-slate-400">
+                          Days of the week with Sunday at last. Click any day to switch records.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsExpanded(false)}
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+                      title="Close Calendar"
+                      aria-label="Close Calendar"
+                    >
+                      <X className="h-5 w-5" />
+                    </button>
+                  </div>
 
-            {/* Status Color Legend */}
-            <div className="flex flex-wrap items-center gap-4 text-xs mb-4 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Status Legend:</span>
-              <div className="flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-                <span className="text-emerald-300 font-medium">Open (Green)</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
-                <span className="text-amber-300 font-medium">Re-opened (Orange/Yellow)</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-full bg-slate-600" />
-                <span className="text-slate-400 font-medium">Closed (Disabled)</span>
-              </div>
-            </div>
+                  {/* Status Color Legend */}
+                  <div className="flex flex-wrap items-center gap-4 text-xs mb-4 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Status Legend:</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                      <span className="text-emerald-300 font-medium">Open (Green)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                      <span className="text-amber-300 font-medium">Re-opened (Orange/Yellow)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-slate-600" />
+                      <span className="text-slate-400 font-medium">Closed (Disabled)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-blue-500 ring-2 ring-blue-400/50" />
+                      <span className="text-blue-300 font-medium">Selected (Blue)</span>
+                    </div>
+                  </div>
 
-            {/* Weekdays row with Sunday at last */}
-            <div className="grid grid-cols-7 gap-2 text-center text-xs font-bold uppercase text-slate-400 mb-2">
-              {weekdays.map((day, idx) => (
-                <span key={day} className={idx === 6 ? "text-amber-400/90 font-extrabold" : ""}>
-                  {day}
-                </span>
-              ))}
-            </div>
+                  {/* Weekdays row with Sunday at last */}
+                  <div className="grid grid-cols-7 gap-2 text-center text-xs font-bold uppercase text-slate-400 mb-2">
+                    {weekdays.map((day, idx) => (
+                      <span key={day} className={idx === 6 ? "text-amber-400/90 font-extrabold" : ""}>
+                        {day}
+                      </span>
+                    ))}
+                  </div>
 
-            {/* Modal Calendar Grid */}
-            <div className="grid grid-cols-7 gap-2">
-              {calendarCells(monthId).map((cell, index) => {
-                if (cell.dayNo == null) {
-                  return <div key={`modal-empty-${index}`} className="h-16 rounded-xl bg-slate-950/20 border border-transparent" aria-hidden="true" />;
-                }
-                const snapshot = dayByNo.get(cell.dayNo);
-                const status = snapshot?.status ?? fallbackStatus(monthId, cell.dayNo, now);
-                const future = snapshot?.future ?? false;
-                const selected = selectedDay === cell.dayNo;
-                const label = statusLabel(status);
+                  {/* Modal Calendar Grid */}
+                  <div className="grid grid-cols-7 gap-2">
+                    {calendarCells(monthId).map((cell, index) => {
+                      if (cell.dayNo == null) {
+                        return <div key={`modal-empty-${index}`} className="h-16 rounded-xl bg-slate-950/20 border border-transparent" aria-hidden="true" />;
+                      }
+                      const snapshot = dayByNo.get(cell.dayNo);
+                      const status = snapshot?.status ?? fallbackStatus(monthId, cell.dayNo, now);
+                      const future = snapshot?.future ?? false;
+                      const selected = selectedDay === cell.dayNo;
+                      const label = statusLabel(status);
 
-                return (
-                  <button
-                    key={`modal-day-${cell.dayNo}`}
-                    type="button"
-                    disabled={disabled || future}
-                    onClick={() => {
-                      onSelect(cell.dayNo!);
-                      setIsExpanded(false);
-                    }}
-                    className={[
-                      "h-16 flex-col rounded-xl border p-2 text-xs font-semibold flex items-center justify-center transition shadow-sm",
-                      future
-                        ? futureCellClass(selected)
-                        : selected
-                          ? selectedCellClass(status)
-                          : unselectedCellClass(status),
-                      future ? "cursor-not-allowed opacity-50" : ""
-                    ].join(" ")}
-                    title={future ? snapshot?.disabledReason ?? "Future days are disabled." : snapshot?.disabledReason ?? `${snapshot?.dateLabel ?? `Day ${cell.dayNo}`} - ${label}`}
-                  >
-                    <span className="text-sm font-bold">{cell.dayNo}</span>
-                    <span className={`mt-1 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${future ? "bg-slate-800 text-slate-500" : statusChipClass(status)}`}>
-                      {future ? "Future" : label}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+                      return (
+                        <button
+                          key={`modal-day-${cell.dayNo}`}
+                          type="button"
+                          disabled={disabled || future}
+                          onClick={() => {
+                            onSelect(cell.dayNo!);
+                            setIsExpanded(false);
+                          }}
+                          className={[
+                            "h-16 flex-col rounded-xl border p-2 text-xs font-semibold flex items-center justify-center transition shadow-sm",
+                            future
+                              ? futureCellClass(selected)
+                              : selected
+                                ? selectedCellClass(status)
+                                : unselectedCellClass(status),
+                            future ? "cursor-not-allowed opacity-50" : ""
+                          ].join(" ")}
+                          title={future ? snapshot?.disabledReason ?? "Future days are disabled." : snapshot?.disabledReason ?? `${snapshot?.dateLabel ?? `Day ${cell.dayNo}`} - ${label}`}
+                        >
+                          <span className="text-sm font-bold">{cell.dayNo}</span>
+                          <span className={`mt-1 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${future ? "bg-slate-800 text-slate-500" : statusChipClass(status)}`}>
+                            {future ? "Future" : label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-            {/* Day 32 FINAL option */}
-            {showFinal && (() => {
-              const finalSnapshot = dayByNo.get(32);
-              const finalStatus: UniversalDayStatus = finalSnapshot?.status ?? "closed";
-              const selected = selectedDay === 32;
-              const label = statusLabel(finalStatus);
-              return (
-                <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
-                  <span className="text-xs text-slate-400">Month-End Settlement Closing Snapshot</span>
-                  <button
-                    type="button"
-                    className={[
-                      "h-9 inline-flex items-center gap-2 rounded-xl border px-3 text-xs font-semibold transition",
-                      selected ? selectedCellClass(finalStatus) : unselectedCellClass(finalStatus),
-                      disabled || !canSelectFinal || daysInMonth(monthId) < 1 ? "cursor-not-allowed opacity-60" : ""
-                    ].join(" ")}
-                    disabled={disabled || !canSelectFinal || daysInMonth(monthId) < 1}
-                    onClick={() => {
-                      onSelect(32);
-                      setIsExpanded(false);
-                    }}
-                    title={finalSnapshot?.disabledReason ?? `FINAL Month-End Closing Snapshot - ${label}`}
-                  >
-                    <span>{getFinalLabel()} (Day 32)</span>
-                    <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${statusChipClass(finalStatus)}`}>
-                      {label}
-                    </span>
-                  </button>
+                  {/* Day 32 FINAL option */}
+                  {showFinal && (() => {
+                    const finalSnapshot = dayByNo.get(32);
+                    const finalStatus: UniversalDayStatus = finalSnapshot?.status ?? "closed";
+                    const selected = selectedDay === 32;
+                    const label = statusLabel(finalStatus);
+                    return (
+                      <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+                        <span className="text-xs text-slate-400">Month-End Settlement Closing Snapshot</span>
+                        <button
+                          type="button"
+                          className={[
+                            "h-9 inline-flex items-center gap-2 rounded-xl border px-3 text-xs font-semibold transition",
+                            selected ? selectedCellClass(finalStatus) : unselectedCellClass(finalStatus),
+                            disabled || !canSelectFinal || daysInMonth(monthId) < 1 ? "cursor-not-allowed opacity-60" : ""
+                          ].join(" ")}
+                          disabled={disabled || !canSelectFinal || daysInMonth(monthId) < 1}
+                          onClick={() => {
+                            onSelect(32);
+                            setIsExpanded(false);
+                          }}
+                          title={finalSnapshot?.disabledReason ?? `FINAL Month-End Closing Snapshot - ${label}`}
+                        >
+                          <span>{getFinalLabel()} (Day 32)</span>
+                          <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${statusChipClass(finalStatus)}`}>
+                            {label}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+              </div>,
+              document.body
+            )
+          : null)}
     </>
   );
 }

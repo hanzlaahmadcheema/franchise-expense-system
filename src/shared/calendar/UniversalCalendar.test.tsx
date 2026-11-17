@@ -9,7 +9,8 @@ describe("UniversalCalendar Component", () => {
   const mockDays: UniversalDaySnapshot[] = [
     { moduleKey: "stock", monthId: "2026-11", dayNo: 1, status: "open", dateLabel: "2026-11-01", saved: true },
     { moduleKey: "stock", monthId: "2026-11", dayNo: 2, status: "reopen", dateLabel: "2026-11-02", saved: true },
-    { moduleKey: "stock", monthId: "2026-11", dayNo: 3, status: "closed", dateLabel: "2026-11-03", saved: true }
+    { moduleKey: "stock", monthId: "2026-11", dayNo: 3, status: "closed", dateLabel: "2026-11-03", saved: true },
+    { moduleKey: "stock", monthId: "2026-11", dayNo: 4, status: "open", dateLabel: "2026-11-04", saved: true }
   ];
 
   it("lists days of the week at top with Sunday at last (Mon -> Sun)", () => {
@@ -31,7 +32,7 @@ describe("UniversalCalendar Component", () => {
     expect(sunHeaders.length).toBeGreaterThan(0);
   });
 
-  it("applies correct status colors: open green, re-open orange/yellow, close disabled", () => {
+  it("applies correct status colors: fresh open green, selected blue, re-open orange/yellow, close disabled", () => {
     render(
       <UniversalCalendar
         moduleKey="stock"
@@ -44,14 +45,22 @@ describe("UniversalCalendar Component", () => {
       />
     );
 
-    const openDay = screen.getByTitle(/2026-11-01 - Open/i);
-    expect(openDay.className).toContain("border-emerald-400");
+    // Selected day 1 is BLUE
+    const selectedDay1 = screen.getByTitle(/2026-11-01 - Open/i);
+    expect(selectedDay1.className).toContain("border-blue-500");
+    expect(selectedDay1.className).toContain("ring-blue-400");
 
-    const reopenDay = screen.getByTitle(/2026-11-02 - Reopen/i);
-    expect(reopenDay.className).toContain("border-amber-500");
+    // Fresh unselected open day 4 is GREEN
+    const freshOpenDay4 = screen.getByTitle(/2026-11-04 - Open/i);
+    expect(freshOpenDay4.className).toContain("border-emerald-500");
 
-    const closedDay = screen.getByTitle(/2026-11-03 - Closed/i);
-    expect(closedDay.className).toContain("text-slate-500");
+    // Reopen day 2 is ORANGE/YELLOW
+    const reopenDay2 = screen.getByTitle(/2026-11-02 - Reopen/i);
+    expect(reopenDay2.className).toContain("border-amber-500");
+
+    // Closed day 3 is DISABLED (muted slate)
+    const closedDay3 = screen.getByTitle(/2026-11-03 - Closed/i);
+    expect(closedDay3.className).toContain("text-slate-500");
   });
 
   it("provides an Expand button that opens centered modal pop-up with full calendar", () => {
