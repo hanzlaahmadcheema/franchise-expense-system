@@ -1965,7 +1965,7 @@ function AuthPanel({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4 text-slate-100">
+    <main className="flex min-h-screen w-full min-w-[1280px] items-center justify-center bg-slate-950 p-4 text-slate-100">
       <section className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl shadow-black/40">
         <p className="text-xs font-semibold uppercase text-emerald-300">Software</p>
         <h1 className="mt-1 text-2xl font-semibold">Jazz Franchise - 7301</h1>
@@ -4525,7 +4525,7 @@ function App() {
       }}
     >
     <SidebarDayControlsProvider>
-    <main className={`flex min-h-screen flex-col overflow-x-clip ${shellTone}`}>
+    <main className={`flex min-h-screen flex-col overflow-x-auto w-full min-w-[1280px] ${shellTone}`}>
       {loading && <LoadingPopup message={loadingMessage} />}
       <TopActivityProgress active={topActivityActive} label={topActivityLabel} />
       <MasterCalculationRefreshModal
@@ -4783,13 +4783,7 @@ function App() {
         </section>
       )}
       <div className="flex-1 w-full min-w-0">
-        <div
-          className={
-            view === "stock-ledger"
-              ? "w-full min-w-0 px-2 sm:px-4 pb-28 pt-3 lg:pb-8"
-              : "w-full min-w-0 max-w-7xl mx-auto px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8"
-          }
-        >
+        <div className="w-full min-w-0 px-2 sm:px-4 lg:px-6 pb-28 pt-3 lg:pb-8">
           {status && <p className="status">{status}</p>}
           {isMonthCloseRequired && (
             <div

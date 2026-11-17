@@ -60,12 +60,27 @@ html[data-ui-mode="classic"] {
   body,
   #root {
     min-height: 100vh;
+    width: 100%;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -moz-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   body {
     @apply bg-slate-950 text-slate-100 antialiased;
-    overflow-x: hidden;
+    overflow-x: auto;
+    min-width: 1280px;
     font-size: var(--ui-base-font-size);
+    -webkit-text-size-adjust: 100%;
+    -moz-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  #root {
+    min-width: 1280px;
   }
 
   input,

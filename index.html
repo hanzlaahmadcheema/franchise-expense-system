@@ -2,7 +2,34 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta id="app-viewport" name="viewport" content="width=1280, initial-scale=1.0, minimum-scale=0.1, maximum-scale=5.0, user-scalable=yes" />
+    <script>
+      (function () {
+        function setupResponsiveDesktopViewport() {
+          var meta = document.getElementById('app-viewport');
+          if (!meta) return;
+          var targetWidth = 1280;
+          var screenW = (window.screen && window.screen.width) ? window.screen.width : targetWidth;
+          var winW = window.innerWidth || screenW;
+          var minW = Math.min(screenW, winW);
+          if (minW < targetWidth) {
+            var scale = Math.max(0.1, Math.min(1, minW / targetWidth));
+            meta.setAttribute(
+              'content',
+              'width=' + targetWidth + ', initial-scale=' + scale + ', minimum-scale=0.1, maximum-scale=5.0, user-scalable=yes'
+            );
+          } else {
+            meta.setAttribute(
+              'content',
+              'width=device-width, initial-scale=1.0, minimum-scale=0.1, maximum-scale=5.0, user-scalable=yes'
+            );
+          }
+        }
+        setupResponsiveDesktopViewport();
+        window.addEventListener('resize', setupResponsiveDesktopViewport);
+        window.addEventListener('orientationchange', setupResponsiveDesktopViewport);
+      })();
+    </script>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23146c5c'/%3E%3Cpath d='M16 18h32v8H16zm0 13h32v15H16z' fill='white'/%3E%3Cpath d='M23 36h18v4H23z' fill='%23146c5c'/%3E%3C/svg%3E" />
     <title>Franchise Expense System</title>
   </head>
