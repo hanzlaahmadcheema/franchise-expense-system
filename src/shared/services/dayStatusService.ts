@@ -44,7 +44,10 @@ export function calendarCells(monthId: string) {
   const totalDays = daysInMonth(monthId);
   const [yearText, monthText] = monthId.split("-");
   const firstDate = new Date(Number(yearText), Number(monthText) - 1, 1);
-  const cells: Array<{ dayNo: number | null }> = Array.from({ length: firstDate.getDay() }, () => ({ dayNo: null }));
+  // ISO 8601 week: Monday is index 0, Sunday is index 6
+  // JS getDay(): 0 = Sun, 1 = Mon, ..., 6 = Sat
+  const mondayOffset = (firstDate.getDay() + 6) % 7;
+  const cells: Array<{ dayNo: number | null }> = Array.from({ length: mondayOffset }, () => ({ dayNo: null }));
   for (let day = 1; day <= totalDays; day += 1) cells.push({ dayNo: day });
   while (cells.length % 7 !== 0) cells.push({ dayNo: null });
   return cells;
@@ -57,9 +60,9 @@ export function statusLabel(status: UniversalDayStatus) {
 }
 
 export function statusChipClass(status: UniversalDayStatus) {
-  if (status === "reopen") return "bg-blue-400/15 text-blue-200";
-  if (status === "closed") return "bg-red-400/15 text-red-200";
-  return "bg-emerald-400/15 text-emerald-200";
+  if (status === "reopen") return "bg-amber-500/20 text-amber-300 border border-amber-500/30";
+  if (status === "closed") return "bg-slate-800/80 text-slate-500 border border-slate-700/50";
+  return "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
 }
 
 export function resolveUniversalDayStatus(input: {

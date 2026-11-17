@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   Lock,
   LogOut,
+  Maximize2,
   Menu,
   Moon,
   PackageOpen,
@@ -184,6 +185,7 @@ export function AppHeader({
   nextMonthLabel
 }: AppHeaderProps) {
   const [dayPopoverOpen, setDayPopoverOpen] = useState(false);
+  const [expandedCalendarOpen, setExpandedCalendarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const dayPopoverRef = useRef<HTMLDivElement>(null);
@@ -235,6 +237,18 @@ export function AppHeader({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [dayPopoverOpen, userMenuOpen, openDropdown]);
+
+  useEffect(() => {
+    if (!expandedCalendarOpen) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setExpandedCalendarOpen(false);
+        dayButtonRef.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [expandedCalendarOpen]);
 
   function formatMonthLabel(mId: string): string {
     const [year, month] = mId.split("-");
@@ -547,17 +561,51 @@ export function AppHeader({
             {/* Compact Day Switcher Popover */}
             {dayPopoverOpen && onDaySelect && (
               <div
+                ref={dayPopoverRef}
                 role="dialog"
                 aria-label="Day selection calendar"
                 className="fixed sm:absolute top-14 sm:top-11 left-1/2 -translate-x-1/2 z-50 w-[min(calc(100vw-1rem),16rem)] rounded-xl border border-slate-800 bg-slate-900 p-3 shadow-2xl shadow-black/80"
               >
                 <div className="mb-2 flex items-center justify-between border-b border-slate-800 pb-2">
                   <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                    {formatMonthLabel(monthId)} Days
+                    {formatMonthLabel(monthId)}
                   </span>
-                  <span className="text-[11px] text-slate-400">Total {totalDaysInMonth} Days</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-slate-400">{totalDaysInMonth} Days</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDayPopoverOpen(false);
+                        setExpandedCalendarOpen(true);
+                      }}
+                      className="p-1 text-sky-400 hover:text-sky-300 hover:bg-slate-800 rounded transition"
+                      title="Expand calendar into center pop-up"
+                      aria-label="Expand calendar into center pop-up"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
+
+                {/* Weekday headers with Sunday at last */}
+                <div className="grid grid-cols-7 gap-1 text-center text-[10px] font-bold uppercase text-slate-500 mb-1">
+                  {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, idx) => (
+                    <span key={day} className={idx === 6 ? "text-amber-400/80 font-bold" : ""}>
+                      {day}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Grid */}
                 <div className="grid grid-cols-7 gap-1">
+                  {(() => {
+                    const [y, m] = monthId.split("-");
+                    const firstDate = new Date(Number(y), Number(m) - 1, 1);
+                    const mondayOffset = (firstDate.getDay() + 6) % 7;
+                    return Array.from({ length: mondayOffset }, (_, i) => (
+                      <span key={`empty-hdr-${i}`} className="h-7 w-7" aria-hidden="true" />
+                    ));
+                  })()}
                   {Array.from({ length: totalDaysInMonth }, (_, i) => i + 1).map((d) => {
                     const dayInfo = daysState.find((item) => item.dayNo === d);
                     const status = dayInfo?.status ?? "open";
@@ -575,10 +623,10 @@ export function AppHeader({
                           isSelected
                             ? "bg-emerald-500 text-slate-950 ring-2 ring-emerald-400/40 font-bold"
                             : status === "closed"
-                            ? "bg-slate-800/60 text-slate-400 hover:bg-slate-800"
+                            ? "bg-slate-800/50 text-slate-500 border border-slate-700/40 hover:bg-slate-800 hover:text-slate-400"
                             : status === "reopened" || status === "reopen"
-                            ? "bg-amber-500/20 text-amber-300 hover:bg-amber-500/30"
-                            : "bg-slate-950 text-slate-200 hover:bg-slate-800 border border-slate-800/80"
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30"
+                            : "bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20"
                         }`}
                         title={`Day ${d} (${status})`}
                       >
@@ -603,6 +651,143 @@ export function AppHeader({
                   >
                     Day 32 · FINAL Month-End
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Centered Expanded Calendar Modal from Header */}
+            {expandedCalendarOpen && onDaySelect && (
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Expanded Calendar Modal"
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setExpandedCalendarOpen(false);
+                }}
+              >
+                <div className="relative w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-2xl shadow-black/90">
+                  {/* Modal Header */}
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                        <Calendar className="h-4 w-4" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-bold text-white tracking-tight">
+                          {formatMonthLabel(monthId)} · Full Calendar View
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          Days of the week with Sunday at last. Click any day to switch.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedCalendarOpen(false)}
+                      className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+                      title="Close Calendar"
+                      aria-label="Close Calendar"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {/* Status Legend */}
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] mb-3 p-2 rounded-lg bg-slate-950/60 border border-slate-800">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Legend:</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                      <span className="text-emerald-300 font-medium">Open (Green)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-amber-400" />
+                      <span className="text-amber-300 font-medium">Re-opened (Orange/Yellow)</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-slate-600" />
+                      <span className="text-slate-400 font-medium">Closed (Disabled)</span>
+                    </div>
+                  </div>
+
+                  {/* Weekdays */}
+                  <div className="grid grid-cols-7 gap-1.5 text-center text-xs font-bold uppercase text-slate-400 mb-1.5">
+                    {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, idx) => (
+                      <span key={day} className={idx === 6 ? "text-amber-400/90 font-extrabold" : ""}>
+                        {day}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Modal Grid */}
+                  <div className="grid grid-cols-7 gap-1.5">
+                    {(() => {
+                      const [y, m] = monthId.split("-");
+                      const firstDate = new Date(Number(y), Number(m) - 1, 1);
+                      const mondayOffset = (firstDate.getDay() + 6) % 7;
+                      return Array.from({ length: mondayOffset }, (_, i) => (
+                        <div key={`modal-hdr-empty-${i}`} className="h-12 rounded-lg" aria-hidden="true" />
+                      ));
+                    })()}
+                    {Array.from({ length: totalDaysInMonth }, (_, i) => i + 1).map((d) => {
+                      const dayInfo = daysState.find((item) => item.dayNo === d);
+                      const status = dayInfo?.status ?? "open";
+                      const isSelected = d === selectedDay;
+                      return (
+                        <button
+                          key={`modal-hdr-day-${d}`}
+                          type="button"
+                          onClick={() => {
+                            onDaySelect(d);
+                            setExpandedCalendarOpen(false);
+                            dayButtonRef.current?.focus();
+                          }}
+                          className={`h-12 flex-col rounded-lg border p-1 text-xs font-semibold flex items-center justify-center transition ${
+                            isSelected
+                              ? "bg-emerald-500 text-slate-950 ring-2 ring-emerald-400/40 font-bold"
+                              : status === "closed"
+                              ? "border-slate-800/60 bg-slate-950/40 text-slate-500 hover:bg-slate-900/50"
+                              : status === "reopened" || status === "reopen"
+                              ? "border-amber-500/40 bg-amber-500/15 text-amber-200 hover:border-amber-400"
+                              : "border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:border-emerald-400"
+                          }`}
+                          title={`Day ${d} (${status})`}
+                        >
+                          <span className="text-xs font-bold">{d}</span>
+                          <span className={`mt-0.5 px-1 rounded text-[8px] font-bold uppercase ${
+                            status === "closed"
+                              ? "bg-slate-800 text-slate-500"
+                              : status === "reopened" || status === "reopen"
+                              ? "bg-amber-500/20 text-amber-300"
+                              : "bg-emerald-500/20 text-emerald-300"
+                          }`}>
+                            {status}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Day 32 */}
+                  <div className="mt-3 pt-2.5 border-t border-slate-800 flex items-center justify-between">
+                    <span className="text-[11px] text-slate-400">Month-End Settlement</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDaySelect(32);
+                        setExpandedCalendarOpen(false);
+                        dayButtonRef.current?.focus();
+                      }}
+                      className={`h-8 inline-flex items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition ${
+                        selectedDay === 32
+                          ? "bg-emerald-500 text-slate-950 font-bold"
+                          : "bg-purple-500/10 border border-purple-500/30 text-purple-300 hover:bg-purple-500/20"
+                      }`}
+                      title="Day 32 FINAL Settlement"
+                    >
+                      <span>Day 32 · FINAL</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
