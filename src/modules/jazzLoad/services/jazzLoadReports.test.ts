@@ -1,6 +1,15 @@
-import { describe, expect, it } from "vitest";
-import { buildJazzLoadReportSheets } from "./jazzLoadReports";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import * as XLSX from "xlsx";
+import { buildJazzLoadReportSheets, exportJazzLoadXlsx, exportJazzLoadPrintable } from "./jazzLoadReports";
 import type { JazzLoadDay, JazzLoadMonthlySummary } from "../types/jazzLoad.types";
+
+vi.mock("xlsx", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("xlsx")>();
+  return {
+    ...actual,
+    writeFile: vi.fn()
+  };
+});
 
 const summary: JazzLoadMonthlySummary = {
   monthId: "2026-05",
@@ -74,5 +83,45 @@ describe("jazzLoadReports", () => {
     expect(sheets[0].rows).toContainEqual(["Total Issuance Jazz Load", 103]);
     expect(sheets[2].rows).toContainEqual(["A", "-", 0, 100, 50, 50, 1]);
     expect(sheets[3].rows).toContainEqual([1, "A", "-", 0, 0, 100, 103, 50, 50, 51]);
+  });
+
+  it("exports monthly Jazz Load report to XLSX", () => {
+    exportJazzLoadXlsx(summary, days);
+
+    expect(XLSX.writeFile).toHaveBeenCalledTimes(1);
+    const [workbook, fileName] = vi.mocked(XLSX.writeFile).mock.calls[0];
+    expect(fileName).toBe("jazz-load-2026-05.xlsx");
+    expect(workbook.SheetNames).toEqual(["Summary", "Daily", "DO Balances", "Entries"]);
+  });
+
+  it("exports printable Jazz Load report by opening print window without noopener", () => {
+    const mockDoc = {
+      write: vi.fn(),
+      close: vi.fn()
+    };
+    const mockWin = {
+      document: mockDoc,
+      print: vi.fn()
+    };
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(mockWin as unknown as Window);
+
+    exportJazzLoadPrintable(summary);
+
+    expect(openSpy).toHaveBeenCalledWith("", "_blank");
+    expect(mockDoc.write).toHaveBeenCalled();
+    expect(mockDoc.close).toHaveBeenCalled();
+    expect(mockWin.print).toHaveBeenCalled();
+
+    const writtenHtml = mockDoc.write.mock.calls[0][0];
+    expect(writtenHtml).toContain("Jazz Load Report - 2026-05");
+    expect(writtenHtml).toContain("Total Issuance Jazz Load");
+  });
+
+  it("throws clear error when popup is blocked during Jazz Load print export", () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+
+    expect(() => exportJazzLoadPrintable(summary)).toThrow(
+      "Popup blocked. Allow popups to print the report."
+    );
   });
 });

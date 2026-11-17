@@ -5003,6 +5003,8 @@ function App() {
                     onManualSaveReady={(save) => {
                       expenseManualSaveRef.current = save;
                     }}
+                    onExportDailyXlsx={() => computed && runReportExport(() => exportDailyXlsx(computed, selectedDay, selectedDayInput))}
+                    onExportDailyPdf={() => computed && runReportExport(() => exportDailyPdf(computed, selectedDay, selectedDayInput))}
                     isOwner={role === "owner"}
                     monthId={monthId}
                   />

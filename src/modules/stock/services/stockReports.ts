@@ -147,7 +147,7 @@ export function exportStockMonthlyXlsx(summary: StockMonthlySummary, days: Stock
       [],
       ["Day", "Date", "Account", "Qty", "Amount", "Payment", "Carry Forward", "Due", "Notes"],
       ...days.flatMap((day) =>
-        day.entries.map((entry) => [
+        (day.entries ?? []).map((entry) => [
           reportDayLabel(summary.monthId, day.dayNo),
           day.date,
           entry.accountName,
@@ -169,7 +169,8 @@ export function exportStockMonthlyXlsx(summary: StockMonthlySummary, days: Stock
 
 export function exportStockDayXlsx(day: StockDayRecord) {
   const workbook = XLSX.utils.book_new();
-  const products = [...new Map(day.entries.flatMap((entry) => entry.products).map((product) => [product.productId, product])).entries()];
+  const entries = day.entries ?? [];
+  const products = [...new Map(entries.flatMap((entry) => entry.products ?? []).map((product) => [product.productId, product])).entries()];
   const productTracksPayment = (product: (typeof products)[number][1]) => product.paymentTrackingEnabled !== false;
   const productValueColumns = products.reduce((total, [, product]) => total + (productTracksPayment(product) ? 4 : 2), 0);
   const headers = [
@@ -195,10 +196,10 @@ export function exportStockDayXlsx(day: StockDayRecord) {
       [`Generated ${reportDateTime()}`],
       [],
       headers,
-      ...day.entries.map((entry) => [
+      ...entries.map((entry) => [
         entry.accountName,
         ...products.flatMap(([productId, product]) => {
-          const row = entry.products.find((item) => item.productId === productId);
+          const row = (entry.products ?? []).find((item) => item.productId === productId);
           const cells = [money(row?.quantity ?? 0), money(row?.amount ?? 0)];
           if (productTracksPayment(product)) {
             cells.push(money(row?.paymentReceived ?? 0), money(row?.dueBalance ?? 0));
@@ -223,7 +224,7 @@ export function exportStockDayXlsx(day: StockDayRecord) {
 export function exportStockPrintable(summary: StockMonthlySummary, days: StockDayRecord[]) {
   const classic = window.localStorage.getItem("uiMode") === "classic";
   const rows = days.flatMap((day) =>
-    day.entries.map((entry) => `
+    (day.entries ?? []).map((entry) => `
       <tr>
         <td>${reportDayLabel(summary.monthId, day.dayNo)}</td>
         <td>${entry.accountName}</td>
@@ -235,14 +236,14 @@ export function exportStockPrintable(summary: StockMonthlySummary, days: StockDa
       </tr>
     `)
   ).join("");
-  const totals = days.flatMap((day) => day.entries).reduce((acc, entry) => ({
+  const totals = days.flatMap((day) => day.entries ?? []).reduce((acc, entry) => ({
     qty: acc.qty + entry.totalQty,
     amount: acc.amount + entry.totalAmount,
     payment: acc.payment + entry.totalPaymentReceived,
     carry: acc.carry + entry.carryForwardBalance,
     due: acc.due + entry.dueBalance
   }), { qty: 0, amount: 0, payment: 0, carry: 0, due: 0 });
-  const win = window.open("", "_blank", "noopener,noreferrer");
+  const win = window.open("", "_blank");
   if (!win) throw new Error("Popup blocked. Allow popups to print the stock report.");
   const html = `
     <!doctype html>

@@ -3537,6 +3537,30 @@ export function StockLedgerModule({
                 <span>History</span>
               </button>
             </div>
+
+            {/* Export buttons for selected day */}
+            <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                disabled={!selectedDayRecord || monthBootstrapPending}
+                onClick={() => selectedDayRecord && exportStockDayXlsx(selectedDayRecord)}
+                title="Export day stock ledger to Excel"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Export Excel</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                disabled={!selectedDayRecord || monthBootstrapPending}
+                onClick={() => selectedDayRecord && exportStockPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}
+                title="Print or export day stock ledger PDF"
+              >
+                <FileDown className="h-3.5 w-3.5 text-sky-400" />
+                <span>Export PDF</span>
+              </button>
+            </div>
           </div>
 
           {/* Financial Summary Cards */}
@@ -3932,7 +3956,9 @@ export function StockLedgerModule({
                   const link = document.createElement("a");
                   link.href = url;
                   link.download = `stock-backup-${monthId}.json`;
+                  document.body.appendChild(link);
                   link.click();
+                  document.body.removeChild(link);
                   URL.revokeObjectURL(url);
                 }), "Could not export stock backup.")}
               >
@@ -4514,7 +4540,9 @@ export function StockLedgerModule({
                 const link = document.createElement("a");
                 link.href = url;
                 link.download = `stock-backup-${monthId}.json`;
+                document.body.appendChild(link);
                 link.click();
+                document.body.removeChild(link);
                 URL.revokeObjectURL(url);
               }), "Could not export stock backup.")}>Stock JSON Backup</button>
             </div>

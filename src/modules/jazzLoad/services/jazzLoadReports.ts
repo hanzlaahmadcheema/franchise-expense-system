@@ -138,7 +138,7 @@ export function exportJazzLoadPrintable(summary: JazzLoadMonthlySummary) {
         `<tr><td>${row.dayNo}</td><td>${formatCurrency(row.issuanceMl)}</td><td>${formatCurrency(row.paymentBase)}</td><td>${formatCurrency(row.paymentMl)}</td><td>${formatCurrency(row.commission1)}</td><td>${formatCurrency(row.commission2)}</td><td>${formatCurrency(row.commission)}</td></tr>`
     )
     .join("");
-  const win = window.open("", "_blank", "noopener,noreferrer");
+  const win = window.open("", "_blank");
   if (!win) throw new Error("Popup blocked. Allow popups to print the report.");
   win.document.write(`<!doctype html><html><head><title>Jazz Load ${summary.monthId}</title><style>
     body{font-family:Arial,sans-serif;margin:24px;color:#0f172a;font-size:${classic ? "16px" : "14px"}}

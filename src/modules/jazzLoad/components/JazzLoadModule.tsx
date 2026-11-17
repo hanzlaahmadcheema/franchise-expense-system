@@ -3203,6 +3203,30 @@ export function JazzLoadModule({
                 Save Now & Verify
               </button>
             </div>
+
+            {/* Export buttons for selected day */}
+            <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                disabled={!selectedDayRecord}
+                onClick={() => selectedDayRecord && exportJazzLoadXlsx(calculateMonthlySummary(monthId, [selectedDayRecord]), [selectedDayRecord])}
+                title="Export day Jazz Load to Excel"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Export Excel</span>
+              </button>
+              <button
+                type="button"
+                className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                disabled={!selectedDayRecord}
+                onClick={() => selectedDayRecord && exportJazzLoadPrintable(calculateMonthlySummary(monthId, [selectedDayRecord]))}
+                title="Print or export day Jazz Load PDF"
+              >
+                <FileDown className="h-3.5 w-3.5 text-sky-400" />
+                <span>Export PDF</span>
+              </button>
+            </div>
           </div>
 
           {/* 1. Opening Balance */}

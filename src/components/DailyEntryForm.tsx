@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, LoaderCircle, Pencil, Plus, Save, Trash2, X } from "lucide-react";
+import { CheckCircle2, FileDown, FileSpreadsheet, LoaderCircle, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import {
   COMMISSION_CATEGORIES,
   type CatalogItem,
@@ -47,6 +47,8 @@ type Props = {
   onCreateCatalog?: (catalog: "expenseCategories" | "creditParties" | "commissionCategories", item: CatalogItem) => Promise<void>;
   onPendingStateChange?: (pending: boolean) => void;
   onManualSaveReady?: (save: (() => Promise<boolean>) | null) => void;
+  onExportDailyXlsx?: () => void;
+  onExportDailyPdf?: () => void;
   isOwner?: boolean;
   monthId?: string;
 };
@@ -266,6 +268,8 @@ export function DailyEntryForm({
   onCreateCatalog,
   onPendingStateChange,
   onManualSaveReady,
+  onExportDailyXlsx,
+  onExportDailyPdf,
   isOwner,
   monthId
 }: Props) {
@@ -1738,6 +1742,33 @@ export function DailyEntryForm({
               Save Now & Verify
             </button>
           </div>
+
+          {(onExportDailyXlsx || onExportDailyPdf) && (
+            <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+              {onExportDailyXlsx && (
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                  onClick={onExportDailyXlsx}
+                  title="Export day expense report to Excel"
+                >
+                  <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Export Excel</span>
+                </button>
+              )}
+              {onExportDailyPdf && (
+                <button
+                  type="button"
+                  className="btn-secondary !h-8 flex-1 !justify-center text-xs font-semibold flex items-center justify-center gap-1.5 border-slate-700 text-slate-300 hover:text-white shrink-0"
+                  onClick={onExportDailyPdf}
+                  title="Print or export day expense report to PDF"
+                >
+                  <FileDown className="h-3.5 w-3.5 text-sky-400" />
+                  <span>Export PDF</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Financial Summary Cards */}

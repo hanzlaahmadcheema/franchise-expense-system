@@ -154,7 +154,9 @@ export function AuditLogsView({ months, onActivityChange }: Props) {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor);
     anchor.click();
+    document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
   }
 
