@@ -548,4 +548,15 @@ describe("AppHeader Component", () => {
     fireEvent.click(userMenuReopen);
     expect(onToggleMonth).toHaveBeenCalledTimes(3);
   });
+
+  it("renders Dealers navigation item and triggers onNavigate", () => {
+    const onNavigate = vi.fn();
+    render(<AppHeader {...defaultProps} onNavigate={onNavigate} currentView="dashboard" />);
+
+    const dealersBtn = screen.getByRole("button", { name: "Dealers" });
+    expect(dealersBtn).toBeTruthy();
+
+    fireEvent.click(dealersBtn);
+    expect(onNavigate).toHaveBeenCalledWith("dealers");
+  });
 });

@@ -13,6 +13,7 @@ describe("useAppRouter URL System", () => {
       expect(normalizeViewSlug("stock-ledger")).toBe("stock-ledger");
       expect(normalizeViewSlug("jazz-load")).toBe("jazz-load");
       expect(normalizeViewSlug("expense")).toBe("expense");
+      expect(normalizeViewSlug("dealers")).toBe("dealers");
       expect(normalizeViewSlug("users")).toBe("users");
       expect(normalizeViewSlug("backup")).toBe("backup");
       expect(normalizeViewSlug("audit-logs")).toBe("audit-logs");
@@ -27,6 +28,9 @@ describe("useAppRouter URL System", () => {
       expect(normalizeViewSlug("load")).toBe("jazz-load");
       expect(normalizeViewSlug("jazzload")).toBe("jazz-load");
       expect(normalizeViewSlug("expenses")).toBe("expense");
+      expect(normalizeViewSlug("dealer")).toBe("dealers");
+      expect(normalizeViewSlug("dos")).toBe("dealers");
+      expect(normalizeViewSlug("do")).toBe("dealers");
       expect(normalizeViewSlug("audit")).toBe("audit-logs");
     });
 
@@ -43,6 +47,7 @@ describe("useAppRouter URL System", () => {
     });
 
     it("parses simple admin routes", () => {
+      expect(parseRoute("/dealers")).toEqual({ view: "dealers" });
       expect(parseRoute("/users")).toEqual({ view: "users" });
       expect(parseRoute("/backup")).toEqual({ view: "backup" });
       expect(parseRoute("/audit-logs")).toEqual({ view: "audit-logs" });
@@ -198,6 +203,7 @@ describe("useAppRouter URL System", () => {
     });
 
     it("builds admin paths", () => {
+      expect(buildRoutePath({ ...baseState, view: "dealers" })).toBe("/dealers");
       expect(buildRoutePath({ ...baseState, view: "users" })).toBe("/users");
       expect(buildRoutePath({ ...baseState, view: "backup" })).toBe("/backup");
       expect(buildRoutePath({ ...baseState, view: "audit-logs" })).toBe("/audit-logs");

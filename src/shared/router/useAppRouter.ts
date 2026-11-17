@@ -102,6 +102,7 @@ export function normalizeViewSlug(raw: string): View | null {
   if (slug === "stock-ledger" || slug === "stock" || slug === "stockledger") return "stock-ledger";
   if (slug === "jazz-load" || slug === "jazzload" || slug === "load" || slug === "jazz") return "jazz-load";
   if (slug === "expense" || slug === "expenses") return "expense";
+  if (slug === "dealers" || slug === "dealer" || slug === "dos" || slug === "do") return "dealers";
   if (slug === "users" || slug === "user") return "users";
   if (slug === "backup" || slug === "backups") return "backup";
   if (slug === "audit-logs" || slug === "audit" || slug === "auditlogs") return "audit-logs";
@@ -124,7 +125,7 @@ export function parseRoute(pathname: string): ParsedRoute {
   const result: ParsedRoute = { view };
 
   // Simple admin views without date scope
-  if (view === "users" || view === "backup" || view === "audit-logs" || view === "import") {
+  if (view === "dealers" || view === "users" || view === "backup" || view === "audit-logs" || view === "import") {
     return result;
   }
 
@@ -187,6 +188,7 @@ export function parseRoute(pathname: string): ParsedRoute {
 export function buildRoutePath(state: RouteState): string {
   const { view, monthId, selectedDay, expenseSection, jazzLoadSection, stockSection } = state;
 
+  if (view === "dealers") return "/dealers";
   if (view === "users") return "/users";
   if (view === "backup") return "/backup";
   if (view === "audit-logs") return "/audit-logs";

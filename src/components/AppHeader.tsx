@@ -99,7 +99,8 @@ const PRIMARY_NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "expense", label: "Expense", icon: Tags },
   { id: "jazz-load", label: "Jazz Load", icon: FileSpreadsheet },
-  { id: "stock-ledger", label: "Stock Ledger", icon: PackageOpen }
+  { id: "stock-ledger", label: "Stock Ledger", icon: PackageOpen },
+  { id: "dealers", label: "Dealers", icon: Users }
 ];
 
 const EXPENSE_DROPDOWN_OPTIONS = [

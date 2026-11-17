@@ -78,6 +78,7 @@ import { auth, isFirebaseConfigured } from "./lib/firebase";
 import { nextSyncState, syncStatusLabel, type SyncState } from "./lib/syncStatus";
 import { JazzLoadModule, type JazzLoadSection } from "./modules/jazzLoad/components/JazzLoadModule";
 import { StockLedgerModule, type StockSection } from "./modules/stock/components/StockLedgerModule";
+import { DealersManagementPage } from "./components/DealersManagementPage";
 import { UniversalCalendar } from "./shared/calendar/UniversalCalendar";
 import { SidebarDayControlsProvider, SidebarDayControlsSlot } from "./shared/context/SidebarDayControlsContext";
 import { SelectedDateProvider } from "./shared/context/SelectedDateContext";
@@ -153,7 +154,7 @@ import {
 } from "./lib/firestoreService";
 import { applySortOrder, changedSortOrderPatches, reorderItems } from "./shared/services/orderUtils";
 
-export type View = "dashboard" | "expense" | "jazz-load" | "stock-ledger" | "users" | "import" | "backup" | "audit-logs";
+export type View = "dashboard" | "expense" | "jazz-load" | "stock-ledger" | "dealers" | "users" | "import" | "backup" | "audit-logs";
 export type ExpenseSection = "daily-entry" | "previous-records" | "settings" | "expense-categories" | "credit-parties" | "commission-categories";
 
 const ownerOnlyViews = new Set<View>(["users", "import", "backup", "audit-logs"]);
@@ -4140,6 +4141,7 @@ function App() {
     { id: "expense", label: "Expense", icon: Tags, show: true },
     { id: "jazz-load", label: "Jazz Load", icon: FileSpreadsheet, show: true },
     { id: "stock-ledger", label: "Stock Ledger", icon: PackageOpen, show: true },
+    { id: "dealers", label: "Dealers", icon: Users, show: true },
     { id: "users", label: "Users", icon: Users, show: canManageUsers },
     { id: "audit-logs", label: "Audit Logs", icon: ScrollText, show: role === "owner" },
     { id: "import", label: "Excel Import", icon: FileSpreadsheet, show: canUseExcelImport },
@@ -4148,7 +4150,7 @@ function App() {
   const syncLabel = syncStatusLabel(syncState);
   const showOfflineOwnerWarning = syncState === "offline";
   const currentViewLabel = navItems.find((item) => item.id === view)?.label ?? "Dashboard";
-  const mobilePrimaryNav = navItems.filter((item) => item.show).filter((item) => ["dashboard", "expense", "jazz-load", "stock-ledger"].includes(item.id)).slice(0, 4);
+  const mobilePrimaryNav = navItems.filter((item) => item.show).filter((item) => ["dashboard", "expense", "jazz-load", "stock-ledger", "dealers"].includes(item.id)).slice(0, 5);
 
   function navigateTo(nextView: View) {
     if (hasPendingDayChanges && nextView !== view && !confirmLeavePendingChanges()) {
@@ -5157,6 +5159,13 @@ function App() {
               section={stockSection}
               onSectionChange={setStockSection}
               hideOnPageTabs={true}
+            />
+          )}
+
+          {view === "dealers" && (
+            <DealersManagementPage
+              role={role}
+              onStatusChange={setStatus}
             />
           )}
 
