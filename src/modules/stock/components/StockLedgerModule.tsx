@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 export interface LedgerUser { uid: string; email?: string | null; displayName?: string | null; }
-import { BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Plus, PlusCircle, Printer, Save, Settings, Trash2, X, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History, Table, User, Search, Maximize2 } from "lucide-react";
+import { BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Plus, PlusCircle, Printer, Save, Settings, Trash2, Users, X, ArrowUpRight, ArrowDownRight, RefreshCw, Wrench, AlertTriangle, Info, Box, ArrowRightLeft, History, Table, User, Search, Maximize2 } from "lucide-react";
 import type { UserRole, SystemAuditLog } from "../../../types/ledger";
 import { subscribeAuditLogs } from "../../../lib/auditLogService";
 import type { SyncState } from "../../../lib/syncStatus";
@@ -4191,294 +4191,33 @@ export function StockLedgerModule({
       {section === "settings" && (
         canManageSettings ? (
           <div className="space-y-6">
-            {/* 1. CCR & DO Dealer Accounts Directory */}
-            <section className="panel">
-              <div className="panel-title border-b border-slate-800 pb-3 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-semibold text-white flex items-center gap-2">
-                    <User className="h-4 w-4 text-sky-400" />
-                    Distribution Officers & Accounts Directory
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Central directory for DOs, CCRs, and counters. Synchronized with the Master DO Directory.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-xs text-slate-400">
-                    Total: <span className="font-semibold text-white">{sortedAccounts.length}</span> ({sortedAccounts.filter((a) => a.active).length} active)
+            {/* 1. Centralized Accounts & Dealers Directory Banner */}
+            <section className="rounded-xl border border-sky-800/60 bg-sky-950/20 p-5 shadow-lg">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-400">
+                    <Users className="h-5 w-5" />
                   </span>
-                  <button
-                    type="button"
-                    className="btn-secondary flex items-center gap-1.5 text-xs text-sky-400 hover:text-sky-300 hover:border-sky-500/40"
-                    onClick={handleSyncWithDoDirectory}
-                    title="Import / link any missing DOs from Jazz Load DO Directory"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    Sync with Master DO Directory
-                  </button>
+                  <div>
+                    <h3 className="text-sm font-bold text-white tracking-tight">
+                      Distribution Officers & Accounts Directory
+                    </h3>
+                    <p className="mt-0.5 text-xs text-slate-400 max-w-xl">
+                      Distribution Officers, Customer Care Counters (CCRs), and DSOs are now centrally managed in the master Dealers Directory. Changes synchronize automatically across all modules.
+                    </p>
+                  </div>
                 </div>
-              </div>
-
-              {/* Quick Add Account Bar */}
-              <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
-                  Add Account / Distribution Officer
-                </p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1.5fr_1fr_1.2fr_auto] sm:items-end">
-                  <label className="text-xs font-medium text-slate-300">
-                    Account / Officer Name
-                    <input
-                      type="text"
-                      value={newAccountName}
-                      onChange={(e) => setNewAccountName(e.target.value)}
-                      placeholder="e.g. Naveed Bangla"
-                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
-                    />
-                  </label>
-                  <label className="text-xs font-medium text-slate-300">
-                    Account Type
-                    <select
-                      value={newAccountType}
-                      onChange={(e) => setNewAccountType(e.target.value as StockAccountType)}
-                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
-                    >
-                      <option value="DO">DO (Distribution Officer)</option>
-                      <option value="CCR">CCR (Customer Care Rep)</option>
-                      <option value="DSO">DSO (Direct Sales Officer)</option>
-                      <option value="STOCK">Stock Counter</option>
-                      <option value="OTHER">Other Party</option>
-                    </select>
-                  </label>
-                  <label className="text-xs font-medium text-slate-300">
-                    Line / MSISDN (Optional)
-                    <input
-                      type="text"
-                      value={newAccountLine}
-                      onChange={(e) => setNewAccountLine(e.target.value)}
-                      placeholder="e.g. 03001234567"
-                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    className="btn-primary flex items-center justify-center gap-1.5 !h-9 text-xs"
-                    disabled={!newAccountName.trim()}
-                    onClick={handleAddAccount}
-                  >
-                    <Plus className="h-4 w-4" />
-                    Add Account
-                  </button>
-                </div>
-              </div>
-
-              {/* Compact Accounts Table */}
-              <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/40">
-                <table className="w-full border-collapse text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 bg-slate-900/80 font-semibold text-slate-300">
-                      <th className="w-16 px-2.5 py-2 text-center">#</th>
-                      <th className="px-3 py-2">Account Name</th>
-                      <th className="w-28 px-3 py-2">Type</th>
-                      <th className="w-40 px-3 py-2">Linked Jazz Line</th>
-                      <th className="w-24 px-3 py-2 text-center">Status</th>
-                      <th className="w-48 px-3 py-2 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {sortedAccounts.map((account, idx) => {
-                      const isEditing = editingAccountId === account.id;
-                      const line = getAccountLine(account);
-                      return (
-                        <tr
-                          key={account.id}
-                          className={`transition-colors hover:bg-slate-900/40 ${
-                            !account.active ? "opacity-60 bg-slate-950/30" : ""
-                          }`}
-                        >
-                          {/* Order & Reorder arrows */}
-                          <td className="px-2 py-1.5 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              <span className="w-4 text-center font-mono text-slate-400">{idx + 1}</span>
-                              <div className="flex flex-col">
-                                <button
-                                  type="button"
-                                  disabled={idx === 0}
-                                  onClick={() => handleMoveAccount(idx, "up")}
-                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
-                                  title="Move up"
-                                >
-                                  <ChevronUp className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={idx === sortedAccounts.length - 1}
-                                  onClick={() => handleMoveAccount(idx, "down")}
-                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
-                                  title="Move down"
-                                >
-                                  <ChevronDown className="h-3 w-3" />
-                                </button>
-                              </div>
-                            </div>
-                          </td>
-
-                          {/* Account Name */}
-                          <td className="px-3 py-1.5">
-                            {isEditing ? (
-                              <input
-                                type="text"
-                                value={editAccountName}
-                                onChange={(e) => setEditAccountName(e.target.value)}
-                                className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-                                autoFocus
-                              />
-                            ) : (
-                              <div className="font-semibold text-white">
-                                {account.name}
-                              </div>
-                            )}
-                          </td>
-
-                          {/* Type */}
-                          <td className="px-3 py-1.5">
-                            {isEditing ? (
-                              <select
-                                value={editAccountType}
-                                onChange={(e) => setEditAccountType(e.target.value as StockAccountType)}
-                                className="rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-                              >
-                                <option value="DO">DO</option>
-                                <option value="CCR">CCR</option>
-                                <option value="DSO">DSO</option>
-                                <option value="STOCK">STOCK</option>
-                                <option value="OTHER">OTHER</option>
-                              </select>
-                            ) : (
-                              <span
-                                className={`inline-flex items-center rounded px-2 py-0.5 text-[11px] font-semibold border ${
-                                  account.type === "DO"
-                                    ? "bg-sky-500/10 text-sky-400 border-sky-500/20"
-                                    : account.type === "CCR"
-                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                    : account.type === "DSO"
-                                    ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20"
-                                    : "bg-slate-800 text-slate-300 border-slate-700"
-                                }`}
-                              >
-                                {account.type}
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Line / MSISDN */}
-                          <td className="px-3 py-1.5">
-                            {isEditing ? (
-                              <input
-                                type="text"
-                                value={editAccountLine}
-                                onChange={(e) => setEditAccountLine(e.target.value)}
-                                placeholder="e.g. 03001234567"
-                                className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-                              />
-                            ) : (
-                              <span className="font-mono text-slate-300">
-                                {line !== "—" ? line : <span className="italic text-slate-500">—</span>}
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Status */}
-                          <td className="px-3 py-1.5 text-center">
-                            {account.active ? (
-                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                                Active
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
-                                <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
-                                Inactive
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Actions */}
-                          <td className="px-3 py-1.5 text-right">
-                            <div className="flex items-center justify-end gap-1.5">
-                              {isEditing ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="btn-primary !h-7 !px-2.5 text-xs flex items-center gap-1"
-                                    onClick={() => handleSaveEditAccount(account)}
-                                    disabled={!editAccountName.trim()}
-                                  >
-                                    <Check className="h-3.5 w-3.5" />
-                                    Save
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
-                                    onClick={() => setEditingAccountId(null)}
-                                  >
-                                    <X className="h-3.5 w-3.5" />
-                                    Cancel
-                                  </button>
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
-                                    onClick={() => {
-                                      setEditingAccountId(account.id);
-                                      setEditAccountName(account.name);
-                                      setEditAccountType(account.type);
-                                      setEditAccountLine(line !== "—" ? line : "");
-                                    }}
-                                    title="Edit Account"
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                    Edit
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={`btn-secondary !h-7 !px-2 text-xs ${
-                                      account.active ? "text-slate-400 hover:text-amber-300" : "text-emerald-400 hover:text-emerald-300"
-                                    }`}
-                                    onClick={() => handleSaveStockAccount({ ...account, active: !account.active })}
-                                    title={account.active ? "Deactivate Account" : "Activate Account"}
-                                  >
-                                    {account.active ? "Deactivate" : "Activate"}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn-secondary !h-7 !w-7 !p-0 text-rose-400 hover:text-rose-300 hover:border-rose-500/40"
-                                    onClick={() => {
-                                      if (window.confirm(`Deactivate account "${account.name}"?`)) {
-                                        handleDeleteStockAccount(account.id);
-                                      }
-                                    }}
-                                    title="Delete / Deactivate Account"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5 mx-auto" />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {sortedAccounts.length === 0 && (
-                      <tr>
-                        <td colSpan={6} className="py-6 text-center text-slate-500">
-                          No accounts found. Click &quot;Sync with Master DO Directory&quot; or add an account above.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.history.pushState(null, '', '/dealers');
+                    window.dispatchEvent(new PopStateEvent('popstate'));
+                  }}
+                  className="btn-primary flex items-center gap-2 text-xs !h-9 px-4 font-semibold shrink-0"
+                >
+                  <Users className="h-4 w-4" />
+                  Open Central Dealers Directory
+                </button>
               </div>
             </section>
 

@@ -20,4 +20,5 @@ backend/.env.production
 backend/.env.*
 sheets/
 .~lock.*
+*.xlsx
 

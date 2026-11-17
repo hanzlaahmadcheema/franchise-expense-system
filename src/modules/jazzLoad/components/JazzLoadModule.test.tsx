@@ -323,9 +323,8 @@ describe("JazzLoadModule — Redesigned Navigation & Workflow", () => {
     expect(screen.getByText(/Commission 2 \(Backend Payout\)/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /Save Rate Schedule/i })).toBeTruthy();
 
-    // Verify Unified Distribution Officer Directory
-    expect(screen.getByText(/Distribution Officer \(DO\) Directory/i)).toBeTruthy();
-    expect(screen.getByPlaceholderText(/e\.g\. Ali Khan/i)).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Add Officer/i })).toBeTruthy();
+    // Verify Centralized Distribution Officer Directory Banner
+    expect(screen.getByText(/Distribution Officers \(DO\) Directory/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Open Central Dealers Directory/i })).toBeTruthy();
   });
 });

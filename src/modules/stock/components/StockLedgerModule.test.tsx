@@ -251,11 +251,9 @@ describe("StockLedgerModule Redesign", () => {
     expect(settingsTab.hasAttribute("disabled")).toBe(false);
     fireEvent.click(settingsTab);
 
-    // Verify Distribution Officers & Accounts Directory
+    // Verify Distribution Officers & Accounts Directory Banner
     expect(screen.getByText(/Distribution Officers & Accounts Directory/i)).toBeDefined();
-    expect(screen.getByRole("button", { name: /Sync with Master DO Directory/i })).toBeDefined();
-    expect(screen.getByPlaceholderText(/e\.g\. Naveed Bangla/i)).toBeDefined();
-    expect(screen.getByRole("button", { name: /Add Account/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Open Central Dealers Directory/i })).toBeDefined();
 
     // Verify Stock Products Catalog
     expect(screen.getByText(/Stock Products Catalog/i)).toBeDefined();

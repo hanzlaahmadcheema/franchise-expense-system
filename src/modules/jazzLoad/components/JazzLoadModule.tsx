@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { BarChart3, BookOpen, CalendarDays, ChevronDown, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Percent, Plus, Printer, RefreshCw, Save, Settings, Trash2, UserCheck, X } from "lucide-react";
+import { BarChart3, BookOpen, CalendarDays, ChevronDown, ChevronUp, FileDown, FileSpreadsheet, GripVertical, Pencil, Percent, Plus, Printer, RefreshCw, Save, Settings, Trash2, UserCheck, Users, X } from "lucide-react";
 import { Alert, SaveControlBar, StatusBadge } from "../../../shared/components";
 import type { LedgerUser, UserRole } from "../../../types/ledger";
 import type { SyncState } from "../../../lib/syncStatus";
@@ -3626,250 +3626,34 @@ export function JazzLoadModule({
             </div>
           </section>
 
-          {/* Card 2: Unified Distribution Officer (DO) Directory */}
-          <section className="panel">
-            <div className="panel-title border-b border-slate-800 pb-3 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-base font-semibold text-white flex items-center gap-2">
-                  <UserCheck className="h-4 w-4 text-sky-400" />
-                  Distribution Officer (DO) Directory
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Single consolidated directory of officers and assigned lines. Reassign lines seamlessly without altering historical daily sheets.
-                </p>
+          {/* Card 2: Centralized DO Directory Banner */}
+          <section className="rounded-xl border border-sky-800/60 bg-sky-950/20 p-5 shadow-lg">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-400">
+                  <Users className="h-5 w-5" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-bold text-white tracking-tight">
+                    Distribution Officers (DO) Directory
+                  </h3>
+                  <p className="mt-0.5 text-xs text-slate-400 max-w-xl">
+                    Distribution Officer profiles, assigned MSISDN phone lines, and active statuses are now centrally managed in the master Dealers Directory. Changes synchronize automatically across all modules.
+                  </p>
+                </div>
               </div>
-              <div className="text-xs text-slate-400">
-                Total Officers: <span className="font-semibold text-white">{sortedProfiles.length}</span> ({sortedProfiles.filter((p) => p.active).length} active)
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  window.history.pushState(null, "", "/dealers");
+                  window.dispatchEvent(new PopStateEvent("popstate"));
+                }}
+                className="btn-primary flex items-center gap-2 text-xs !h-9 px-4 font-semibold shrink-0"
+              >
+                <Users className="h-4 w-4" />
+                Open Central Dealers Directory
+              </button>
             </div>
-
-            {/* Quick Add DO Bar */}
-            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
-                Add New Distribution Officer
-              </p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-                <label className="text-xs font-medium text-slate-300">
-                  Officer Name
-                  <input
-                    type="text"
-                    value={newDoName}
-                    disabled={!canManageSettings}
-                    onChange={(e) => setNewDoName(e.target.value)}
-                    placeholder="e.g. Ali Khan"
-                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
-                  />
-                </label>
-                <label className="text-xs font-medium text-slate-300">
-                  Line Number / MSISDN
-                  <input
-                    type="text"
-                    value={newDoLine}
-                    disabled={!canManageSettings}
-                    onChange={(e) => setNewDoLine(e.target.value)}
-                    placeholder="e.g. 03001234567"
-                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="btn-primary flex items-center justify-center gap-1.5 !h-9 text-xs"
-                  disabled={!canManageSettings || !newDoName.trim()}
-                  onClick={handleAddDo}
-                >
-                  <Plus className="h-4 w-4" />
-                  Add Officer
-                </button>
-              </div>
-            </div>
-
-            {/* Compact DO Directory Table */}
-            <div className="mt-4 overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/40">
-              <table className="w-full border-collapse text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-slate-900/80 font-semibold text-slate-300">
-                    <th className="w-16 px-2.5 py-2 text-center">#</th>
-                    <th className="px-3 py-2">Officer Name</th>
-                    <th className="px-3 py-2">Line / MSISDN</th>
-                    <th className="w-24 px-3 py-2 text-center">Status</th>
-                    <th className="w-64 px-3 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {sortedProfiles.map((profile, idx) => {
-                    const isEditing = editingDoId === profile.id;
-                    return (
-                      <tr
-                        key={profile.id}
-                        className={`transition-colors hover:bg-slate-900/40 ${
-                          !profile.active ? "opacity-60 bg-slate-950/30" : ""
-                        }`}
-                      >
-                        {/* Order & Reorder arrows */}
-                        <td className="px-2 py-1.5 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <span className="w-4 text-center font-mono text-slate-400">{idx + 1}</span>
-                            {canManageSettings && (
-                              <div className="flex flex-col">
-                                <button
-                                  type="button"
-                                  disabled={idx === 0}
-                                  onClick={() => handleMoveDo(idx, "up")}
-                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
-                                  title="Move up"
-                                >
-                                  <ChevronUp className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={idx === sortedProfiles.length - 1}
-                                  onClick={() => handleMoveDo(idx, "down")}
-                                  className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500"
-                                  title="Move down"
-                                >
-                                  <ChevronDown className="h-3 w-3" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-
-                        {/* Officer Name */}
-                        <td className="px-3 py-1.5">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editingDoName}
-                              onChange={(e) => setEditingDoName(e.target.value)}
-                              className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-                              placeholder="Officer Name"
-                              autoFocus
-                            />
-                          ) : (
-                            <div className="font-semibold text-white flex items-center gap-1.5">
-                              {profile.name}
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Line Number */}
-                        <td className="px-3 py-1.5">
-                          {isEditing ? (
-                            <input
-                              type="text"
-                              value={editingDoLine}
-                              onChange={(e) => setEditingDoLine(e.target.value)}
-                              className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
-                              placeholder="Line / MSISDN"
-                            />
-                          ) : (
-                            <span className="font-mono text-slate-300">
-                              {profile.line || <span className="italic text-slate-500">Unassigned</span>}
-                            </span>
-                          )}
-                        </td>
-
-                        {/* Status */}
-                        <td className="px-3 py-1.5 text-center">
-                          {profile.active ? (
-                            <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-400 border border-emerald-500/20">
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                              Active
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 rounded bg-slate-800 px-2 py-0.5 text-[11px] font-medium text-slate-400 border border-slate-700">
-                              <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
-                              Inactive
-                            </span>
-                          )}
-                        </td>
-
-                        {/* Actions */}
-                        <td className="px-3 py-1.5 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            {isEditing ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="btn-primary !h-7 !px-2.5 text-xs flex items-center gap-1"
-                                  onClick={() => handleSaveEditDo(profile.id)}
-                                  disabled={!editingDoName.trim()}
-                                >
-                                  <Save className="h-3.5 w-3.5" />
-                                  Save
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
-                                  onClick={() => setEditingDoId(null)}
-                                >
-                                  <X className="h-3.5 w-3.5" />
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1"
-                                  onClick={() => {
-                                    setEditingDoId(profile.id);
-                                    setEditingDoName(profile.name);
-                                    setEditingDoLine(profile.line ?? "");
-                                  }}
-                                  title="Edit Name & Line"
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-secondary !h-7 !px-2 text-xs flex items-center gap-1 text-sky-400 hover:text-sky-300 hover:border-sky-500/40"
-                                  onClick={() => handleReassignLine(profile)}
-                                  title="Reassign line to a new officer without breaking past history"
-                                >
-                                  <UserCheck className="h-3.5 w-3.5" />
-                                  Reassign Line
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`btn-secondary !h-7 !px-2 text-xs ${
-                                    profile.active ? "text-slate-400 hover:text-amber-300" : "text-emerald-400 hover:text-emerald-300"
-                                  }`}
-                                  onClick={() => handleToggleDoActive(profile)}
-                                  title={profile.active ? "Deactivate DO" : "Activate DO"}
-                                >
-                                  {profile.active ? "Deactivate" : "Activate"}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-secondary !h-7 !w-7 !p-0 text-rose-400 hover:text-rose-300 hover:border-rose-500/40"
-                                  onClick={() => handleDeleteDo(profile)}
-                                  title="Delete / Deactivate DO"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5 mx-auto" />
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {sortedProfiles.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="py-6 text-center text-slate-500">
-                        No distribution officers found. Add your first DO using the form above.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <p className="mt-3 text-[11px] text-slate-500">
-              💡 <span className="font-medium text-slate-400">Reassign Line Feature:</span> When an officer leaves or a line is reassigned, click &quot;Reassign Line&quot;. Historical daily sheets retain the previous officer&apos;s name in their locked snapshots, while all future days automatically use the newly assigned officer.
-            </p>
           </section>
         </div>
       )}
