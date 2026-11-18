@@ -4783,7 +4783,13 @@ function App() {
         </section>
       )}
       <div className="flex-1 w-full min-w-0">
-        <div className="w-full min-w-0 px-2 sm:px-4 lg:px-6 pb-28 pt-3 lg:pb-8">
+        <div
+          className={
+            view === "stock-ledger"
+              ? "w-full min-w-0 px-2 sm:px-4 pb-28 pt-3 lg:pb-8"
+              : "w-full min-w-0 max-w-7xl mx-auto px-3 pb-28 pt-4 sm:px-6 lg:px-8 lg:pb-8"
+          }
+        >
           {status && <p className="status">{status}</p>}
           {isMonthCloseRequired && (
             <div
