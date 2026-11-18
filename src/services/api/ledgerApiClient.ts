@@ -1000,6 +1000,14 @@ export const ledgerApiClient = {
       apiRequest<{ data: any }>(`/api/v1/catalogs/jazz-load-rates/${id}`, {
         method: "PATCH",
         body: JSON.stringify(payload)
-      })
+      }),
+    getDealerReports: (params?: { period_id?: string; period_key?: string; dealer_id?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.period_id) q.set("period_id", params.period_id);
+      if (params?.period_key) q.set("period_key", params.period_key);
+      if (params?.dealer_id) q.set("dealer_id", params.dealer_id);
+      const qs = q.toString() ? `?${q.toString()}` : "";
+      return apiRequest<{ data: any }>(`/api/v1/catalogs/dealer-reports${qs}`);
+    }
   }
 };

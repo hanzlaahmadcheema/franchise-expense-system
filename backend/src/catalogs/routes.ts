@@ -75,7 +75,8 @@ import {
   listStockAccounts,
   getStockAccount,
   createStockAccount,
-  updateStockAccount
+  updateStockAccount,
+  getDealerReports
 } from "./service.js";
 
 import {
@@ -526,5 +527,24 @@ catalogRouter.patch("/stock-accounts/:id", mutateMin, async (req: Request, res: 
     if (err instanceof ZodError) return void sendValidationError(res, err);
     if (isUniqueViolation(err)) return void sendDuplicateError(res, "slug");
     sendInternalError(res, "PATCH /stock-accounts/:id", err);
+  }
+});
+
+/**
+ * GET /api/v1/catalogs/dealer-reports
+ * Returns unified multi-module performance summary and day-by-day ledger statements
+ * for all canonical dealers across periods.
+ */
+catalogRouter.get("/dealer-reports", readOnlyMin, async (req: Request, res: Response) => {
+  try {
+    const franchiseId = getFranchiseId(req);
+    const periodId = typeof req.query.period_id === "string" ? req.query.period_id : undefined;
+    const periodKey = typeof req.query.period_key === "string" ? req.query.period_key : undefined;
+    const dealerId = typeof req.query.dealer_id === "string" ? req.query.dealer_id : undefined;
+
+    const data = await getDealerReports(franchiseId, { periodId, periodKey, dealerId });
+    res.json({ data });
+  } catch (err) {
+    sendInternalError(res, "GET /dealer-reports", err);
   }
 });

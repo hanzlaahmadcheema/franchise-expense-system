@@ -643,6 +643,19 @@ async function runCatalogTests() {
     }
 
     // =========================================================================
+    // Group 15: Dealer Reports Endpoint
+    // =========================================================================
+    console.log("\nGroup 15: Dealer Reports endpoint");
+    {
+      const res = await req(base, "GET", "/api/v1/catalogs/dealer-reports", "cat-owner");
+      assert(res.status === 200, "GET /dealer-reports returns 200 OK", res.status);
+      assert(res.body?.data !== undefined, "Response contains data property", typeof res.body?.data);
+      assert(Array.isArray(res.body?.data?.periods), "Response contains periods array", typeof res.body?.data?.periods);
+      assert(Array.isArray(res.body?.data?.summary), "Response contains summary array", typeof res.body?.data?.summary);
+      assert(typeof res.body?.data?.dailyStatements === "object", "Response contains dailyStatements object", typeof res.body?.data?.dailyStatements);
+    }
+
+    // =========================================================================
     // Summary
     // =========================================================================
     console.log(`\n=== PHASE 4 CATALOG TESTS COMPLETE ===`);

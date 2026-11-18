@@ -530,3 +530,361 @@ export async function updateStockAccount(franchiseId: string, id: string, data: 
     .returningAll()
     .executeTakeFirst();
 }
+
+// ---------------------------------------------------------------------------
+// Dealer Reports & Master Ledger Performance
+// ---------------------------------------------------------------------------
+
+export function cleanDealerName(s: string): string {
+  return s
+    .replace(/^(DO|DSO|CCR)\s+/i, "")
+    .replace(/\s+(CCR|DSO|DO)$/i, "")
+    .trim();
+}
+
+export function getCanonicalDealerKey(name: string): string {
+  const cleaned = cleanDealerName(name).toLowerCase();
+  if (/rizwan/i.test(cleaned)) return "discard-rizwan";
+  if (/waseem.*gujjar/i.test(cleaned)) return "discard-waseem";
+  if (/ghot.*hussain/i.test(cleaned)) return "hussain";
+  if (/mubash[ia]r/i.test(cleaned)) return "mubashir";
+  if (/irfan.*mirza|mirza.*irfan/i.test(cleaned)) return "irfan-mirza";
+  if (/naveed.*bangla|bangla.*naveed/i.test(cleaned)) return "naveed-bangla";
+  if (/fix.*line|office.*line.*1|office.*line(?!\s*2)/i.test(cleaned)) return "office-line-1";
+  if (/office.*line.*2|other/i.test(cleaned)) return "office-line-2";
+  if (/fakhar|t[ie]t[au]s/i.test(cleaned)) return "fakhar-titus";
+  if (/hussain/i.test(cleaned)) return "hussain";
+  if (/free.*sim|face.*sim/i.test(cleaned)) return "free-sim";
+  if (/net.*stock/i.test(cleaned)) return "net-stock";
+  if (/anni|any/i.test(cleaned)) return "anni";
+  if (/saram/i.test(cleaned)) return "saram";
+  if (/hasan|hassan/i.test(cleaned)) {
+    if (/dso/i.test(name) || cleaned === "hasan") return "dso-hasan";
+    return "do-hassan";
+  }
+  return cleaned.replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
+}
+
+export interface DealerReportQueryOptions {
+  periodId?: string;
+  periodKey?: string;
+  dealerId?: string;
+}
+
+export async function getDealerReports(franchiseId: string, options: DealerReportQueryOptions = {}) {
+  // 1. Fetch available periods
+  const periods = await db
+    .selectFrom("accounting_periods")
+    .select(["id", "period_key", "label", "year_num", "month_num", "status", "final_settlement_status"])
+    .where("franchise_id", "=", franchiseId)
+    .orderBy("year_num", "desc")
+    .orderBy("month_num", "desc")
+    .execute();
+
+  if (periods.length === 0) {
+    return {
+      period: null,
+      periods: [],
+      summary: [],
+      dailyStatements: {}
+    };
+  }
+
+  // 2. Resolve selected period
+  let selectedPeriod = periods[0];
+  if (options.periodId) {
+    const found = periods.find((p) => p.id === options.periodId);
+    if (found) selectedPeriod = found;
+  } else if (options.periodKey) {
+    const found = periods.find((p) => p.period_key === options.periodKey);
+    if (found) selectedPeriod = found;
+  }
+
+  // 3. Fetch days in this period
+  const days = await db
+    .selectFrom("accounting_days")
+    .select(["id", "day_no", "calendar_date", "status"])
+    .where("franchise_id", "=", franchiseId)
+    .where("period_id", "=", selectedPeriod.id)
+    .orderBy("day_no", "asc")
+    .execute();
+
+  const daysCount = days.length;
+  const firstDayNo = days[0]?.day_no ?? 1;
+  const lastDayNo = days[daysCount - 1]?.day_no ?? 31;
+
+  // 4. Fetch stock accounts and jazz DO profiles
+  const [stockAccounts, jazzProfiles] = await Promise.all([
+    db
+      .selectFrom("stock_accounts")
+      .select(["id", "name", "type", "sort_order", "notes", "is_active"])
+      .where("franchise_id", "=", franchiseId)
+      .orderBy("sort_order", "asc")
+      .execute(),
+    db
+      .selectFrom("jazz_load_do_profiles")
+      .select(["id", "do_name", "do_line", "sort_order", "notes", "is_active"])
+      .where("franchise_id", "=", franchiseId)
+      .orderBy("sort_order", "asc")
+      .execute()
+  ]);
+
+  // 5. Fetch stock account day projections, jazz day projections, and stock order lines
+  const dayIds = days.map((d) => d.id);
+  let stockProjections: any[] = [];
+  let jazzProjections: any[] = [];
+  let stockOrderLines: any[] = [];
+
+  if (dayIds.length > 0) {
+    [stockProjections, jazzProjections, stockOrderLines] = await Promise.all([
+      db
+        .selectFrom("stock_account_day_projections as sad")
+        .innerJoin("accounting_days as d", "d.id", "sad.day_id")
+        .select([
+          "sad.account_id",
+          "d.day_no",
+          "sad.opening_due",
+          "sad.stock_taken_amount",
+          "sad.payment_received_amount",
+          "sad.transfers_out_amount",
+          "sad.transfers_in_amount",
+          "sad.closing_due"
+        ])
+        .where("sad.franchise_id", "=", franchiseId)
+        .where("d.period_id", "=", selectedPeriod.id)
+        .execute(),
+      db
+        .selectFrom("jazz_load_do_day_projections as jdp")
+        .innerJoin("accounting_days as d", "d.id", "jdp.day_id")
+        .select([
+          "jdp.do_profile_id",
+          "d.day_no",
+          "jdp.opening_base",
+          "jdp.issuance_base",
+          "jdp.payment_base",
+          "jdp.closing_base",
+          "jdp.opening_ml",
+          "jdp.closing_ml"
+        ])
+        .where("jdp.franchise_id", "=", franchiseId)
+        .where("d.period_id", "=", selectedPeriod.id)
+        .execute(),
+      db
+        .selectFrom("stock_order_lines as sol")
+        .innerJoin("stock_orders as so", "so.id", "sol.stock_order_id")
+        .innerJoin("accounting_days as d", "d.id", "so.day_id")
+        .select([
+          "so.account_id",
+          "d.day_no",
+          "sol.product_name_snapshot",
+          "sol.quantity",
+          "sol.unit_rate",
+          "sol.line_amount"
+        ])
+        .where("so.franchise_id", "=", franchiseId)
+        .where("d.period_id", "=", selectedPeriod.id)
+        .execute()
+    ]);
+  }
+
+  // Lookup maps
+  const stockByAccDay = new Map<string, any>();
+  stockProjections.forEach((r) => stockByAccDay.set(`${r.account_id}_${r.day_no}`, r));
+
+  const jazzByProfileDay = new Map<string, any>();
+  jazzProjections.forEach((r) => jazzByProfileDay.set(`${r.do_profile_id}_${r.day_no}`, r));
+
+  const stockLinesByAccDay = new Map<string, any[]>();
+  stockOrderLines.forEach((l) => {
+    const k = `${l.account_id}_${l.day_no}`;
+    const list = stockLinesByAccDay.get(k) || [];
+    list.push({
+      productName: l.product_name_snapshot,
+      quantity: Number(l.quantity),
+      unitRate: Number(l.unit_rate),
+      lineAmount: Number(l.line_amount)
+    });
+    stockLinesByAccDay.set(k, list);
+  });
+
+  // Build unified dealer map
+  const dealerMap = new Map<string, any>();
+
+  stockAccounts.forEach((sa) => {
+    const key = getCanonicalDealerKey(sa.name);
+    if (key.startsWith("discard-")) return;
+    const line = sa.notes?.replace(/^Line:\s*/i, "").trim() || null;
+    dealerMap.set(key, {
+      id: key,
+      name: sa.name,
+      type: sa.type,
+      line,
+      sortOrder: sa.sort_order,
+      stockAccountId: sa.id,
+      jazzDoId: null,
+      isActive: sa.is_active
+    });
+  });
+
+  jazzProfiles.forEach((jp) => {
+    const key = getCanonicalDealerKey(jp.do_name);
+    if (key.startsWith("discard-")) return;
+    const existing = dealerMap.get(key);
+    if (existing) {
+      existing.jazzDoId = jp.id;
+      if (!existing.line && jp.do_line) existing.line = jp.do_line;
+    } else {
+      dealerMap.set(key, {
+        id: key,
+        name: jp.do_name,
+        type: "DO",
+        line: jp.do_line ?? null,
+        sortOrder: jp.sort_order,
+        stockAccountId: null,
+        jazzDoId: jp.id,
+        isActive: jp.is_active
+      });
+    }
+  });
+
+  const allDealers = Array.from(dealerMap.values()).sort((a, b) => a.sortOrder - b.sortOrder);
+
+  // Compute summary and daily statements
+  const summary: any[] = [];
+  const dailyStatements: Record<string, any[]> = {};
+
+  for (const d of allDealers) {
+    let loadOpening = 0;
+    let loadIssuance = 0;
+    let loadPayment = 0;
+    let loadClosing = 0;
+    let activeLoadDays = 0;
+
+    let stockOpening = 0;
+    let stockIssued = 0;
+    let stockPayment = 0;
+    let stockTransfersOut = 0;
+    let stockTransfersIn = 0;
+    let stockClosing = 0;
+    let activeStockDays = 0;
+
+    if (d.jazzDoId) {
+      const day1 = jazzByProfileDay.get(`${d.jazzDoId}_${firstDayNo}`);
+      if (day1) loadOpening = Number(day1.opening_base);
+      const dayLast = jazzByProfileDay.get(`${d.jazzDoId}_${lastDayNo}`);
+      if (dayLast) loadClosing = Number(dayLast.closing_base);
+
+      for (let dayNo = firstDayNo; dayNo <= lastDayNo; dayNo++) {
+        const row = jazzByProfileDay.get(`${d.jazzDoId}_${dayNo}`);
+        if (row) {
+          const iss = Number(row.issuance_base);
+          const pay = Number(row.payment_base);
+          loadIssuance += iss;
+          loadPayment += pay;
+          if (iss > 0 || pay > 0) activeLoadDays++;
+        }
+      }
+    }
+
+    if (d.stockAccountId) {
+      const day1 = stockByAccDay.get(`${d.stockAccountId}_${firstDayNo}`);
+      if (day1) stockOpening = Number(day1.opening_due);
+      const dayLast = stockByAccDay.get(`${d.stockAccountId}_${lastDayNo}`);
+      if (dayLast) stockClosing = Number(dayLast.closing_due);
+
+      for (let dayNo = firstDayNo; dayNo <= lastDayNo; dayNo++) {
+        const row = stockByAccDay.get(`${d.stockAccountId}_${dayNo}`);
+        if (row) {
+          const iss = Number(row.stock_taken_amount);
+          const pay = Number(row.payment_received_amount);
+          stockIssued += iss;
+          stockPayment += pay;
+          stockTransfersOut += Number(row.transfers_out_amount);
+          stockTransfersIn += Number(row.transfers_in_amount);
+          if (iss > 0 || pay > 0) activeStockDays++;
+        }
+      }
+    }
+
+    const totalDisbursed = loadIssuance + stockIssued;
+    const totalRecovered = loadPayment + stockPayment;
+    const netOutstanding = loadClosing + stockClosing;
+
+    summary.push({
+      id: d.id,
+      name: d.name,
+      type: d.type,
+      line: d.line,
+      sortOrder: d.sortOrder,
+      isActive: d.isActive,
+      stockAccountId: d.stockAccountId,
+      jazzDoId: d.jazzDoId,
+      // Load
+      loadOpening,
+      loadIssuance,
+      loadPayment,
+      loadClosing,
+      activeLoadDays,
+      // Stock
+      stockOpening,
+      stockIssued,
+      stockPayment,
+      stockTransfersOut,
+      stockTransfersIn,
+      stockClosing,
+      activeStockDays,
+      // Combined
+      totalDisbursed,
+      totalRecovered,
+      netOutstanding
+    });
+
+    // Build day-by-day statement for dealer
+    const dStatements: any[] = [];
+    for (const day of days) {
+      const jazzRow = d.jazzDoId ? jazzByProfileDay.get(`${d.jazzDoId}_${day.day_no}`) : null;
+      const stockRow = d.stockAccountId ? stockByAccDay.get(`${d.stockAccountId}_${day.day_no}`) : null;
+      const stockLines = d.stockAccountId ? stockLinesByAccDay.get(`${d.stockAccountId}_${day.day_no}`) : undefined;
+
+      const dLoadOpening = jazzRow ? Number(jazzRow.opening_base) : 0;
+      const dLoadIssuance = jazzRow ? Number(jazzRow.issuance_base) : 0;
+      const dLoadPayment = jazzRow ? Number(jazzRow.payment_base) : 0;
+      const dLoadClosing = jazzRow ? Number(jazzRow.closing_base) : 0;
+
+      const dStockOpening = stockRow ? Number(stockRow.opening_due) : 0;
+      const dStockIssued = stockRow ? Number(stockRow.stock_taken_amount) : 0;
+      const dStockPayment = stockRow ? Number(stockRow.payment_received_amount) : 0;
+      const dStockTransfersOut = stockRow ? Number(stockRow.transfers_out_amount) : 0;
+      const dStockTransfersIn = stockRow ? Number(stockRow.transfers_in_amount) : 0;
+      const dStockClosing = stockRow ? Number(stockRow.closing_due) : 0;
+
+      dStatements.push({
+        dayNo: day.day_no,
+        calendarDate: day.calendar_date ? new Date(day.calendar_date).toISOString().slice(0, 10) : "",
+        dayStatus: day.status,
+        loadOpening: dLoadOpening,
+        loadIssuance: dLoadIssuance,
+        loadPayment: dLoadPayment,
+        loadClosing: dLoadClosing,
+        stockOpening: dStockOpening,
+        stockIssued: dStockIssued,
+        stockPayment: dStockPayment,
+        stockTransfersOut: dStockTransfersOut,
+        stockTransfersIn: dStockTransfersIn,
+        stockClosing: dStockClosing,
+        dailyDisbursed: dLoadIssuance + dStockIssued,
+        dailyRecovered: dLoadPayment + dStockPayment,
+        dailyNetDue: dLoadClosing + dStockClosing,
+        stockLines: stockLines && stockLines.length > 0 ? stockLines : undefined
+      });
+    }
+    dailyStatements[d.id] = dStatements;
+  }
+
+  return {
+    period: selectedPeriod,
+    periods,
+    summary,
+    dailyStatements
+  };
+}
