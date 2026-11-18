@@ -197,4 +197,50 @@ describe("DealersManagementPage Component", () => {
 
     expect(onStatus).toHaveBeenCalledWith(expect.stringContaining("Reconciliation complete"));
   });
+
+  it("deduplicates variations (Mubashir/Mubashar, Irfan Mirza/Mirza Irfan, Fix Line, Titus/Fakhar) and enforces canonical roles", async () => {
+    vi.mocked(ledgerApiClient.catalogs.getJazzLoadDoProfiles).mockResolvedValue({
+      data: [
+        { id: "jazz-mubashir", do_name: "Mubashir", do_line: "03027100126", sort_order: 4, is_active: true },
+        { id: "jazz-irfan-mirza", do_name: "Irfan Mirza", do_line: "03027103467", sort_order: 5, is_active: true },
+        { id: "jazz-fix-line", do_name: "Fix Line", do_line: "03027107343", sort_order: 10, is_active: true },
+        { id: "jazz-other", do_name: "Other", do_line: "03200926230", sort_order: 11, is_active: true },
+        { id: "jazz-fakhar", do_name: "Fakhar", do_line: "03027108872", sort_order: 12, is_active: true },
+        { id: "jazz-anni", do_name: "Any", do_line: "03087081311", sort_order: 13, is_active: true }
+      ]
+    } as any);
+
+    vi.mocked(ledgerApiClient.catalogs.getStockAccounts).mockResolvedValue({
+      data: [
+        { id: "stock-mubashar", name: "DO MUBASHAR", type: "DO", sort_order: 4, is_active: true, notes: "Line: 03027100126" },
+        { id: "stock-mirza-irfan", name: "Do Mirza irfan", type: "DO", sort_order: 5, is_active: true, notes: "Line: 03027103467" },
+        { id: "stock-office-line", name: "Office Line", type: "OFFICE", sort_order: 10, is_active: true, notes: "Line: 03027107343" },
+        { id: "stock-tetas", name: "Titus", type: "CCR", sort_order: 12, is_active: true, notes: "Line: 03027108872" },
+        { id: "stock-anni", name: "ANNI CCR", type: "CCR", sort_order: 13, is_active: true, notes: "Line: 03087081311" },
+        { id: "stock-waseem", name: "WASEEM GUJJAR", type: "DSO", sort_order: 15, is_active: true, notes: null },
+        { id: "stock-free-sim", name: "FREE SIM CCR", type: "CCR", sort_order: 18, is_active: true, notes: null }
+      ]
+    } as any);
+
+    render(<DealersManagementPage role="owner" />);
+
+    await waitFor(() => {
+      // Mubashir merged into 1 row
+      expect(screen.getAllByText("Mubashir").length).toBe(1);
+      // Irfan Mirza merged into 1 row
+      expect(screen.getAllByText("Irfan Mirza").length).toBe(1);
+      // Office Line 1
+      expect(screen.getByText("Office Line 1")).toBeTruthy();
+      // Office Line 2
+      expect(screen.getByText("Office Line 2")).toBeTruthy();
+      // Fakhar (Titus) as CCR
+      expect(screen.getByText("Fakhar (Titus)")).toBeTruthy();
+      // Anni as CCR
+      expect(screen.getByText("Anni")).toBeTruthy();
+      // Free SIM as STOCK
+      expect(screen.getByText("Free SIM")).toBeTruthy();
+      // Waseem Gujjar is discarded
+      expect(screen.queryByText(/Waseem Gujjar/i)).toBeNull();
+    });
+  });
 });

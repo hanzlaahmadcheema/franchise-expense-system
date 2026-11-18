@@ -27,6 +27,75 @@ export function cleanDealerName(s: string): string {
     .trim();
 }
 
+export function getCanonicalDealerKey(name: string): string {
+  const cleaned = cleanDealerName(name).toLowerCase();
+  if (/rizwan/i.test(cleaned)) return "discard-rizwan";
+  if (/waseem.*gujjar/i.test(cleaned)) return "discard-waseem";
+  if (/ghot.*hussain/i.test(cleaned)) return "hussain";
+  if (/mubash[ia]r/i.test(cleaned)) return "mubashir";
+  if (/irfan.*mirza|mirza.*irfan/i.test(cleaned)) return "irfan-mirza";
+  if (/naveed.*bangla|bangla.*naveed/i.test(cleaned)) return "naveed-bangla";
+  if (/fix.*line|office.*line.*1|office.*line(?!\s*2)/i.test(cleaned)) return "office-line-1";
+  if (/office.*line.*2|other/i.test(cleaned)) return "office-line-2";
+  if (/fakhar|t[ie]t[au]s/i.test(cleaned)) return "fakhar-titus";
+  if (/hussain/i.test(cleaned)) return "hussain";
+  if (/free.*sim|face.*sim/i.test(cleaned)) return "free-sim";
+  if (/net.*stock/i.test(cleaned)) return "net-stock";
+  if (/anni|any/i.test(cleaned)) return "anni";
+  if (/saram/i.test(cleaned)) return "saram";
+  if (/hasan|hassan/i.test(cleaned)) {
+    if (/dso/i.test(name) || cleaned === "hasan") return "dso-hasan";
+    return "do-hassan";
+  }
+  return cleaned.replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
+}
+
+export function resolveCanonicalDealerInfo(name: string, explicitType?: StockAccountType): { name: string; type: StockAccountType; sortOrder: number } {
+  const key = getCanonicalDealerKey(name);
+  switch (key) {
+    case "mirza":
+      return { name: "Mirza", type: "DO", sortOrder: 1 };
+    case "adnan":
+      return { name: "Adnan", type: "DO", sortOrder: 2 };
+    case "arslan":
+      return { name: "Arslan", type: "DO", sortOrder: 3 };
+    case "mubashir":
+      return { name: "Mubashir", type: "DO", sortOrder: 4 };
+    case "irfan-mirza":
+      return { name: "Irfan Mirza", type: "DO", sortOrder: 5 };
+    case "do-hassan":
+      return { name: "Hassan", type: "DO", sortOrder: 6 };
+    case "naveed":
+      return { name: "Naveed", type: "DO", sortOrder: 7 };
+    case "irfan":
+      return { name: "Irfan", type: "DO", sortOrder: 8 };
+    case "naveed-bangla":
+      return { name: "Naveed Bangla", type: "DO", sortOrder: 9 };
+    case "office-line-1":
+      return { name: "Office Line 1", type: "OFFICE", sortOrder: 10 };
+    case "office-line-2":
+      return { name: "Office Line 2", type: "OFFICE", sortOrder: 11 };
+    case "fakhar-titus":
+      return { name: "Fakhar (Titus)", type: "CCR", sortOrder: 12 };
+    case "anni":
+      return { name: "Anni", type: "CCR", sortOrder: 13 };
+    case "saram":
+      return { name: "Saram", type: "CCR", sortOrder: 14 };
+    case "hussain":
+      return { name: "Hussain", type: "CCR", sortOrder: 15 };
+    case "dso-hasan":
+      return { name: "Hasan", type: "DSO", sortOrder: 16 };
+    case "abdullah":
+      return { name: "Abdullah", type: "DSO", sortOrder: 17 };
+    case "free-sim":
+      return { name: "Free SIM", type: "STOCK", sortOrder: 18 };
+    case "net-stock":
+      return { name: "Net Stock", type: "STOCK", sortOrder: 19 };
+    default:
+      return { name: cleanDealerName(name), type: explicitType || "DO", sortOrder: 99 };
+  }
+}
+
 export interface UnifiedDealerRecord {
   id: string; // Master key (or jazzLoadDoProfile id / stockAccount id)
   name: string;
@@ -87,66 +156,65 @@ export function DealersManagementPage({
       const jazzProfiles = jazzRes.data || [];
       const stockAccounts = stockRes.data || [];
 
-      const normalize = (s: string) =>
-        cleanDealerName(s).toLowerCase().replace(/[^a-z0-9]/g, "");
-
-      const records: UnifiedDealerRecord[] = [];
-      const usedStockIds = new Set<string>();
+      const recordsMap = new Map<string, UnifiedDealerRecord>();
 
       // 1. Process Jazz Load DO Profiles
       jazzProfiles.forEach((jp: any, idx: number) => {
-        const normJp = normalize(jp.do_name);
-        const matchingStock = stockAccounts.find(
-          (sa: any) => normalize(sa.name) === normJp
-        );
+        const key = getCanonicalDealerKey(jp.do_name);
+        if (key.startsWith("discard-")) return;
 
-        if (matchingStock) {
-          usedStockIds.add(matchingStock.id);
-        }
+        const info = resolveCanonicalDealerInfo(jp.do_name, jp.type);
+        const resolvedLine = jp.do_line || undefined;
 
-        const resolvedLine =
-          jp.do_line ||
-          matchingStock?.notes?.replace(/^Line:\s*/i, "").trim() ||
-          undefined;
-
-        const resolvedName = cleanDealerName(jp.do_name);
-        const resolvedType = (matchingStock?.type as StockAccountType) || (resolvedName.toLowerCase().includes("office") ? "OFFICE" : "DO");
-
-        records.push({
+        recordsMap.set(key, {
           id: jp.id,
-          name: resolvedName,
-          type: resolvedType,
+          name: info.name,
+          type: info.type,
           line: resolvedLine,
           jazzDoId: jp.id,
-          stockAccountId: matchingStock?.id,
-          active: jp.is_active && (matchingStock ? matchingStock.is_active : true),
-          sortOrder: jp.sort_order ?? idx + 1,
-          notes: matchingStock?.notes ?? undefined
+          active: jp.is_active ?? true,
+          sortOrder: info.sortOrder ?? jp.sort_order ?? idx + 1,
+          notes: jp.do_line ? `Line: ${jp.do_line}` : undefined
         });
       });
 
-      // 2. Process Remaining Stock Accounts (CCRs, non-DO counters, DSOs, Stock)
+      // 2. Process Stock Accounts
       stockAccounts.forEach((sa: any, idx: number) => {
-        if (!usedStockIds.has(sa.id)) {
-          const resolvedName = cleanDealerName(sa.name);
-          const resolvedType = (sa.type as StockAccountType) || "CCR";
-          // Line is specifically for Jazz Load. Non-Jazz stock entities (DSO, Stock) do not have lines.
-          const isLoadBearing = resolvedType === "DO" || resolvedType === "OFFICE" || resolvedType === "CCR";
-          const resolvedLine = isLoadBearing ? (sa.notes?.replace(/^Line:\s*/i, "").trim() || undefined) : undefined;
+        const key = getCanonicalDealerKey(sa.name);
+        if (key.startsWith("discard-")) return;
 
-          records.push({
+        const info = resolveCanonicalDealerInfo(sa.name, sa.type);
+        const existing = recordsMap.get(key);
+
+        const stockLine = sa.notes?.replace(/^Line:\s*/i, "").trim() || undefined;
+        const isLoadBearing = info.type === "DO" || info.type === "OFFICE" || info.type === "CCR";
+        const resolvedLine = isLoadBearing ? (existing?.line || stockLine) : undefined;
+
+        if (existing) {
+          existing.stockAccountId = sa.id;
+          existing.type = info.type; // Canonical type authority
+          existing.name = info.name; // Canonical name authority
+          if (!existing.line && resolvedLine) {
+            existing.line = resolvedLine;
+          }
+          if (existing.sortOrder > info.sortOrder) {
+            existing.sortOrder = info.sortOrder;
+          }
+        } else {
+          recordsMap.set(key, {
             id: sa.id,
-            name: resolvedName,
-            type: resolvedType,
+            name: info.name,
+            type: info.type,
             line: resolvedLine,
             stockAccountId: sa.id,
-            active: sa.is_active,
-            sortOrder: sa.sort_order ?? records.length + idx + 1,
+            active: sa.is_active ?? true,
+            sortOrder: info.sortOrder ?? sa.sort_order ?? recordsMap.size + idx + 1,
             notes: sa.notes ?? undefined
           });
         }
       });
 
+      const records = Array.from(recordsMap.values());
       records.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
       setDealers(records);
     } catch (err) {
@@ -463,39 +531,49 @@ export function DealersManagementPage({
       const jazzProfiles = jazzRes.data || [];
       const stockAccounts = stockRes.data || [];
 
-      const normalize = (s: string) =>
-        cleanDealerName(s).toLowerCase().replace(/[^a-z0-9]/g, "");
-
       const stockNormMap = new Map<string, any>();
       stockAccounts.forEach((sa: any) => {
-        stockNormMap.set(normalize(sa.name), sa);
+        const key = getCanonicalDealerKey(sa.name);
+        if (!key.startsWith("discard-")) {
+          stockNormMap.set(key, sa);
+        }
       });
 
       let repairs = 0;
 
       // Ensure every Jazz DO exists in Stock Accounts with matching line in notes
       for (const jp of jazzProfiles) {
-        const cleanName = cleanDealerName(jp.do_name);
-        const normJp = normalize(jp.do_name);
-        const existingStock = stockNormMap.get(normJp);
+        const key = getCanonicalDealerKey(jp.do_name);
+        if (key.startsWith("discard-")) continue;
+
+        const info = resolveCanonicalDealerInfo(jp.do_name, jp.type);
+        const existingStock = stockNormMap.get(key);
 
         if (!existingStock) {
-          const isOffice = cleanName.toLowerCase().includes("office");
-          const slugVal = `dealer-${cleanName.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}-${Date.now().toString(36)}`;
+          const slugVal = `dealer-${info.name.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}-${Date.now().toString(36)}`;
           await ledgerApiClient.catalogs.createStockAccount({
             slug: slugVal,
-            name: cleanName,
-            type: isOffice ? "OFFICE" : "DO",
+            name: info.name,
+            type: info.type,
             is_active: jp.is_active ?? true,
-            sort_order: jp.sort_order ?? 99,
+            sort_order: info.sortOrder ?? jp.sort_order ?? 99,
             notes: jp.do_line ? `Line: ${jp.do_line}` : null
           });
           repairs++;
-        } else if (jp.do_line && !existingStock.notes?.includes(jp.do_line)) {
-          await ledgerApiClient.catalogs.updateStockAccount(existingStock.id, {
-            notes: `Line: ${jp.do_line}`
-          });
-          repairs++;
+        } else {
+          const needsNameUpdate = existingStock.name !== info.name;
+          const needsTypeUpdate = existingStock.type !== info.type;
+          const needsLineUpdate = jp.do_line && !existingStock.notes?.includes(jp.do_line);
+
+          if (needsNameUpdate || needsTypeUpdate || needsLineUpdate) {
+            await ledgerApiClient.catalogs.updateStockAccount(existingStock.id, {
+              name: info.name,
+              type: info.type,
+              sort_order: info.sortOrder ?? existingStock.sort_order,
+              notes: jp.do_line ? `Line: ${jp.do_line}` : existingStock.notes
+            });
+            repairs++;
+          }
         }
       }
 
