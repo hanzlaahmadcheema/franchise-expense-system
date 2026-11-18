@@ -224,6 +224,14 @@ export const ReopenDaySchema = z
   })
   .strict();
 
+export const SwitchDaySchema = z
+  .object({
+    fromDayNo: z.number().int().min(1).max(32).nullable().optional(),
+    toDayNo: z.number().int().min(1).max(32),
+    notes: z.string().nullable().optional()
+  })
+  .strict();
+
 export const ReopenPeriodSchema = z
   .object({
     reason: z.string().min(5, "Reopen reason must be at least 5 characters")

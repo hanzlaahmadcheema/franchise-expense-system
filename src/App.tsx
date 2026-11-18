@@ -91,7 +91,7 @@ import { MASTER_REFRESH_ACCESS } from "./shared/services/masterRefreshPermission
 import type { MasterRecalculationAdapter, MasterRefreshModalState, UniversalDaySnapshot } from "./shared/types/dayControl.types";
 import { defaultLedgerReadModeConfig, type LedgerReadModeConfig } from "./shared/ledger/ledgerTypes";
 import { resolveLedgerUiReadDecision } from "./shared/ledger/ledgerReadMode";
-import { closeOperationalDayUnified, reopenOperationalDayUnified, subscribeDayStatus } from "./services/api/dayLifecycleService";
+import { closeOperationalDayUnified, reopenOperationalDayUnified, switchOperationalDayUnified, subscribeDayStatus } from "./services/api/dayLifecycleService";
 import {
   isPostgreSqlPeriod,
   getAccountingPeriodWithDays,
@@ -4507,13 +4507,70 @@ function App() {
     }
   }
 
-  function handleSelectDayProtected(nextDay: number) {
-    if (hasPendingDayChanges && nextDay !== selectedDay && !confirmLeavePendingChanges()) {
-      setStatus("Stayed on the current day because changes are still pending save.");
-      return;
-    }
-    setSelectedDay(nextDay);
-  }
+  const daySwitchInFlightRef = useRef(false);
+  const [isDaySwitching, setIsDaySwitching] = useState(false);
+
+  const handleSelectDayProtected = useCallback(
+    async (nextDay: number) => {
+      if (nextDay === selectedDay) return;
+      if (daySwitchInFlightRef.current) return;
+
+      if (hasPendingDayChanges && !confirmLeavePendingChanges()) {
+        setStatus("Stayed on the current day because changes are still pending save.");
+        return;
+      }
+
+      // Calendar Rule: Close previous day and open new day on date switching, automatically
+      if (isPostgreSqlPeriod(monthId) && roleCan(role, "daily") && !isClosed) {
+        daySwitchInFlightRef.current = true;
+        setIsDaySwitching(true);
+
+        try {
+          const result = await switchOperationalDayUnified({
+            monthId,
+            fromDayNo: selectedDay,
+            toDayNo: nextDay,
+            flushDraft: hasPendingDayChanges && expenseManualSaveRef.current
+              ? () => expenseManualSaveRef.current!()
+              : undefined
+          });
+
+          if (result.closedDay) {
+            const closedNo = result.closedDay.day_no ?? (result.closedDay as any).dayNo;
+            closedExpenseDayKeysRef.current.add(`${monthId}/${closedNo}`);
+            setDays((currentDays) => {
+              const d = currentDays.find((entry) => entry.dayNo === closedNo) ?? emptyDay(closedNo);
+              return replaceDay(currentDays, { ...d, status: "closed" });
+            });
+          }
+
+          if (result.openedDay) {
+            const openedNo = result.openedDay.day_no ?? (result.openedDay as any).dayNo;
+            closedExpenseDayKeysRef.current.delete(`${monthId}/${openedNo}`);
+            setDays((currentDays) => {
+              const d = currentDays.find((entry) => entry.dayNo === openedNo) ?? emptyDay(openedNo);
+              return replaceDay(currentDays, { ...d, status: (result.openedDay!.status as any) ?? "open" });
+            });
+          }
+
+          setSelectedDay(nextDay);
+          if (result.message) {
+            setStatus(result.message);
+          }
+        } catch (err) {
+          console.warn("[Auto-Day-Switch] Fallback to direct navigation:", err);
+          setSelectedDay(nextDay);
+          setStatus(err instanceof Error ? err.message : `Switched to Day ${nextDay}.`);
+        } finally {
+          daySwitchInFlightRef.current = false;
+          setIsDaySwitching(false);
+        }
+      } else {
+        setSelectedDay(nextDay);
+      }
+    },
+    [confirmLeavePendingChanges, hasPendingDayChanges, isClosed, monthId, role, selectedDay]
+  );
 
   return (
     <SelectedDateProvider
@@ -4521,7 +4578,8 @@ function App() {
         monthId,
         selectedDay,
         selectedDateKey: selectedDay === 32 ? `${monthId}-FINAL` : `${monthId}-${String(selectedDay).padStart(2, "0")}`,
-        setSelectedDay
+        setSelectedDay: (dayNo) => void handleSelectDayProtected(dayNo),
+        isSwitchingDay: isDaySwitching
       }}
     >
     <SidebarDayControlsProvider>

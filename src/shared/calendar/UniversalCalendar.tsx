@@ -101,9 +101,16 @@ export function UniversalCalendar({
       <div className={`${mini ? "mb-3 rounded-lg p-2" : "mb-4 rounded-xl p-3"} border border-slate-800 bg-slate-950/40 ${disabled ? "opacity-60" : ""}`} data-module-calendar={moduleKey}>
         {/* Calendar Header with Expand Button */}
         <div className="mb-2 flex items-center justify-between border-b border-slate-800/60 pb-1.5">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <span className={`${mini ? "text-[10px]" : "text-xs"} font-semibold uppercase tracking-wider text-slate-300`}>
               {formatMonthLabel(monthId)}
+            </span>
+            <span
+              className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-400 border border-emerald-500/20"
+              title="Calendar Rule Active: Selecting a date automatically closes the previous day and opens the new day."
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              Auto-Switch
             </span>
           </div>
           <button
@@ -229,7 +236,7 @@ export function UniversalCalendar({
                           {formatMonthLong(monthId)} · Operational Calendar
                         </h3>
                         <p className="text-xs text-slate-400">
-                          Days of the week with Sunday at last. Click any day to switch records.
+                          Click any day to switch records. Automatically closes previous day and opens the selected day.
                         </p>
                       </div>
                     </div>

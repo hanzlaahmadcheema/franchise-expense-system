@@ -1677,6 +1677,203 @@ export async function reopenAccountingDay(
 }
 
 /**
+ * 10B. Switch Accounting Day (Admin / Owner).
+ * Calendar Rule: Automatically closes previously open day (if any) and opens newly selected day.
+ * Enforces single open day invariant (uq_single_open_day_per_period) within a single atomic database transaction.
+ */
+export async function switchAccountingDay(
+  franchiseId: string,
+  periodId: string,
+  toDayNo: number,
+  fromDayNo: number | null | undefined,
+  notes: string | null = null,
+  user: PeriodServiceUser
+) {
+  if (toDayNo < 1 || toDayNo > 32) {
+    throw new PeriodError("VALIDATION_ERROR", "Invalid target day number.", 400);
+  }
+
+  return db.transaction().execute(async (trx) => {
+    const period = await trx
+      .selectFrom("accounting_periods")
+      .select(["id", "period_key", "status"])
+      .where("franchise_id", "=", franchiseId)
+      .where("id", "=", periodId)
+      .executeTakeFirst();
+
+    if (!period) throw new PeriodNotFoundError(periodId);
+    if (period.status === "closed") throw new PeriodAlreadyClosedError(period.period_key);
+
+    // 1. Find currently open/reopened day(s) in this period
+    const activeDays = await trx
+      .selectFrom("accounting_days")
+      .selectAll()
+      .where("franchise_id", "=", franchiseId)
+      .where("period_id", "=", periodId)
+      .where("status", "in", ["open", "reopen"])
+      .forUpdate()
+      .execute();
+
+    let closedDayRecord: { id: string; dayNo: number; status: string } | null = null;
+
+    for (const activeDay of activeDays) {
+      if (activeDay.day_no === toDayNo) {
+        // Target day is already open/active!
+        continue;
+      }
+
+      // Verify calculations and invariants for closing day
+      await calculateDayInternal(trx, franchiseId, activeDay.id, null, {
+        triggerSource: "day_close",
+        allowClosedDays: true,
+        userId: user.id
+      });
+
+      await trx
+        .updateTable("accounting_days")
+        .set({
+          status: "closed",
+          closed_at: sql`clock_timestamp()`,
+          closed_by_user_id: user.id,
+          notes: notes ?? activeDay.notes,
+          updated_at: sql`clock_timestamp()`
+        })
+        .where("id", "=", activeDay.id)
+        .execute();
+
+      await recordAuditLog(trx, {
+        franchiseId,
+        userId: user.id,
+        userEmail: user.email,
+        action: "UPDATE",
+        entityType: "accounting_day",
+        entityId: activeDay.id,
+        afterState: {
+          periodId,
+          dayNo: activeDay.day_no,
+          status: "closed",
+          closedAt: new Date().toISOString(),
+          closedBy: user.email,
+          reason: "Auto-closed on calendar date switching"
+        }
+      });
+
+      closedDayRecord = {
+        id: activeDay.id,
+        dayNo: activeDay.day_no,
+        status: "closed"
+      };
+    }
+
+    // 2. If target day is Day 32 (FINAL Month-End), return immediately
+    if (toDayNo >= 32) {
+      const day32 = await trx
+        .selectFrom("accounting_days")
+        .selectAll()
+        .where("franchise_id", "=", franchiseId)
+        .where("period_id", "=", periodId)
+        .where("day_no", "=", toDayNo)
+        .executeTakeFirst();
+
+      return {
+        success: true,
+        periodId,
+        fromDayNo: closedDayRecord?.dayNo ?? fromDayNo,
+        toDayNo,
+        closedDay: closedDayRecord,
+        openedDay: day32 ? { id: day32.id, dayNo: day32.day_no, status: day32.status } : null,
+        message: closedDayRecord
+          ? `Day ${closedDayRecord.dayNo} closed. Day 32 (FINAL) selected.`
+          : `Day 32 (FINAL) selected.`
+      };
+    }
+
+    // 3. Fetch and activate target Day N
+    const targetDay = await trx
+      .selectFrom("accounting_days")
+      .selectAll()
+      .where("franchise_id", "=", franchiseId)
+      .where("period_id", "=", periodId)
+      .where("day_no", "=", toDayNo)
+      .forUpdate()
+      .executeTakeFirst();
+
+    if (!targetDay) throw new DayNotFoundError(toDayNo, periodId);
+
+    if (targetDay.status === "open" || targetDay.status === "reopen") {
+      return {
+        success: true,
+        periodId,
+        fromDayNo: closedDayRecord?.dayNo ?? fromDayNo,
+        toDayNo,
+        closedDay: closedDayRecord,
+        openedDay: {
+          id: targetDay.id,
+          dayNo: targetDay.day_no,
+          status: targetDay.status
+        },
+        message: `Day ${toDayNo} is active.`
+      };
+    }
+
+    // Baseline projections calculation for target day
+    await calculateDayInternal(trx, franchiseId, targetDay.id, null, {
+      triggerSource: "day_open",
+      allowClosedDays: true,
+      userId: user.id
+    });
+
+    // Update target day status to "open"
+    await trx
+      .updateTable("accounting_days")
+      .set({
+        status: "open",
+        closed_at: null,
+        closed_by_user_id: null,
+        reopened_at: sql`clock_timestamp()`,
+        reopened_by_user_id: user.id,
+        notes: notes ?? targetDay.notes,
+        updated_at: sql`clock_timestamp()`
+      })
+      .where("id", "=", targetDay.id)
+      .execute();
+
+    await recordAuditLog(trx, {
+      franchiseId,
+      userId: user.id,
+      userEmail: user.email,
+      action: "UPDATE",
+      entityType: "accounting_day",
+      entityId: targetDay.id,
+      afterState: {
+        periodId,
+        dayNo: toDayNo,
+        status: "open",
+        openedAt: new Date().toISOString(),
+        openedBy: user.email,
+        reason: "Auto-opened on calendar date switching"
+      }
+    });
+
+    return {
+      success: true,
+      periodId,
+      fromDayNo: closedDayRecord?.dayNo ?? fromDayNo,
+      toDayNo,
+      closedDay: closedDayRecord,
+      openedDay: {
+        id: targetDay.id,
+        dayNo: targetDay.day_no,
+        status: "open"
+      },
+      message: closedDayRecord
+        ? `Day ${closedDayRecord.dayNo} closed and Day ${toDayNo} opened automatically.`
+        : `Day ${toDayNo} opened automatically.`
+    };
+  });
+}
+
+/**
  * 11B. Verify Month-End FINAL Settlement (Owner Only).
  * Transitions FINAL status from PENDING_SETTLEMENT to VERIFIED.
  * Requires:

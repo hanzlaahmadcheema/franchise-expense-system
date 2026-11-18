@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   closeOperationalDayUnified,
   reopenOperationalDayUnified,
+  switchOperationalDayUnified,
   subscribeDayStatus,
   type UnifiedDayCloseInput
 } from "./dayLifecycleService";
@@ -198,5 +199,111 @@ describe("dayLifecycleService", () => {
     });
 
     unsubscribe();
+  });
+
+  describe("switchOperationalDayUnified (Calendar Rule: Auto-switch days)", () => {
+    it("automatically closes previous day and opens newly selected day", async () => {
+      const closedDay: AccountingDayRecord = {
+        ...dummyDay,
+        day_no: 1,
+        status: "closed"
+      };
+      const openedDay: AccountingDayRecord = {
+        ...dummyDay,
+        id: "day-2-id",
+        day_no: 2,
+        status: "open",
+        closed_at: null
+      };
+
+      const switchSpy = vi.spyOn(ledgerApiClient.periods, "switchDay").mockResolvedValue({
+        success: true,
+        periodId,
+        fromDayNo: 1,
+        toDayNo: 2,
+        closedDay,
+        openedDay,
+        message: "Day 1 closed and Day 2 opened automatically."
+      });
+
+      const events: any[] = [];
+      const unsubscribe = subscribeDayStatus((event) => {
+        events.push(event);
+      });
+
+      const result = await switchOperationalDayUnified({
+        monthId,
+        fromDayNo: 1,
+        toDayNo: 2
+      });
+
+      expect(switchSpy).toHaveBeenCalledWith(periodId, {
+        fromDayNo: 1,
+        toDayNo: 2,
+        notes: null
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.closedDay?.day_no).toBe(1);
+      expect(result.openedDay?.day_no).toBe(2);
+      expect(result.openedDay?.status).toBe("open");
+
+      // Verify both events were published to sync mounted modules
+      expect(events).toEqual([
+        {
+          monthId,
+          dayNo: 1,
+          status: "closed",
+          day: closedDay
+        },
+        {
+          monthId,
+          dayNo: 2,
+          status: "open",
+          day: openedDay
+        }
+      ]);
+
+      unsubscribe();
+    });
+
+    it("flushes pending draft before switching day and aborts if flush fails", async () => {
+      const switchSpy = vi.spyOn(ledgerApiClient.periods, "switchDay");
+      const flushDraft = vi.fn().mockResolvedValue(false);
+
+      await expect(
+        switchOperationalDayUnified({
+          monthId,
+          fromDayNo: 1,
+          toDayNo: 2,
+          flushDraft
+        })
+      ).rejects.toThrow("Cannot switch day: pending changes could not be saved.");
+
+      expect(flushDraft).toHaveBeenCalledTimes(1);
+      expect(switchSpy).not.toHaveBeenCalled();
+    });
+
+    it("prevents duplicate concurrent switch requests to the same day", async () => {
+      let resolveSwitch: (val: any) => void;
+      const switchPromise = new Promise((resolve) => {
+        resolveSwitch = resolve;
+      });
+      vi.spyOn(ledgerApiClient.periods, "switchDay").mockImplementation(() => switchPromise as any);
+
+      const call1 = switchOperationalDayUnified({ monthId, fromDayNo: 1, toDayNo: 3 });
+      const call2 = switchOperationalDayUnified({ monthId, fromDayNo: 1, toDayNo: 3 });
+
+      await expect(call2).rejects.toThrow("Day switch to 3 is already in progress.");
+
+      resolveSwitch!({
+        success: true,
+        periodId,
+        fromDayNo: 1,
+        toDayNo: 3,
+        message: "Done"
+      });
+      await call1;
+    });
   });
 });

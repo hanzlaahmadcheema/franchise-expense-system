@@ -24,6 +24,7 @@ import {
   CloseDaySchema,
   OpenDaySchema,
   ReopenDaySchema,
+  SwitchDaySchema,
   ReopenPeriodSchema,
   ClosePeriodSchema,
   RolloverSchema,
@@ -43,6 +44,7 @@ import {
   closeAccountingDay,
   openNextAccountingDay,
   reopenAccountingDay,
+  switchAccountingDay,
   verifyPeriodFinalSettlement,
   closeAccountingPeriod,
   reopenAccountingPeriod,
@@ -409,6 +411,35 @@ periodRouter.post(
       res.status(200).json(result);
     } catch (err) {
       handlePeriodError(res, "POST /api/v1/periods/:periodId/days/:dayNo/reopen", err);
+    }
+  }
+);
+
+/**
+ * POST /api/v1/periods/:periodId/switch-day
+ * Admin/Owner: Calendar Rule - Automatically closes previously open day (if any) and opens newly selected day.
+ */
+periodRouter.post(
+  "/:periodId/switch-day",
+  requireRole("admin"),
+  async (req: Request, res: Response) => {
+    try {
+      const franchiseId = getFranchiseId(req);
+      const periodId = UuidParam.parse(req.params.periodId);
+      const user = getServiceUser(req);
+      const parsedBody = SwitchDaySchema.parse(req.body ?? {});
+
+      const result = await switchAccountingDay(
+        franchiseId,
+        periodId,
+        parsedBody.toDayNo,
+        parsedBody.fromDayNo,
+        parsedBody.notes ?? null,
+        user
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      handlePeriodError(res, "POST /api/v1/periods/:periodId/switch-day", err);
     }
   }
 );

@@ -791,6 +791,19 @@ export const ledgerApiClient = {
           body: JSON.stringify({ reason })
         }
       ),
+    switchDay: (periodId: string, payload: { fromDayNo?: number | null; toDayNo: number; notes?: string | null }) =>
+      apiRequest<{
+        success: boolean;
+        periodId: string;
+        fromDayNo?: number;
+        toDayNo: number;
+        closedDay?: AccountingDayRecord | null;
+        openedDay?: AccountingDayRecord | null;
+        message: string;
+      }>(`/api/v1/periods/${periodId}/switch-day`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
     verifyFinalSettlement: (periodId: string, payload?: { allowOutstanding?: boolean; notes?: string }) =>
       apiRequest<{ verified: boolean; periodId: string; status: string; verifiedAt: string }>(
         `/api/v1/periods/${periodId}/final/verify`,

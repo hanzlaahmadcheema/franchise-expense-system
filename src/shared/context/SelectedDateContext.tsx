@@ -5,6 +5,7 @@ export type SelectedDateContextValue = {
   selectedDay: number;
   selectedDateKey: string;
   setSelectedDay: (dayNo: number) => void;
+  isSwitchingDay?: boolean;
 };
 
 const SelectedDateContext = createContext<SelectedDateContextValue | null>(null);
