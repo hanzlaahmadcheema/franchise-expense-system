@@ -175,7 +175,7 @@ export interface StockAccountsTable {
   franchise_id: string;
   slug: string;
   name: string;
-  type: "DO" | "CCR" | "DSO" | "STOCK" | "OTHER";
+  type: "DO" | "CCR" | "DSO" | "STOCK" | "OFFICE" | "OTHER";
   sort_order: number;
   is_active: boolean;
   notes: string | null;

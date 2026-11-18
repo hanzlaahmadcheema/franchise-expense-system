@@ -3,7 +3,7 @@ import type { StockProductDayProjection, StockAccountDayProjection } from "../..
 
 export type StockMonthStatus = "open" | "closed";
 export type StockDayStatus = CalendarDayStatus;
-export type StockAccountType = "DO" | "CCR" | "DSO" | "STOCK" | "OTHER";
+export type StockAccountType = "DO" | "CCR" | "DSO" | "STOCK" | "OFFICE" | "OTHER";
 
 export type StockProduct = {
   id: string;

@@ -20,6 +20,13 @@ import { ledgerApiClient } from "../services/api/ledgerApiClient";
 import type { UserRole } from "../types/ledger";
 import type { StockAccountType } from "../modules/stock/types/stock.types";
 
+export function cleanDealerName(s: string): string {
+  return s
+    .replace(/^(DO|DSO|CCR)\s+/i, "")
+    .replace(/\s+(CCR|DSO|DO)$/i, "")
+    .trim();
+}
+
 export interface UnifiedDealerRecord {
   id: string; // Master key (or jazzLoadDoProfile id / stockAccount id)
   name: string;
@@ -81,7 +88,7 @@ export function DealersManagementPage({
       const stockAccounts = stockRes.data || [];
 
       const normalize = (s: string) =>
-        s.toLowerCase().replace(/^do\s+/, "").replace(/[^a-z0-9]/g, "");
+        cleanDealerName(s).toLowerCase().replace(/[^a-z0-9]/g, "");
 
       const records: UnifiedDealerRecord[] = [];
       const usedStockIds = new Set<string>();
@@ -102,10 +109,13 @@ export function DealersManagementPage({
           matchingStock?.notes?.replace(/^Line:\s*/i, "").trim() ||
           undefined;
 
+        const resolvedName = cleanDealerName(jp.do_name);
+        const resolvedType = (matchingStock?.type as StockAccountType) || (resolvedName.toLowerCase().includes("office") ? "OFFICE" : "DO");
+
         records.push({
           id: jp.id,
-          name: jp.do_name,
-          type: (matchingStock?.type as StockAccountType) || "DO",
+          name: resolvedName,
+          type: resolvedType,
           line: resolvedLine,
           jazzDoId: jp.id,
           stockAccountId: matchingStock?.id,
@@ -115,14 +125,19 @@ export function DealersManagementPage({
         });
       });
 
-      // 2. Process Remaining Stock Accounts (CCRs, non-DO counters, etc.)
+      // 2. Process Remaining Stock Accounts (CCRs, non-DO counters, DSOs, Stock)
       stockAccounts.forEach((sa: any, idx: number) => {
         if (!usedStockIds.has(sa.id)) {
-          const resolvedLine = sa.notes?.replace(/^Line:\s*/i, "").trim() || undefined;
+          const resolvedName = cleanDealerName(sa.name);
+          const resolvedType = (sa.type as StockAccountType) || "CCR";
+          // Line is specifically for Jazz Load. Non-Jazz stock entities (DSO, Stock) do not have lines.
+          const isLoadBearing = resolvedType === "DO" || resolvedType === "OFFICE" || resolvedType === "CCR";
+          const resolvedLine = isLoadBearing ? (sa.notes?.replace(/^Line:\s*/i, "").trim() || undefined) : undefined;
+
           records.push({
             id: sa.id,
-            name: sa.name,
-            type: (sa.type as StockAccountType) || "CCR",
+            name: resolvedName,
+            type: resolvedType,
             line: resolvedLine,
             stockAccountId: sa.id,
             active: sa.is_active,
@@ -177,17 +192,18 @@ export function DealersManagementPage({
   // Handler: Register New Dealer across both modules
   const handleRegisterDealer = async () => {
     if (!canManage || !newName.trim()) return;
-    const name = newName.trim();
+    const name = cleanDealerName(newName.trim());
     const type = newType;
-    const line = newLine.trim() || undefined;
+    const isLoadBearing = type === "DO" || type === "OFFICE" || type === "CCR";
+    const line = isLoadBearing ? (newLine.trim() || undefined) : undefined;
     const nextOrder = dealers.length + 1;
 
     try {
       let createdJazzId: string | undefined;
       let createdStockId: string | undefined;
 
-      // Create in Jazz Load DO Profiles if type is DO or has a phone line
-      if (type === "DO" || line) {
+      // Create in Jazz Load DO Profiles if load-bearing (DO / OFFICE / CCR with line)
+      if (type === "DO" || type === "OFFICE" || line) {
         const jazzRes = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
           do_name: name,
           do_line: line ?? null,
@@ -233,9 +249,10 @@ export function DealersManagementPage({
   // Handler: Inline Edit Save
   const handleSaveEdit = async (dealer: UnifiedDealerRecord) => {
     if (!canManage || !editName.trim()) return;
-    const updatedName = editName.trim();
+    const updatedName = cleanDealerName(editName.trim());
     const updatedType = editType;
-    const updatedLine = editLine.trim() || undefined;
+    const isLoadBearing = updatedType === "DO" || updatedType === "OFFICE" || updatedType === "CCR";
+    const updatedLine = isLoadBearing ? (editLine.trim() || undefined) : undefined;
 
     try {
       // Update Jazz Load DO Profile if exists
@@ -244,8 +261,8 @@ export function DealersManagementPage({
           do_name: updatedName,
           do_line: updatedLine ?? null
         });
-      } else if (updatedType === "DO" || updatedLine) {
-        // Create jazz load profile if converted to DO
+      } else if (updatedType === "DO" || updatedType === "OFFICE" || updatedLine) {
+        // Create jazz load profile if converted to DO / Office
         const jRes = await ledgerApiClient.catalogs.createJazzLoadDoProfile({
           do_name: updatedName,
           do_line: updatedLine ?? null,
@@ -290,11 +307,13 @@ export function DealersManagementPage({
   const handleReassignLine = async (dealer: UnifiedDealerRecord) => {
     if (!canManage) return;
     const currentLine = dealer.line || "Unassigned";
-    const newOfficer = window.prompt(
+    let newOfficer = window.prompt(
       `Reassign Line ${currentLine} (${dealer.name}) to New Officer Name:`,
       ""
     )?.trim();
 
+    if (!newOfficer) return;
+    newOfficer = cleanDealerName(newOfficer);
     if (!newOfficer || newOfficer === dealer.name) return;
 
     try {
@@ -445,7 +464,7 @@ export function DealersManagementPage({
       const stockAccounts = stockRes.data || [];
 
       const normalize = (s: string) =>
-        s.toLowerCase().replace(/^do\s+/, "").replace(/[^a-z0-9]/g, "");
+        cleanDealerName(s).toLowerCase().replace(/[^a-z0-9]/g, "");
 
       const stockNormMap = new Map<string, any>();
       stockAccounts.forEach((sa: any) => {
@@ -456,15 +475,17 @@ export function DealersManagementPage({
 
       // Ensure every Jazz DO exists in Stock Accounts with matching line in notes
       for (const jp of jazzProfiles) {
+        const cleanName = cleanDealerName(jp.do_name);
         const normJp = normalize(jp.do_name);
         const existingStock = stockNormMap.get(normJp);
 
         if (!existingStock) {
-          const slugVal = `dealer-${jp.do_name.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}-${Date.now().toString(36)}`;
+          const isOffice = cleanName.toLowerCase().includes("office");
+          const slugVal = `dealer-${cleanName.toLowerCase().replace(/[^a-z0-9_-]/g, "-")}-${Date.now().toString(36)}`;
           await ledgerApiClient.catalogs.createStockAccount({
             slug: slugVal,
-            name: jp.do_name,
-            type: "DO",
+            name: cleanName,
+            type: isOffice ? "OFFICE" : "DO",
             is_active: jp.is_active ?? true,
             sort_order: jp.sort_order ?? 99,
             notes: jp.do_line ? `Line: ${jp.do_line}` : null
@@ -631,25 +652,34 @@ export function DealersManagementPage({
                 Account Type / Role
                 <select
                   value={newType}
-                  onChange={(e) => setNewType(e.target.value as StockAccountType)}
+                  onChange={(e) => {
+                    const t = e.target.value as StockAccountType;
+                    setNewType(t);
+                    if (t === "DSO" || t === "STOCK") setNewLine("");
+                  }}
                   className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-sky-500 focus:outline-none"
                 >
                   <option value="DO">DO (Distribution Officer)</option>
                   <option value="CCR">CCR (Customer Care Rep)</option>
-                  <option value="DSO">DSO (Direct Sales Officer)</option>
-                  <option value="STOCK">Stock Counter Account</option>
+                  <option value="OFFICE">Office Line / Account</option>
+                  <option value="DSO">DSO (Direct Sales - Stock Only)</option>
+                  <option value="STOCK">Stock Counter (Stock Only)</option>
                   <option value="OTHER">Other Dealer Party</option>
                 </select>
               </label>
 
               <label className="text-xs font-medium text-slate-300">
-                Assigned Load Line (MSISDN)
+                <span>Assigned Load Line (MSISDN)</span>
+                <span className="text-[10px] text-slate-500 font-normal ml-1">
+                  {newType === "DSO" || newType === "STOCK" ? "(Stock only - No line)" : "(Jazz Load only)"}
+                </span>
                 <input
                   type="text"
                   value={newLine}
+                  disabled={newType === "DSO" || newType === "STOCK"}
                   onChange={(e) => setNewLine(e.target.value)}
-                  placeholder="e.g. 03001234567"
-                  className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                  placeholder={newType === "DSO" || newType === "STOCK" ? "No line for stock-only" : "e.g. 03001234567"}
+                  className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 />
               </label>
 
@@ -696,6 +726,7 @@ export function DealersManagementPage({
               <option value="CCR">CCR Only</option>
               <option value="DSO">DSO Only</option>
               <option value="STOCK">Stock Counters</option>
+              <option value="OFFICE">Office Line Only</option>
               <option value="OTHER">Other Parties</option>
             </select>
 
@@ -792,13 +823,20 @@ export function DealersManagementPage({
                       {isEditing ? (
                         <select
                           value={editType}
-                          onChange={(e) => setEditType(e.target.value as StockAccountType)}
+                          onChange={(e) => {
+                            const newType = e.target.value as StockAccountType;
+                            setEditType(newType);
+                            if (newType === "DSO" || newType === "STOCK") {
+                              setEditLine("");
+                            }
+                          }}
                           className="rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
                         >
                           <option value="DO">DO</option>
                           <option value="CCR">CCR</option>
                           <option value="DSO">DSO</option>
                           <option value="STOCK">STOCK</option>
+                          <option value="OFFICE">OFFICE</option>
                           <option value="OTHER">OTHER</option>
                         </select>
                       ) : (
@@ -812,6 +850,8 @@ export function DealersManagementPage({
                               ? "bg-indigo-500/10 text-indigo-400 border-indigo-500/20"
                               : dealer.type === "STOCK"
                               ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                              : dealer.type === "OFFICE"
+                              ? "bg-purple-500/10 text-purple-400 border-purple-500/20"
                               : "bg-slate-800 text-slate-300 border-slate-700"
                           }`}
                         >
@@ -827,8 +867,9 @@ export function DealersManagementPage({
                           type="text"
                           value={editLine}
                           onChange={(e) => setEditLine(e.target.value)}
-                          placeholder="e.g. 03001234567"
-                          className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500"
+                          disabled={editType === "DSO" || editType === "STOCK"}
+                          placeholder={editType === "DSO" || editType === "STOCK" ? "No line (Stock only)" : "e.g. 03001234567"}
+                          className="w-full rounded border border-sky-500/50 bg-slate-900 px-2 py-1 text-xs font-mono text-white focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:opacity-50 disabled:bg-slate-950"
                         />
                       ) : (
                         <span className="font-mono text-slate-300">

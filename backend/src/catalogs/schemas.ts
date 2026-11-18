@@ -175,7 +175,7 @@ export type StockProductUpdate = z.infer<typeof StockProductUpdateSchema>;
 // ---------------------------------------------------------------------------
 // Stock Accounts
 // ---------------------------------------------------------------------------
-const StockAccountTypeEnum = z.enum(["DO", "CCR", "DSO", "STOCK", "OTHER"]);
+const StockAccountTypeEnum = z.enum(["DO", "CCR", "DSO", "STOCK", "OFFICE", "OTHER"]);
 
 export const StockAccountCreateSchema = z.object({
   slug: SlugField,

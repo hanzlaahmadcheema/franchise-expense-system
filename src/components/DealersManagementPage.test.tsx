@@ -88,8 +88,8 @@ describe("DealersManagementPage Component", () => {
     expect(screen.getByText(/Central Dealers & DO Directory/i)).toBeTruthy();
 
     await waitFor(() => {
-      expect(screen.getByText("DO Tariq")).toBeTruthy();
-      expect(screen.getByText("DO Bilal")).toBeTruthy();
+      expect(screen.getByText("Tariq")).toBeTruthy();
+      expect(screen.getByText("Bilal")).toBeTruthy();
       expect(screen.getByText("Store CCR 1")).toBeTruthy();
     });
 
@@ -103,14 +103,14 @@ describe("DealersManagementPage Component", () => {
     render(<DealersManagementPage role="owner" />);
 
     await waitFor(() => {
-      expect(screen.getByText("DO Tariq")).toBeTruthy();
+      expect(screen.getByText("Tariq")).toBeTruthy();
     });
 
     const searchInput = screen.getByPlaceholderText(/Search by dealer name or line/i);
     fireEvent.change(searchInput, { target: { value: "Bilal" } });
 
-    expect(screen.queryByText("DO Tariq")).toBeNull();
-    expect(screen.getByText("DO Bilal")).toBeTruthy();
+    expect(screen.queryByText("Tariq")).toBeNull();
+    expect(screen.getByText("Bilal")).toBeTruthy();
   });
 
   it("registers a new dealer across both modules", async () => {
@@ -125,7 +125,7 @@ describe("DealersManagementPage Component", () => {
     render(<DealersManagementPage role="owner" onStatusChange={onStatus} />);
 
     await waitFor(() => {
-      expect(screen.getByText("DO Tariq")).toBeTruthy();
+      expect(screen.getByText("Tariq")).toBeTruthy();
     });
 
     const nameInput = screen.getByPlaceholderText(/e\.g\. Naveed Bangla/i);
@@ -139,20 +139,20 @@ describe("DealersManagementPage Component", () => {
     await waitFor(() => {
       expect(ledgerApiClient.catalogs.createJazzLoadDoProfile).toHaveBeenCalledWith(
         expect.objectContaining({
-          do_name: "DO Usman",
+          do_name: "Usman",
           do_line: "03009998877"
         })
       );
       expect(ledgerApiClient.catalogs.createStockAccount).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: "DO Usman",
+          name: "Usman",
           type: "DO",
           notes: "Line: 03009998877"
         })
       );
     });
 
-    expect(onStatus).toHaveBeenCalledWith(expect.stringContaining("DO Usman"));
+    expect(onStatus).toHaveBeenCalledWith(expect.stringContaining("Usman"));
   });
 
   it("reconciles and cross-syncs missing profiles across modules", async () => {
@@ -179,7 +179,7 @@ describe("DealersManagementPage Component", () => {
     render(<DealersManagementPage role="owner" onStatusChange={onStatus} />);
 
     await waitFor(() => {
-      expect(screen.getByText("DO Tariq")).toBeTruthy();
+      expect(screen.getByText("Tariq")).toBeTruthy();
     });
 
     const reconcileBtn = screen.getByRole("button", { name: /Cross-Module Reconcile/i });
@@ -188,7 +188,7 @@ describe("DealersManagementPage Component", () => {
     await waitFor(() => {
       expect(ledgerApiClient.catalogs.createStockAccount).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: "DO Extra",
+          name: "Extra",
           type: "DO",
           notes: "Line: 03005554433"
         })
